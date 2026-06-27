@@ -1,0 +1,283 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background: radial-gradient(ellipse at 50% 0%, #1e1b4b 0%, #05060a 70%);
+  background-attachment: fixed;
+  font-family: 'Inter', sans-serif;
+}
+
+@keyframes continuousStrum {
+  0%, 5% { transform: scale(0); opacity: 0; }
+  10% { transform: scale(1.3); opacity: 1; filter: brightness(1.4); }
+  15%, 75% { transform: scale(1); opacity: 1; filter: brightness(1); }
+  80%, 100% { transform: scale(0); opacity: 0; }
+}
+
+.strum-note {
+  animation: continuousStrum 4.5s infinite both cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+@keyframes keyPressWhite {
+  0%, 5% { fill: #c7d2fe; }
+  10% { fill: #fbbf24; filter: drop-shadow(0 0 6px rgba(251,191,36,0.8)); }
+  15%, 75% { fill: #818cf8; filter: none; }
+  80%, 100% { fill: #c7d2fe; filter: none; }
+}
+
+@keyframes keyPressBlack {
+  0%, 5% { fill: #4f46e5; }
+  10% { fill: #fbbf24; filter: drop-shadow(0 0 6px rgba(251,191,36,0.8)); }
+  15%, 75% { fill: #6366f1; filter: none; }
+  80%, 100% { fill: #4f46e5; filter: none; }
+}
+
+.play-key-white {
+  animation: keyPressWhite 4.5s infinite both cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.play-key-black {
+  animation: keyPressBlack 4.5s infinite both cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+@keyframes flowDash {
+  to { stroke-dashoffset: -16; }
+}
+
+.animate-flow {
+  stroke-dasharray: 4, 4;
+  animation: flowDash 0.8s linear infinite;
+}
+
+@keyframes bulbBlink {
+  0%, 100% { color: #818cf8; filter: drop-shadow(0 0 2px rgba(129,140,248,0.5)); transform: scale(1); }
+  50% { color: #fbbf24; filter: drop-shadow(0 0 10px rgba(251,191,36,1)); transform: scale(1.15); }
+}
+
+.animate-bulb {
+  animation: bulbBlink 2.5s infinite ease-in-out;
+}
+
+.chord-line { 
+  color: #fbbf24; 
+  font-weight: 700; 
+  font-family: monospace; 
+  transition: font-size 0.2s ease, transform 0.2s ease;
+}
+
+.num-line { 
+  color: #60a5fa; 
+  font-weight: 600; 
+  font-family: monospace; 
+  font-size: 0.9em; 
+  transition: font-size 0.2s ease;
+}
+
+.lyric-line { 
+  color: #f1f5f9; 
+  font-size: 1rem; 
+  transition: font-size 0.2s ease;
+}
+
+/* Custom Scrollbar for a cleaner look */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+.custom-scrollbar::-webkit-scrollbar { height: 6px; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(14, 165, 233, 0.3); border-radius: 10px; }
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(14, 165, 233, 0.5); }
+
+/* Ultra-Smooth Expand/Collapse Engine */
+.panel-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.6s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.5s ease;
+  opacity: 0;
+  visibility: hidden;
+}
+
+.panel-wrap.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+}
+
+.panel-inner {
+  overflow: hidden;
+}
+
+.chevron-icon {
+  transition: transform 0.5s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* Active Line Focus System */
+.line-block {
+  transition: opacity 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.3s ease;
+  border-radius: 12px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+
+.line-block.focused {
+  background: rgba(99, 102, 241, 0.08);
+  border-left: 3px solid #6366f1;
+  transform: scale(1.02);
+  box-shadow: 0 4px 20px -2px rgba(99, 102, 241, 0.15);
+}
+
+/* Focus mode parent utility */
+.focused-parent .line-block:not(.focused) {
+  opacity: 0.25;
+}
+
+/* Edge Visual Metronome Pulse */
+.edge-pulse {
+  box-shadow: inset 0 0 20px rgba(244, 63, 94, 0.4);
+  border-color: rgba(244, 63, 94, 0.5) !important;
+}
+
+/* Music Note Loading Animation */
+@keyframes music-float {
+  0%, 100% { transform: translateY(0) scale(1); filter: drop-shadow(0 0 8px rgba(99, 102, 241, 0.3)); }
+  50% { transform: translateY(-8px) scale(1.05); filter: drop-shadow(0 0 20px rgba(99, 102, 241, 0.8)); }
+}
+
+.animate-music-float {
+  animation: music-float 1.5s ease-in-out infinite;
+}
+
+/* Smooth Fade In */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* Blur Fade In (Modern Dashboard Reveal) */
+@keyframes blurFadeInUp {
+  0% { opacity: 0; transform: translateY(20px) scale(0.98); filter: blur(8px); }
+  100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+
+.animate-blur-fade {
+  animation: blurFadeInUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.delay-100 { animation-delay: 100ms; }
+.delay-200 { animation-delay: 200ms; }
+
+/* Shimmer Text Effect */
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+.text-shimmer {
+  background: linear-gradient(90deg, #818CF8 0%, #C084FC 25%, #38BDF8 50%, #818CF8 75%, #C084FC 100%);
+  background-size: 200% auto;
+  color: transparent;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: shimmer 4s linear infinite;
+}
+
+/* 5D Ripple Effect */
+@keyframes ripple-5d {
+  0% { 
+    transform: scale(0.6); 
+    opacity: 1; 
+    border-width: 4px;
+    box-shadow: 0 0 20px rgba(99, 102, 241, 0.8), inset 0 0 20px rgba(99, 102, 241, 0.8);
+  }
+  100% { 
+    transform: scale(2.5); 
+    opacity: 0; 
+    border-width: 1px;
+    box-shadow: 0 0 50px rgba(99, 102, 241, 0), inset 0 0 50px rgba(99, 102, 241, 0);
+  }
+}
+
+.ripple-ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border-style: solid; border-color: rgba(165, 180, 252, 0.6);
+  animation: ripple-5d 3s cubic-bezier(0.25, 0.8, 0.25, 1) infinite;
+}
+
+.ripple-ring:nth-child(2) { animation-delay: -1s; }
+.ripple-ring:nth-child(3) { animation-delay: -2s; }
+
+/* 5D Professional Buttons - Restored to Pure Indigo Theme */
+.btn-5d {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  backdrop-filter: blur(12px);
+}
+
+.btn-5d:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.04) 100%);
+  border-top: 1px solid rgba(255, 255, 255, 0.25);
+  box-shadow: 0 6px 12px -2px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  transform: translateY(-1px);
+}
+
+.btn-5d:active {
+  background: rgba(0, 0, 0, 0.2);
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
+  transform: translateY(1px) scale(0.96);
+}
+
+.btn-5d-primary {
+  background: linear-gradient(180deg, rgba(99, 102, 241, 0.3) 0%, rgba(79, 70, 229, 0.2) 100%);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-top: 1px solid rgba(129, 140, 248, 0.5);
+  box-shadow: 0 4px 10px rgba(79, 70, 229, 0.25), inset 0 1px 0 rgba(165, 180, 252, 0.25);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  backdrop-filter: blur(12px);
+}
+
+.btn-5d-primary:hover {
+  background: linear-gradient(180deg, rgba(99, 102, 241, 0.4) 0%, rgba(79, 70, 229, 0.3) 100%);
+  border-top: 1px solid rgba(165, 180, 252, 0.7);
+  box-shadow: 0 6px 15px rgba(79, 70, 229, 0.35), inset 0 1px 0 rgba(199, 210, 254, 0.4);
+  transform: translateY(-1px);
+}
+
+.btn-5d-primary:active {
+  background: rgba(55, 48, 163, 0.5);
+  border-top: 1px solid rgba(79, 70, 229, 0.3);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.5);
+  transform: translateY(1px) scale(0.96);
+}
+
+/* Arranger Action Button Hover Tooltips */
+.arranger-btn:hover .arranger-tooltip { opacity: 1; transform: translate(-50%, 0); visibility: visible; }
+
+.arranger-tooltip { 
+  transition: opacity 0.2s ease, transform 0.2s ease; 
+  transform: translate(-50%, 4px); 
+  visibility: hidden; 
+  opacity: 0; 
+}
+
+@keyframes popInNote {
+  0% { transform: scale(0); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.pop-in-note {
+  animation: popInNote 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+

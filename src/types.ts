@@ -4,6 +4,7 @@ export interface Song {
   Artist?: string;
   OriginalKey?: string;
   Version?: string;
+  BPM?: number;
 }
 
 export interface SongLine {

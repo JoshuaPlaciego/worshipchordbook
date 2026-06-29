@@ -12,6 +12,7 @@ import { SongEditModal } from './components/SongEditModal';
 import { MusicianModal } from './components/MusicianModal';
 import { SidebarCatalog } from './components/SidebarCatalog';
 import { DatabaseDiagnosticModal } from './components/DatabaseDiagnosticModal';
+import SetlistSelectorDialog from './components/SetlistSelectorDialog';
 import { FALLBACK_SONGS, FALLBACK_SONG_LINES } from './fallbackData';
 
 const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyXCeXackc_suAUMKCGJ6qIjMygAADB9zHmoJ5EqWU_OTmBxkgH9uHLP4nY427farS5/exec';
@@ -35,6 +36,27 @@ export const areBlocksIdentical = (b1: RoadmapBlock, b2: RoadmapBlock) => {
     if (arr1[i] !== arr2[i]) return false;
   }
   return true;
+};
+
+export const parsePresetDate = (presetName: string): { baseName: string; dateStr: string } => {
+  const regex = /\s*\((January|February|March|April|May|June|July|August|September|October|November|December)-\d{2}-\d{2}\)$/i;
+  const match = presetName.match(regex);
+  if (match) {
+    const matchedPart = match[0];
+    const dateStr = matchedPart.trim().slice(1, -1); // remove parentheses
+    const baseName = presetName.replace(matchedPart, '').trim();
+    return { baseName, dateStr };
+  }
+  return { baseName: presetName, dateStr: 'Other / No Date' };
+};
+
+export const getPresetInputDisplayName = (name: string): string => {
+  if (!name) return '';
+  if (name.startsWith('Set: ')) {
+    return name.slice(5);
+  }
+  const { baseName } = parsePresetDate(name);
+  return baseName;
 };
 
 export const areBlocksChordsIdentical = (
@@ -132,14 +154,7 @@ export default function App() {
     }
   });
 
-  const [setlists, setSetlists] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('setlists');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [setlists, setSetlists] = useState<string[]>([]);
 
   // Selected Song Sheets & Keys
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
@@ -169,6 +184,11 @@ export default function App() {
   const [originalRoadmap, setOriginalRoadmap] = useState<RoadmapBlock[]>([]);
   const [arrangerOpen, setArrangerOpen] = useState(false);
   const [editingBlockId, setEditingBlockId] = useState<string | null>(null);
+  const [isArrangementLocked, setIsArrangementLocked] = useState<boolean>(false);
+  const [roadmapBackup, setRoadmapBackup] = useState<RoadmapBlock[] | null>(null);
+  const [nameBackup, setNameBackup] = useState<string>('');
+  const [currentArrangementName, setCurrentArrangementName] = useState<string>('');
+  const [expandedArrangementDates, setExpandedArrangementDates] = useState<{ [dateStr: string]: boolean }>({});
   const [syncedSheetArrangements, setSyncedSheetArrangements] = useState<any[]>([]);
 
   // Drag and Drop ordering
@@ -176,6 +196,41 @@ export default function App() {
 
   // Collapsed Section States
   const [sectionCollapsedStates, setSectionCollapsedStates] = useState<{ [key: number]: boolean }>({});
+
+  // Collapsed Panel States (Family Chords, Performance Panel, Roadmap Flow)
+  const [isFamilyChordsCollapsed, setIsFamilyChordsCollapsed] = useState(true);
+  const [isPerformancePanelCollapsed, setIsPerformancePanelCollapsed] = useState(true);
+  const [isRoadmapFlowCollapsed, setIsRoadmapFlowCollapsed] = useState(true);
+
+  // Settings Modal pending state
+  const [pendingSong, setPendingSong] = useState<Song | null>(null);
+  const [pendingSetlistName, setPendingSetlistName] = useState<string>('');
+  const [modalDisplayMode, setModalDisplayMode] = useState<'both' | 'chords' | 'numbers'>('both');
+  const [modalShowLyrics, setModalShowLyrics] = useState(true);
+  const [modalSheetLayoutMode, setModalSheetLayoutMode] = useState<'sequence' | 'compact'>('sequence');
+
+  // Title marquee auto-scroll width detection
+  const containerRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLHeadingElement>(null);
+  const [isTitleOverflowing, setIsTitleOverflowing] = useState(false);
+
+  useEffect(() => {
+    if (currentSong) {
+      // Small timeout to allow React to paint the updated title before measuring scrollWidth
+      const timer = setTimeout(() => {
+        if (containerRef.current && textRef.current) {
+          const containerWidth = containerRef.current.clientWidth;
+          const textWidth = textRef.current.scrollWidth;
+          setIsTitleOverflowing(textWidth > containerWidth);
+        } else {
+          setIsTitleOverflowing(false);
+        }
+      }, 100);
+      return () => clearTimeout(timer);
+    } else {
+      setIsTitleOverflowing(false);
+    }
+  }, [currentSong]);
 
   // Credentials Unlock
   const [appUser, setAppUser] = useState('');
@@ -190,6 +245,310 @@ export default function App() {
   const [isMusicianModalOpen, setIsMusicianModalOpen] = useState(false);
   const [selectedChord, setSelectedChord] = useState('');
 
+  // Setlist Manager & Arrangements State
+  const [isSetlistManagerOpen, setIsSetlistManagerOpen] = useState(false);
+  const [activeSetlistFolder, setActiveSetlistFolder] = useState<string>('');
+  const [allSharedArrangements, setAllSharedArrangements] = useState<any[]>(() => {
+    try {
+      const raw = localStorage.getItem('cached_arrangements');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [allSharedSetlists, setAllSharedSetlists] = useState<any[]>(() => {
+    try {
+      const raw = localStorage.getItem('cached_setlists_meta');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          return parsed.map((row: any) => ({
+            PresetName: row.Set || row.PresetName || '',
+            RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}',
+          }));
+        }
+      }
+      return [];
+    } catch {
+      return [];
+    }
+  });
+
+  const toggleAutoscroll = () => {
+    if (!currentSong) return;
+    if (!isScrollingActive) {
+      const container = document.querySelector('.song-scroll-container');
+      const maxScroll = container 
+        ? container.scrollHeight - container.clientHeight 
+        : document.documentElement.scrollHeight - window.innerHeight;
+
+      if (maxScroll <= 5) {
+        showToast('Entire sheet fits in view. No scrolling needed!', 'info');
+        return;
+      }
+      setIsScrollingActive(true);
+      showToast('Autoscrolling Song Sheet!', 'success');
+    } else {
+      setIsScrollingActive(false);
+      showToast('Autoscroll Paused', 'info');
+    }
+  };
+
+  const refetchArrangements = async () => {
+    try {
+      const [presetsRes, setlistsRes] = await Promise.all([
+        fetch(`${SCRIPT_URL}?tab=Arrangements`),
+        fetch(`${SCRIPT_URL}?tab=Setlists`)
+      ]);
+      const [presetsText, setlistsText] = await Promise.all([
+        presetsRes.text(),
+        setlistsRes.text()
+      ]);
+      
+      const presetsList = JSON.parse(presetsText);
+      if (Array.isArray(presetsList)) {
+        localStorage.setItem('cached_arrangements', JSON.stringify(presetsList));
+        setAllSharedArrangements(presetsList);
+        if (currentSong) {
+          setSyncedSheetArrangements(
+            presetsList.filter((arr: any) => String(arr.SongID) === String(currentSong.SongID))
+          );
+        }
+      }
+
+      const setlistsList = JSON.parse(setlistsText);
+      if (Array.isArray(setlistsList)) {
+        const mappedSetlists = setlistsList.map((row: any) => ({
+          PresetName: row.Set || row.PresetName || '',
+          RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}',
+        }));
+        localStorage.setItem('cached_setlists_meta', JSON.stringify(mappedSetlists));
+        setAllSharedSetlists(mappedSetlists);
+      }
+    } catch (e) {
+      console.warn('Error refetching arrangements and setlists', e);
+    }
+  };
+
+  const saveSongToSetlist = async (setName: string) => {
+    if (!currentSong) return;
+    setIsLoading(true);
+    try {
+      const capturedSettings = {
+        key: currentKey,
+        roadmap: activeRoadmap,
+      };
+
+      const payloadArrangement = {
+        action: 'saveArrangement',
+        songId: String(currentSong.SongID),
+        name: `Set: ${setName}`,
+        roadmap: capturedSettings,
+      };
+
+      const resArr = await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify(payloadArrangement),
+      });
+      const resArrJson = await resArr.json();
+      if (resArrJson.status !== 'success') {
+        throw new Error(resArrJson.message || 'Failed to save arrangement');
+      }
+
+      const existingMeta = allSharedSetlists.find(
+        (sl) => sl.PresetName === setName
+      );
+      let songIds: string[] = [];
+      if (existingMeta) {
+        try {
+          const parsed = JSON.parse(existingMeta.RoadmapJSON);
+          songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
+        } catch {}
+      }
+
+      const sId = String(currentSong.SongID);
+      if (!songIds.includes(sId)) {
+        songIds.push(sId);
+      }
+
+      const payloadMeta = {
+        action: 'saveSetlist',
+        name: setName,
+        roadmap: { songIds, lastUpdated: Date.now() },
+      };
+
+      const resMeta = await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify(payloadMeta),
+      });
+      const resMetaJson = await resMeta.json();
+      if (resMetaJson.status !== 'success') {
+        throw new Error(resMetaJson.message || 'Failed to save setlist metadata');
+      }
+
+      showToast(`Song "${currentSong.Title}" added to "${setName}" with arrangement captured!`, 'success');
+      await refetchArrangements();
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || 'Failed to save to Setlist', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const removeSongFromSetlist = async (setName: string, songIdToRemove: string) => {
+    setIsLoading(true);
+    try {
+      const payloadDelete = {
+        action: 'deleteArrangement',
+        songId: songIdToRemove,
+        name: `Set: ${setName}`,
+      };
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify(payloadDelete),
+      });
+
+      const existingMeta = allSharedSetlists.find(
+        (sl) => sl.PresetName === setName
+      );
+      if (existingMeta) {
+        let songIds: string[] = [];
+        try {
+          const parsed = JSON.parse(existingMeta.RoadmapJSON);
+          songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
+        } catch {}
+
+        const updatedSongIds = songIds.filter((id) => String(id) !== String(songIdToRemove));
+
+        const payloadMeta = {
+          action: 'saveSetlist',
+          name: setName,
+          roadmap: { songIds: updatedSongIds, lastUpdated: Date.now() },
+        };
+
+        await fetch(SCRIPT_URL, {
+          method: 'POST',
+          body: JSON.stringify(payloadMeta),
+        });
+      }
+
+      showToast(`Removed from Setlist: ${setName}`, 'info');
+      await refetchArrangements();
+    } catch (err: any) {
+      console.error(err);
+      showToast('Error removing song from Setlist', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const saveSetlistOrder = async (setName: string, updatedSongIds: string[]) => {
+    setIsLoading(true);
+    try {
+      const payloadMeta = {
+        action: 'saveSetlist',
+        name: setName,
+        roadmap: { songIds: updatedSongIds, lastUpdated: Date.now() },
+      };
+
+      const resMeta = await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify(payloadMeta),
+      });
+      const resMetaJson = await resMeta.json();
+      if (resMetaJson.status !== 'success') {
+        throw new Error(resMetaJson.message || 'Failed to save setlist order');
+      }
+
+      showToast(`Setlist order updated for "${setName}"`, 'success');
+      await refetchArrangements();
+    } catch (err: any) {
+      console.error(err);
+      showToast('Error updating setlist order', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const createNewSetlistFolder = async (setName: string) => {
+    if (!setName.trim()) {
+      showToast('Please enter a setlist name', 'error');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const payloadMeta = {
+        action: 'saveSetlist',
+        name: setName.trim(),
+        roadmap: { songIds: [], lastUpdated: Date.now() },
+      };
+
+      const resMeta = await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify(payloadMeta),
+      });
+      const resMetaJson = await resMeta.json();
+      if (resMetaJson.status !== 'success') {
+        throw new Error(resMetaJson.message || 'Failed to create setlist folder');
+      }
+
+      showToast(`Setlist folder "${setName.trim()}" created!`, 'success');
+      await refetchArrangements();
+    } catch (err: any) {
+      console.error(err);
+      showToast('Error creating setlist folder', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const deleteSetlistFolder = async (setName: string) => {
+    setIsLoading(true);
+    try {
+      const payloadMeta = {
+        action: 'deleteSetlist',
+        name: setName,
+      };
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify(payloadMeta),
+      });
+
+      const setPresets = allSharedArrangements.filter(
+        (arr) => arr.PresetName === `Set: ${setName}`
+      );
+
+      for (const preset of setPresets) {
+        const payloadDelete = {
+          action: 'deleteArrangement',
+          songId: String(preset.SongID),
+          name: `Set: ${setName}`,
+        };
+        await fetch(SCRIPT_URL, {
+          method: 'POST',
+          body: JSON.stringify(payloadDelete),
+        });
+      }
+
+      showToast(`Setlist folder "${setName}" deleted!`, 'success');
+      await refetchArrangements();
+    } catch (err: any) {
+      console.error(err);
+      showToast('Error deleting setlist folder', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const selectSongFromSetlist = async (song: Song, setName: string) => {
+    setPendingSong(song);
+    setPendingSetlistName(setName);
+    setModalDisplayMode(displayMode);
+    setModalShowLyrics(showLyrics);
+    setModalSheetLayoutMode(sheetLayoutMode);
+  };
+
   // Scroll to Top visibility
   const [showScrollTop, setShowScrollTop] = useState(false);
 
@@ -203,7 +562,7 @@ export default function App() {
   const repInfo = getRoadmapRepetitionInfo(activeRoadmap);
 
   // Toast trigger
-  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+  const showToast = (message: string, type: 'success' | 'error' | 'info' | 'warning' = 'info') => {
     const id = Date.now() + Math.random();
     setToasts((prev) => [...prev, { id, message, type }]);
     setTimeout(() => {
@@ -213,6 +572,18 @@ export default function App() {
 
   // Fetch initial catalog
   const fetchCatalog = async () => {
+    // Initialize arrangements and setlists from cache immediately on fetch start
+    try {
+      const arrCache = localStorage.getItem('cached_arrangements');
+      if (arrCache) {
+        setAllSharedArrangements(JSON.parse(arrCache));
+      }
+      const setlistsCache = localStorage.getItem('cached_setlists_meta');
+      if (setlistsCache) {
+        setAllSharedSetlists(JSON.parse(setlistsCache));
+      }
+    } catch (err) {}
+
     setIsLoading(true);
     try {
       const controller = new AbortController();
@@ -298,9 +669,27 @@ export default function App() {
         try { arrList = JSON.parse(arrText); } catch { console.warn('Invalid Arrangements payload'); }
         if (!((arrList as any).error) && Array.isArray(arrList)) {
             localStorage.setItem('cached_arrangements', JSON.stringify(arrList));
+            setAllSharedArrangements(arrList);
             if (arrVersion) localStorage.setItem('cached_arrangements_version', arrVersion);
             updatesPerformed = true;
         }
+      }
+
+      // Sync Setlists as well
+      try {
+        const setlistsRes = await fetch(`${SCRIPT_URL}?tab=Setlists`, { signal: controller.signal });
+        const setlistsText = await setlistsRes.text();
+        const setlistsList = JSON.parse(setlistsText);
+        if (Array.isArray(setlistsList)) {
+          const mappedSetlists = setlistsList.map((row: any) => ({
+            PresetName: row.Set || row.PresetName || '',
+            RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}',
+          }));
+          localStorage.setItem('cached_setlists_meta', JSON.stringify(mappedSetlists));
+          setAllSharedSetlists(mappedSetlists);
+        }
+      } catch (e) {
+        console.warn('Error syncing setlists on catalog fetch', e);
       }
 
       if (updatesPerformed) {
@@ -403,19 +792,42 @@ export default function App() {
     localStorage.setItem('favs', JSON.stringify(next));
   };
 
-  const toggleSetlist = (id: string | number) => {
+  const updateCapturedSettings = (id: string | number) => {
     const sId = String(id);
-    let next: string[];
-    if (setlists.includes(sId)) {
-      next = setlists.filter((x) => x !== sId);
-      showToast('Removed from Setlist Queue', 'info');
-    } else {
-      next = [...setlists, sId];
-      showToast('Added to live performance queue!', 'success');
+    try {
+      const rawSaved = localStorage.getItem('captured_song_settings') || '{}';
+      const dict = JSON.parse(rawSaved);
+      dict[sId] = {
+        key: currentKey,
+        roadmap: activeRoadmap,
+      };
+      localStorage.setItem('captured_song_settings', JSON.stringify(dict));
+      showToast('Setlist arrangement updated successfully!', 'success');
+    } catch (err) {
+      console.error('Error updating captured settings:', err);
+      showToast('Failed to update arrangement', 'error');
     }
-    setSetlists(next);
-    localStorage.setItem('setlists', JSON.stringify(next));
   };
+
+  // Synchronize in-memory setlist queue state from the active setlist folder
+  useEffect(() => {
+    if (activeSetlistFolder && allSharedSetlists.length > 0) {
+      const setMeta = allSharedSetlists.find(
+        (sl) => sl.PresetName === activeSetlistFolder
+      );
+      if (setMeta) {
+        try {
+          const parsed = JSON.parse(setMeta.RoadmapJSON);
+          const songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
+          setSetlists(songIds);
+        } catch (e) {
+          console.error('Error syncing setlist queue:', e);
+        }
+      }
+    } else if (!activeSetlistFolder) {
+      setSetlists([]);
+    }
+  }, [activeSetlistFolder, allSharedSetlists]);
 
   // Metronome Intervals Loop
   useEffect(() => {
@@ -507,17 +919,76 @@ export default function App() {
     return () => cancelAnimationFrame(animationId);
   }, [isScrollingActive, scrollSpeed]);
 
-  // Change active selected song
+  // Intercept selection and show settings modal first
   const changeSong = async (song: Song) => {
+    setModalDisplayMode(displayMode);
+    setModalShowLyrics(showLyrics);
+    setModalSheetLayoutMode(sheetLayoutMode);
+    setPendingSong(song);
+  };
+
+  // Change active selected song (actual loading execution)
+  const executeSongLoad = async (
+    song: Song,
+    forceDefaultArrangement: boolean = false,
+    activeFolderOverride?: string
+  ) => {
     setIsLoading(true);
     setCurrentSong(song);
-    setCurrentKey(song.OriginalKey || 'C');
+    setCurrentArrangementName('');
+
+    // Look up captured settings if any exist
+    const rawSaved = localStorage.getItem('captured_song_settings');
+    let savedSettings: any = null;
+    if (rawSaved) {
+      try {
+        const dict = JSON.parse(rawSaved);
+        savedSettings = dict[String(song.SongID)];
+      } catch (e) {
+        console.error('Error reading saved settings', e);
+      }
+    }
+
+    // Determine if there is an active setlist folder
+    const activeFolder = activeFolderOverride !== undefined ? activeFolderOverride : activeSetlistFolder;
+    let setlistPresetKey = '';
+    if (activeFolder && !forceDefaultArrangement) {
+      const setPreset = allSharedArrangements.find(
+        (arr) => String(arr.SongID) === String(song.SongID) && arr.PresetName === `Set: ${activeFolder}`
+      );
+      if (setPreset) {
+        try {
+          const settings = JSON.parse(setPreset.RoadmapJSON);
+          if (settings && settings.key) {
+            setlistPresetKey = settings.key;
+          }
+        } catch {}
+      }
+    }
+
+    if (setlistPresetKey) {
+      setCurrentKey(setlistPresetKey);
+      setBpm(song.BPM || 120);
+    } else if (savedSettings) {
+      setCurrentKey(savedSettings.key || song.OriginalKey || 'C');
+      setBpm(savedSettings.bpm || song.BPM || 120);
+    } else {
+      setCurrentKey(song.OriginalKey || 'C');
+      setBpm(song.BPM || 120);
+    }
+
     setFocusedLineId(null);
     setEditingBlockId(null);
+    setIsArrangementLocked(!!activeFolder && !forceDefaultArrangement);
     setIsScrollingActive(false);
     setIsMetronomeActive(false);
     setArrangerOpen(false);
     setSectionCollapsedStates({});
+
+    // Reset collapsible panels to collapsed by default when song loads
+    setIsFamilyChordsCollapsed(true);
+    setIsPerformancePanelCollapsed(true);
+    setIsRoadmapFlowCollapsed(true);
 
     try {
       requestWakeLock();
@@ -643,7 +1114,53 @@ export default function App() {
         }
       });
 
-      setActiveRoadmap(roadmap);
+      // Restore captured arrangement/roadmap if present in active setlist or captured settings
+      let loadedCustomRoadmap = false;
+      const activeFolder = activeFolderOverride !== undefined ? activeFolderOverride : activeSetlistFolder;
+      if (!forceDefaultArrangement && activeFolder) {
+        const setPreset = allSharedArrangements.find(
+          (arr) => String(arr.SongID) === String(song.SongID) && arr.PresetName === `Set: ${activeFolder}`
+        );
+        if (setPreset) {
+          try {
+            const settings = JSON.parse(setPreset.RoadmapJSON);
+            if (settings && settings.roadmap && settings.roadmap.length > 0) {
+              setActiveRoadmap(
+                settings.roadmap.map((b: any) => ({
+                  id: b.id,
+                  name: b.name,
+                  enabledLines: [...(b.enabledLines || [])],
+                  keyOffset: b.keyOffset || 0,
+                }))
+              );
+              loadedCustomRoadmap = true;
+              setCurrentArrangementName(`Set: ${activeFolder}`);
+            }
+          } catch (e) {
+            console.error('Error parsing setlist arrangement inside load:', e);
+          }
+        }
+      }
+
+      if (!forceDefaultArrangement && !loadedCustomRoadmap) {
+        const rawSavedArr = localStorage.getItem('captured_song_settings');
+        if (rawSavedArr) {
+          try {
+            const dict = JSON.parse(rawSavedArr);
+            const savedSettings = dict[String(song.SongID)];
+            if (savedSettings && savedSettings.roadmap && savedSettings.roadmap.length > 0) {
+              setActiveRoadmap(savedSettings.roadmap);
+              loadedCustomRoadmap = true;
+            }
+          } catch (e) {
+            console.error('Error loading captured roadmap:', e);
+          }
+        }
+      }
+
+      if (!loadedCustomRoadmap) {
+        setActiveRoadmap(roadmap);
+      }
       setOriginalRoadmap(original);
 
       // Fetch shared presets
@@ -675,17 +1192,35 @@ export default function App() {
         } catch (e) {}
 
         if (fetchArr) {
-          const presetsRes = await fetch(`${SCRIPT_URL}?tab=Arrangements`, { signal: controller.signal });
-          const presetsText = await presetsRes.text();
-          const list = JSON.parse(presetsText);
-          if (Array.isArray(list)) {
-            localStorage.setItem('cached_arrangements', JSON.stringify(list));
+          const [presetsRes, setlistsRes] = await Promise.all([
+            fetch(`${SCRIPT_URL}?tab=Arrangements`, { signal: controller.signal }),
+            fetch(`${SCRIPT_URL}?tab=Setlists`, { signal: controller.signal })
+          ]);
+          const [presetsText, setlistsText] = await Promise.all([
+            presetsRes.text(),
+            setlistsRes.text()
+          ]);
+          
+          const presetsList = JSON.parse(presetsText);
+          if (Array.isArray(presetsList)) {
+            localStorage.setItem('cached_arrangements', JSON.stringify(presetsList));
+            setAllSharedArrangements(presetsList);
             if (arrVersion) {
               localStorage.setItem('cached_arrangements_version', arrVersion);
             }
             setSyncedSheetArrangements(
-              list.filter((arr) => String(arr.SongID) === String(song.SongID))
+              presetsList.filter((arr) => String(arr.SongID) === String(song.SongID))
             );
+          }
+
+          const setlistsList = JSON.parse(setlistsText);
+          if (Array.isArray(setlistsList)) {
+            const mappedSetlists = setlistsList.map((row: any) => ({
+              PresetName: row.Set || row.PresetName || '',
+              RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}',
+            }));
+            localStorage.setItem('cached_setlists_meta', JSON.stringify(mappedSetlists));
+            setAllSharedSetlists(mappedSetlists);
           }
         }
         
@@ -697,14 +1232,26 @@ export default function App() {
           if (cacheRaw) {
             const list = JSON.parse(cacheRaw);
             if (Array.isArray(list)) {
+              setAllSharedArrangements(list);
               const matchedArrangements = list.filter((arr) => String(arr.SongID) === String(song.SongID));
               setSyncedSheetArrangements(matchedArrangements);
               if (matchedArrangements.length > 0) {
                 showToast('Loaded cached offline arrangement roadmap', 'info');
               }
-              return;
             }
           }
+          const cacheSetlistsRaw = localStorage.getItem('cached_setlists_meta');
+          if (cacheSetlistsRaw) {
+            const setlistsList = JSON.parse(cacheSetlistsRaw);
+            if (Array.isArray(setlistsList)) {
+              const mappedSetlists = setlistsList.map((row: any) => ({
+                PresetName: row.Set || row.PresetName || '',
+                RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}',
+              }));
+              setAllSharedSetlists(mappedSetlists);
+            }
+          }
+          return;
         } catch (e) {}
         setSyncedSheetArrangements([]);
       }
@@ -715,6 +1262,62 @@ export default function App() {
     }
   };
 
+  // Auto-resolve internal "Set: <Folder>" arrangement name to friendly preset name if roadmap matches exactly
+  useEffect(() => {
+    if (!currentSong || !activeRoadmap || activeRoadmap.length === 0) return;
+    
+    // Only resolve if currentArrangementName is empty or starts with "Set:"
+    const isInternalName = !currentArrangementName || currentArrangementName.startsWith('Set:');
+    if (!isInternalName) return;
+
+    const presets = getPresets();
+    for (const presetName of Object.keys(presets)) {
+      if (presetName.startsWith('Set:')) continue;
+      
+      const presetData = presets[presetName];
+      const isObject = presetData && typeof presetData === 'object' && !Array.isArray(presetData);
+      const blocksArray = isObject ? (presetData.roadmap || []) : presetData;
+      
+      if (!Array.isArray(blocksArray) || blocksArray.length !== activeRoadmap.length) continue;
+      
+      let isMatch = true;
+      for (let i = 0; i < blocksArray.length; i++) {
+        const b1 = blocksArray[i];
+        const b2 = activeRoadmap[i];
+        if (!b1 || !b2) {
+          isMatch = false;
+          break;
+        }
+        if (b1.name !== b2.name) {
+          isMatch = false;
+          break;
+        }
+        if ((b1.keyOffset || 0) !== (b2.keyOffset || 0)) {
+          isMatch = false;
+          break;
+        }
+        const el1 = b1.enabledLines || [];
+        const el2 = b2.enabledLines || [];
+        if (el1.length !== el2.length) {
+          isMatch = false;
+          break;
+        }
+        for (let j = 0; j < el1.length; j++) {
+          if (el1[j] !== el2[j]) {
+            isMatch = false;
+            break;
+          }
+        }
+      }
+      
+      if (isMatch) {
+        // We found an exact matching custom preset! Use its original name
+        setCurrentArrangementName(presetName);
+        break;
+      }
+    }
+  }, [activeRoadmap, syncedSheetArrangements, allSharedArrangements, currentSong]);
+
   // Keyboard Shortcuts Hook
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -723,8 +1326,7 @@ export default function App() {
       if (e.code === 'Space') {
         e.preventDefault();
         if (currentSong) {
-          setIsScrollingActive((prev) => !prev);
-          showToast(!isScrollingActive ? 'Autoscrolling Sheet' : 'Autoscroll Paused', 'info');
+          toggleAutoscroll();
         }
       } else if (e.key === '[') {
         if (currentSong) {
@@ -741,6 +1343,10 @@ export default function App() {
       } else if (e.key === 'f' || e.key === 'F') {
         toggleFullScreen();
       } else if (e.key === 'Escape') {
+        if (arrangerOpen && !isArrangementLocked) {
+          cancelArrangementEdit();
+          return;
+        }
         setIsFormModalOpen(false);
         setIsAdminModalOpen(false);
         setIsShortcutsOpen(false);
@@ -750,7 +1356,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentSong, isScrollingActive, currentKey]);
+  }, [currentSong, isScrollingActive, currentKey, arrangerOpen, isArrangementLocked, roadmapBackup, nameBackup]);
 
   // UI Helpers
   const shiftKey = (direction: number) => {
@@ -766,13 +1372,39 @@ export default function App() {
   };
 
   const toggleFullScreen = () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(() => {
-        showToast('Fullscreen navigation not supported in this frame.', 'error');
-      });
+    const doc = document as any;
+    const docEl = document.documentElement as any;
+
+    const isFullscreen = !!(
+      doc.fullscreenElement ||
+      doc.webkitFullscreenElement ||
+      doc.mozFullScreenElement ||
+      doc.msFullscreenElement
+    );
+
+    if (!isFullscreen) {
+      const requestFS =
+        docEl.requestFullscreen ||
+        docEl.webkitRequestFullscreen ||
+        docEl.mozRequestFullScreen ||
+        docEl.msRequestFullscreen;
+
+      if (requestFS) {
+        requestFS.call(docEl).catch(() => {
+          showToast('Fullscreen navigation not supported in this frame.', 'error');
+        });
+      } else {
+        showToast('Fullscreen is not supported by your browser.', 'error');
+      }
     } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen();
+      const exitFS =
+        doc.exitFullscreen ||
+        doc.webkitExitFullscreen ||
+        doc.mozCancelFullScreen ||
+        doc.msExitFullscreen;
+
+      if (exitFS) {
+        exitFS.call(doc);
       }
     }
   };
@@ -807,10 +1439,15 @@ export default function App() {
 
   // Drag and Drop Roadmap Handlers
   const handleDragStart = (idx: number) => {
+    if (isArrangementLocked) {
+      showToast("Arrangement is locked. Click 'Modify' to unlock and edit.", 'warning');
+      return;
+    }
     setDraggedBlockIndex(idx);
   };
 
   const handleDrop = (targetIdx: number) => {
+    if (isArrangementLocked) return;
     if (draggedBlockIndex !== null && draggedBlockIndex !== targetIdx) {
       const next = [...activeRoadmap];
       const [item] = next.splice(draggedBlockIndex, 1);
@@ -822,6 +1459,10 @@ export default function App() {
   };
 
   const deleteRoadmapBlock = (idx: number) => {
+    if (isArrangementLocked) {
+      showToast("Arrangement is locked. Click 'Modify' to unlock and edit.", 'warning');
+      return;
+    }
     if (activeRoadmap.length <= 1) {
       showToast('Arrangement must contain at least one section block!', 'error');
       return;
@@ -837,6 +1478,10 @@ export default function App() {
   };
 
   const addRoadmapBlock = (sectionName: string) => {
+    if (isArrangementLocked) {
+      showToast("Arrangement is locked. Click 'Modify' to unlock and edit.", 'warning');
+      return;
+    }
     const templateLines = sectionTemplates[sectionName] || [];
     const lineIndices = Array.from({ length: templateLines.length }, (_, idx) => idx);
     const uniqueId = `block-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
@@ -853,6 +1498,10 @@ export default function App() {
   };
 
   const resetRoadmapBlocks = () => {
+    if (isArrangementLocked) {
+      showToast("Arrangement is locked. Click 'Modify' to unlock and edit.", 'warning');
+      return;
+    }
     setActiveRoadmap(
       originalRoadmap.map((b) => ({
         ...b,
@@ -865,6 +1514,10 @@ export default function App() {
   };
 
   const adjustBlockModulation = (blockId: string, direction: number) => {
+    if (isArrangementLocked) {
+      showToast("Arrangement is locked. Click 'Modify' to unlock and edit.", 'warning');
+      return;
+    }
     const next = activeRoadmap.map((b) => {
       if (b.id === blockId) {
         const offset = Math.max(-11, Math.min(11, (b.keyOffset || 0) + direction));
@@ -878,6 +1531,10 @@ export default function App() {
   };
 
   const toggleLineInBlock = (blockId: string, lIdx: number) => {
+    if (isArrangementLocked) {
+      showToast("Arrangement is locked. Click 'Modify' to unlock and edit.", 'warning');
+      return;
+    }
     const next = activeRoadmap.map((b) => {
       if (b.id === blockId) {
         let lines = [...(b.enabledLines || [])];
@@ -902,6 +1559,9 @@ export default function App() {
   const getPresets = () => {
     const obj: { [key: string]: any } = {};
     syncedSheetArrangements.forEach((p) => {
+      if (p.PresetName && p.PresetName.startsWith('Set: ')) {
+        return;
+      }
       try {
         obj[p.PresetName] = JSON.parse(p.RoadmapJSON);
       } catch {
@@ -927,25 +1587,84 @@ export default function App() {
   const loadPresetArrangement = (name: string) => {
     const presets = getPresets();
     if (presets[name]) {
+      const presetData = presets[name];
+      const isObject = presetData && typeof presetData === 'object' && !Array.isArray(presetData);
+      const blocksArray = isObject ? (presetData.roadmap || []) : presetData;
+
+      if (!Array.isArray(blocksArray)) {
+        showToast('Invalid arrangement format', 'error');
+        return;
+      }
+
       setActiveRoadmap(
-        presets[name].map((b: any) => ({
+        blocksArray.map((b: any) => ({
           id: b.id,
           name: b.name,
           enabledLines: [...(b.enabledLines || [])],
           keyOffset: b.keyOffset || 0,
         }))
       );
+      
+      if (isObject && presetData.key) {
+        setCurrentKey(presetData.key);
+      }
+
       setEditingBlockId(null);
-      showToast(`Loaded arrangement: ${name}`, 'success');
+      setIsArrangementLocked(true);
+      setCurrentArrangementName(name);
+      showToast(`Loaded arrangement: ${name}. It is locked.`, 'success');
     }
   };
 
   const savePresetArrangement = async () => {
-    const nameEl = document.getElementById('presetNameInput') as HTMLInputElement;
-    const name = nameEl ? nameEl.value.trim() : '';
+    let name = currentArrangementName.trim();
     if (!name) {
       showToast('Please enter an arrangement preset name first', 'error');
       return;
+    }
+
+    // Clean up "Set: " prefix if present
+    if (name.startsWith('Set: ')) {
+      name = name.slice(5);
+    }
+    // Clean up any existing date suffix from the name before appending the new one
+    const { baseName } = parsePresetDate(name);
+    name = baseName;
+
+    const months = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    const d = new Date();
+    const monthName = months[d.getMonth()];
+    const day = String(d.getDate()).padStart(2, '0');
+    const year = String(d.getFullYear()).slice(-2);
+    const dateStr = `${monthName}-${day}-${year}`;
+
+    name = `${name} (${dateStr})`;
+
+    const presets = getPresets();
+    const isOverwrite = !!presets[name];
+
+    if (isOverwrite) {
+      const confirmOverwrite = window.confirm(
+        `Warning: An arrangement named "${name}" already exists.\n\nAre you sure you want to overwrite this existing arrangement?`
+      );
+      if (!confirmOverwrite) {
+        return;
+      }
+    }
+
+    let shouldApplyToSetlist = false;
+    if (!isOverwrite && activeSetlistFolder && currentSong) {
+      const confirmApply = window.confirm(
+        `Would you like to load this new arrangement ("${name}") to the active setlist ("${activeSetlistFolder}") for this song?\n\n` +
+        `• Click OK to load it to the active setlist.\n` +
+        `• Click Cancel to keep using the original arrangement set to this song in this setlist.`
+      );
+      if (confirmApply) {
+        shouldApplyToSetlist = true;
+      }
     }
 
     setIsLoading(true);
@@ -969,14 +1688,68 @@ export default function App() {
       } else {
         throw new Error(result.message || 'Spreadsheet save failed');
       }
+
+      if (shouldApplyToSetlist && activeSetlistFolder && currentSong) {
+        const capturedSettings = {
+          key: currentKey,
+          roadmap: activeRoadmap,
+        };
+        const payloadArrangement = {
+          action: 'saveArrangement',
+          songId: String(currentSong.SongID),
+          name: `Set: ${activeSetlistFolder}`,
+          roadmap: capturedSettings,
+        };
+        await fetch(SCRIPT_URL, {
+          method: 'POST',
+          body: JSON.stringify(payloadArrangement),
+        });
+
+        const existingMeta = allSharedSetlists.find(
+          (sl) => sl.PresetName === activeSetlistFolder
+        );
+        let songIds: string[] = [];
+        if (existingMeta) {
+          try {
+            const parsed = JSON.parse(existingMeta.RoadmapJSON);
+            songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
+          } catch {}
+        }
+        const sId = String(currentSong.SongID);
+        if (!songIds.includes(sId)) {
+          songIds.push(sId);
+        }
+        const payloadMeta = {
+          action: 'saveSetlist',
+          name: activeSetlistFolder,
+          roadmap: { songIds, lastUpdated: Date.now() },
+        };
+        await fetch(SCRIPT_URL, {
+          method: 'POST',
+          body: JSON.stringify(payloadMeta),
+        });
+
+        showToast(`Successfully loaded arrangement to active setlist: ${activeSetlistFolder}`, 'success');
+      }
     } catch {
       // offline fallback
-      const presets = getPresets();
-      presets[name] = activeRoadmap;
-      localStorage.setItem(`custom_arrangements_${currentSong?.SongID}`, JSON.stringify(presets));
+      const presetsFallback = getPresets();
+      presetsFallback[name] = activeRoadmap;
+      localStorage.setItem(`custom_arrangements_${currentSong?.SongID}`, JSON.stringify(presetsFallback));
       showToast(`Saved locally on this device as "${name}"`, 'success');
+
+      if (shouldApplyToSetlist && currentSong) {
+        const rawSaved = localStorage.getItem('captured_song_settings') || '{}';
+        const dict = JSON.parse(rawSaved);
+        dict[String(currentSong.SongID)] = { key: currentKey, roadmap: activeRoadmap };
+        localStorage.setItem('captured_song_settings', JSON.stringify(dict));
+        showToast(`Loaded arrangement to active setlist locally on this device`, 'success');
+      }
     } finally {
-      if (nameEl) nameEl.value = '';
+      setCurrentArrangementName(name);
+      setIsArrangementLocked(true);
+      setRoadmapBackup(null);
+      setNameBackup('');
       // Refetch shared presets
       try {
         const presetsRes = await fetch(`${SCRIPT_URL}?tab=Arrangements`);
@@ -993,6 +1766,19 @@ export default function App() {
       }
       setIsLoading(false);
     }
+  };
+
+  const cancelArrangementEdit = () => {
+    if (roadmapBackup !== null) {
+      setActiveRoadmap(roadmapBackup);
+      setRoadmapBackup(null);
+    }
+    if (nameBackup !== '') {
+      setCurrentArrangementName(nameBackup);
+      setNameBackup('');
+    }
+    setIsArrangementLocked(true);
+    showToast('Cancelled editing. Reverted changes.', 'info');
   };
 
   const deletePresetArrangement = async (name: string) => {
@@ -1107,14 +1893,13 @@ export default function App() {
       setIsMetronomeActive((prev) => !prev);
       showToast(!isMetronomeActive ? 'Metronome Activated!' : 'Metronome Paused', !isMetronomeActive ? 'success' : 'info');
     } else if (cap === 'autoscroll') {
-      setIsScrollingActive((prev) => !prev);
-      showToast(!isScrollingActive ? 'Autoscrolling Song Sheet!' : 'Autoscroll Paused', !isScrollingActive ? 'success' : 'info');
+      toggleAutoscroll();
     }
     setIsNavOpen(false);
   };
 
   // Diatonic Chords HTML parser
-  const renderFamilyChordsList = () => {
+  const renderFamilyChordsList = (simplified = false) => {
     if (!currentSong) return null;
     const intervals = [0, 2, 4, 5, 7, 9, 11];
     const qualities = ['', 'm', 'm', '', '', 'm', 'dim'];
@@ -1130,9 +1915,11 @@ export default function App() {
 
     return (
       <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
-        <span className="text-[10px] sm:text-xs text-indigo-400 uppercase tracking-widest font-extrabold flex-shrink-0 select-none drop-shadow-sm">
-          Family Chords:
-        </span>
+        {!simplified && (
+          <span className="text-[10px] sm:text-xs text-indigo-400 uppercase tracking-widest font-extrabold flex-shrink-0 select-none drop-shadow-sm">
+            Family Chords:
+          </span>
+        )}
         <div className="flex flex-wrap gap-2 sm:gap-2.5 font-mono">
           {degrees.map((deg, i) => {
             const noteIdx = (keyIdx + intervals[i]) % 12;
@@ -1472,127 +2259,144 @@ export default function App() {
           /* ACTIVE SHEET WORKSPACE VIEW */
           <div
             className="p-2.5 sm:p-3 md:p-4 bg-gradient-to-br from-indigo-950/40 via-[#0a0b16]/60 to-[#05060a]/80 backdrop-blur-xl rounded-xl sm:rounded-2xl shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] border border-indigo-500/20 flex flex-col"
-            style={{ maxHeight: 'calc(100vh - 65px)' }}
           >
             {/* Song Header Toolbar */}
-            <div className="flex-shrink-0">
-              <div className="flex justify-between items-start gap-4 w-full">
-                <div className="flex-1 min-w-0 flex flex-col pt-1">
-                  <div className="flex items-center gap-2 sm:gap-3 w-full">
-                    <h2 className="text-base sm:text-xl font-bold tracking-tight text-white select-none leading-none truncate shrink min-w-0">
-                      {currentSong.Title}
-                    </h2>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        onClick={() => toggleFav(String(currentSong.SongID))}
-                        className={`px-1.5 sm:px-2 py-0.5 rounded text-[8px] sm:text-[9px] btn-5d transition-all active:scale-95 flex items-center gap-1 cursor-pointer ${
-                          favorites.includes(String(currentSong.SongID))
-                            ? 'text-amber-400 font-bold border-amber-500/40 shadow-[0_0_10px_rgba(251,191,36,0.15)]'
-                            : 'text-gray-400 hover:text-white'
-                        }`}
-                      >
-                        {favorites.includes(String(currentSong.SongID)) ? '★ Fav' : '☆ Fav'}
-                      </button>
-                      <button
-                        onClick={() => toggleSetlist(String(currentSong.SongID))}
-                        className={`px-1.5 sm:px-2 py-0.5 rounded text-[8px] sm:text-[9px] btn-5d transition-all active:scale-95 flex items-center gap-1 cursor-pointer ${
-                          setlists.includes(String(currentSong.SongID))
-                            ? 'text-violet-400 font-bold border-violet-500/40 shadow-[0_0_10px_rgba(139,92,246,0.15)]'
-                            : 'text-gray-400 hover:text-white'
-                        }`}
-                      >
-                        {setlists.includes(String(currentSong.SongID)) ? '⚡ Set' : '☆ Set'}
-                      </button>
+            <div className="flex-shrink-0 border-b border-indigo-500/10 pb-2 mb-1.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 w-full">
+                <div className="flex-1 min-w-0 flex flex-col sm:flex-row sm:items-center sm:gap-3">
+                  <div ref={containerRef} className="overflow-hidden whitespace-nowrap relative min-w-0 shrink-0 max-w-[240px] sm:max-w-xs md:max-w-sm">
+                    <div className={`inline-block ${isTitleOverflowing ? 'animate-marquee' : ''}`}>
+                      <h2 ref={textRef} className="text-sm sm:text-base md:text-lg font-black tracking-tight text-white select-none inline-block">
+                        {currentSong.Title}
+                      </h2>
+                      {isTitleOverflowing && (
+                        <h2 className="text-sm sm:text-base md:text-lg font-black tracking-tight text-white select-none inline-block ml-8">
+                          {currentSong.Title}
+                        </h2>
+                      )}
                     </div>
                   </div>
-                  <p className="text-[9px] text-indigo-300/80 font-medium select-none truncate mt-1.5">
-                    {currentSong.Artist || 'Unknown Artist'}
-                  </p>
+                  <span className="text-[9px] sm:text-[10px] text-indigo-300/70 font-semibold select-none truncate">
+                    by {currentSong.Artist || 'Unknown Artist'}
+                  </span>
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0">
+                {/* Squeezed beautifully aligned controls row with ENLARGED Fav & Set buttons */}
+                <div className="flex items-center gap-1.5 shrink-0 select-none">
+                  <button
+                    onClick={() => toggleFav(String(currentSong.SongID))}
+                    className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-[11px] font-black uppercase tracking-wider btn-5d transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                      favorites.includes(String(currentSong.SongID))
+                        ? 'text-amber-400 border-amber-500/40 shadow-[0_0_12px_rgba(251,191,36,0.2)] bg-amber-500/10'
+                        : 'text-gray-400 hover:text-white bg-white/5 border border-white/5'
+                    }`}
+                    title="Enlarge Fav"
+                  >
+                    <span className="text-xs">{favorites.includes(String(currentSong.SongID)) ? '★' : '☆'}</span>
+                    <span>Fav</span>
+                  </button>
+                  {/* Dynamic Set / Update Set Button Group */}
+                  {(() => {
+                    const matchingSetsForSong = allSharedSetlists
+                      .filter((sl) => {
+                        try {
+                          const parsed = JSON.parse(sl.RoadmapJSON);
+                          const songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
+                          return songIds.some((id: any) => String(id) === String(currentSong.SongID));
+                        } catch {
+                          return false;
+                        }
+                      })
+                      .map((sl) => sl.PresetName);
+
+                    const isInAnySet = matchingSetsForSong.length > 0;
+
+                    return (
+                      <button
+                        onClick={() => setIsSetlistManagerOpen(true)}
+                        className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-[11px] font-black uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                          isInAnySet
+                            ? 'bg-violet-600/20 text-violet-300 border border-violet-500/40 shadow-[0_0_12px_rgba(139,92,246,0.2)]'
+                            : 'text-gray-400 hover:text-white bg-white/5 border border-white/5'
+                        }`}
+                        title="Add Song to Setlist folders and capture arrangement"
+                      >
+                        <span className="text-xs">⚡</span>
+                        <span>{isInAnySet ? `Set (${matchingSetsForSong.length})` : 'Set'}</span>
+                      </button>
+                    );
+                  })()}
                   <button
                     onClick={() => setArrangerOpen((prev) => !prev)}
-                    className="justify-center px-2.5 py-1.5 rounded text-[9px] btn-5d-primary text-white font-bold flex items-center gap-1.5 shadow-md cursor-pointer uppercase tracking-wider transition-all active:scale-95 shrink-0"
+                    className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[9px] sm:text-[10px] font-black uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                      arrangerOpen
+                        ? 'bg-indigo-600 text-white shadow-inner border border-indigo-400/30'
+                        : 'btn-5d-primary text-white border border-indigo-500/30'
+                    }`}
                   >
-                    🗺️ Arrangement Director
+                    <span>🗺️ Arrangement</span>
                   </button>
                   {appUser && appSecret && (
                     <button
                       onClick={() => setIsFormModalOpen(true)}
-                      className="justify-center px-2.5 py-1.5 rounded text-[9px] btn-5d-primary text-white font-bold flex items-center gap-1 shadow-md cursor-pointer transition-all active:scale-95 shrink-0"
+                      className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[9px] sm:text-[10px] font-black btn-5d-primary text-white flex items-center gap-1 transition-all active:scale-95 cursor-pointer uppercase tracking-wider border border-indigo-500/30"
                     >
-                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth="2.5"
-                          d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
-                        />
-                      </svg>
-                      Edit Song
+                      <span>✏️ Edit</span>
                     </button>
                   )}
+
+                  {/* Setlist Navigation (Prev / Next transition) */}
+                  {(() => {
+                    const currentIndexInSet = setlists.indexOf(String(currentSong.SongID));
+                    if (currentIndexInSet !== -1) {
+                      const prevSongID = currentIndexInSet > 0 ? setlists[currentIndexInSet - 1] : null;
+                      const nextSongID = currentIndexInSet < setlists.length - 1 ? setlists[currentIndexInSet + 1] : null;
+                      const prevSong = prevSongID ? songs.find((s) => String(s.SongID) === prevSongID) : null;
+                      const nextSong = nextSongID ? songs.find((s) => String(s.SongID) === nextSongID) : null;
+
+                      return (
+                        <div className="flex items-center gap-1 border-l border-indigo-500/10 pl-1.5 ml-1">
+                          {prevSong && (
+                            <button
+                              onClick={() => {
+                                executeSongLoad(prevSong);
+                              }}
+                              className="px-2 sm:px-2.5 py-1.5 sm:py-2 rounded-xl text-[9px] sm:text-[10px] font-bold text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 border border-white/5 transition-all active:scale-95 flex items-center justify-center cursor-pointer"
+                              title={`Go back to: ${prevSong.Title}`}
+                            >
+                              <span>⏮️</span>
+                            </button>
+                          )}
+                          {nextSong && (
+                            <button
+                              onClick={() => {
+                                executeSongLoad(nextSong);
+                              }}
+                              className="px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl text-[9px] sm:text-[10px] font-black bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white border border-emerald-500/20 shadow-md shadow-emerald-500/10 transition-all active:scale-95 flex items-center gap-1 cursor-pointer uppercase tracking-wider"
+                              title={`Transition to: ${nextSong.Title}`}
+                            >
+                              <span>Next</span>
+                              <span>⏭️</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
                 </div>
               </div>
 
-              {/* Collapsible Arrangement Panel & Family Chords */}
-              <div className="mt-2 space-y-1.5">
-                <div className="hidden">
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full overflow-hidden">
-                    <span className="text-[9px] sm:text-[10px] text-indigo-300 uppercase tracking-widest font-extrabold flex items-center gap-1.5 select-none whitespace-nowrap px-1">
-                      <svg className="w-3 h-3 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth="2.5"
-                          d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"
-                        />
-                      </svg>
-                      Roadmap:
-                    </span>
-                    <div className="flex flex-wrap items-center gap-1 overflow-x-auto max-w-full custom-scrollbar">
-                      {activeRoadmap.map((block, idx) => {
-                        const isRep = repInfo[idx]?.isRepeat;
-                        const runStart = repInfo[idx]?.runStartIndex ?? idx;
-                        const totalRun = repInfo[idx]?.totalInRun ?? 1;
-
-                        return (
-                          <button
-                            key={`${block.id}-${idx}`}
-                            onClick={() => {
-                              const target = document.getElementById(`sec-wrapper-${runStart}`);
-                              if (target) {
-                                setSectionCollapsedStates((prev) => ({ ...prev, [runStart]: false }));
-                                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                              }
-                            }}
-                            className={`px-2.5 py-1.5 bg-indigo-500/20 hover:bg-indigo-500/40 active:scale-95 border border-indigo-500/30 rounded-lg text-[9px] sm:text-[10px] font-bold uppercase tracking-widest text-indigo-100 transition-all select-none flex items-center gap-1.5 shadow-sm whitespace-nowrap cursor-pointer`}
-                            title={`Jump to ${block.name} (Section #${idx + 1})`}
-                          >
-                            <span className="text-[8px] bg-indigo-500/40 text-white rounded px-1 shadow-inner">
-                              {idx + 1}
-                            </span>
-                            {block.name}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setArrangerOpen((prev) => !prev)}
-                    className="w-full sm:w-auto px-2.5 py-1 btn-5d-primary text-white text-[8px] font-bold uppercase tracking-widest rounded flex items-center justify-center gap-1.5 flex-shrink-0 shadow-md cursor-pointer"
-                  >
-                    🗺️ Arrange Flow
-                  </button>
-                </div>
-
-                {/* Arrange flow drawer panel */}
-                <div className={`panel-wrap ${arrangerOpen ? 'is-open' : ''}`}>
+              {/* Arrange flow drawer panel */}
+              <div className={`panel-wrap ${arrangerOpen ? 'is-open' : ''}`}>
                   <div className="panel-inner">
                     <div className="pt-2.5">
-                      <div className="mb-2.5 p-3 bg-black/40 rounded-xl border border-indigo-500/20 space-y-3">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 border-b border-white/5 pb-3">
+                      <div className={`mb-2.5 p-3 rounded-xl border space-y-3 transition-all duration-300 ${
+                        isArrangementLocked 
+                          ? 'bg-black/40 border-indigo-500/20 shadow-none' 
+                          : 'bg-emerald-950/20 border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.15)]'
+                      }`}>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-b border-white/5 pb-3">
                           <div>
                             <div className="flex items-center justify-between mb-1.5 select-none">
                               <div className="text-[9px] text-indigo-400 uppercase tracking-widest font-bold">
@@ -1602,55 +2406,194 @@ export default function App() {
                                 ☁️ Cloud Sync
                               </span>
                             </div>
-                            <div className="space-y-1 overflow-y-auto max-h-[80px] pr-1 custom-scrollbar">
-                              {Object.keys(getPresets()).length > 0 ? (
-                                Object.keys(getPresets()).map((name) => (
-                                  <div
-                                    key={name}
-                                    className="flex items-center justify-between p-2 bg-white/5 hover:bg-white/10 rounded-xl border border-white/5 transition-all text-[10px]"
-                                  >
-                                    <button
-                                      onClick={() => loadPresetArrangement(name)}
-                                      className="flex-1 text-left font-bold text-gray-300 hover:text-white uppercase truncate pr-2 cursor-pointer"
-                                    >
-                                      {name}
-                                    </button>
-                                    <button
-                                      onClick={() => deletePresetArrangement(name)}
-                                      className="text-rose-400/60 hover:text-rose-400 px-2.5 py-1 font-bold text-xs cursor-pointer"
-                                    >
-                                      ✕
-                                    </button>
-                                  </div>
-                                ))
-                              ) : (
-                                <div className="text-[9px] text-gray-500 italic py-2 text-center">
-                                  No arrangements saved yet...
-                                </div>
-                              )}
+                            <div className="space-y-2 overflow-y-auto max-h-[160px] pr-1 custom-scrollbar">
+                              {(() => {
+                                const presets = getPresets();
+                                const groupedPresets: { [dateStr: string]: { originalName: string; baseName: string }[] } = {};
+                                
+                                Object.keys(presets).forEach((originalName) => {
+                                  const { baseName, dateStr } = parsePresetDate(originalName);
+                                  if (!groupedPresets[dateStr]) {
+                                    groupedPresets[dateStr] = [];
+                                  }
+                                  groupedPresets[dateStr].push({ originalName, baseName });
+                                });
+
+                                if (Object.keys(presets).length === 0) {
+                                  return (
+                                    <div className="text-[9px] text-gray-500 italic py-2 text-center">
+                                      No arrangements saved yet...
+                                    </div>
+                                  );
+                                }
+
+                                return Object.keys(groupedPresets).map((dateStr) => {
+                                  const items = groupedPresets[dateStr];
+                                  const isExpanded = expandedArrangementDates[dateStr] !== false;
+                                  return (
+                                    <div key={dateStr} className="space-y-1">
+                                      {/* Collapsible Date Header */}
+                                      <button
+                                        onClick={() => {
+                                          setExpandedArrangementDates(prev => ({
+                                            ...prev,
+                                            [dateStr]: !isExpanded
+                                          }));
+                                        }}
+                                        className="w-full flex items-center justify-between py-1 px-2 bg-indigo-500/10 hover:bg-indigo-500/20 rounded-lg text-[8px] font-black uppercase tracking-wider text-indigo-300 border border-indigo-500/10 transition-all cursor-pointer"
+                                      >
+                                        <div className="flex items-center gap-1 min-w-0">
+                                          <span className="shrink-0 text-[10px]">📅</span>
+                                          <span className="truncate">{dateStr}</span>
+                                          <span className="text-[7.5px] text-indigo-400/80 font-mono">({items.length})</span>
+                                        </div>
+                                        <span className="text-[7px] text-indigo-400 font-bold">
+                                          {isExpanded ? '▼' : '▶'}
+                                        </span>
+                                      </button>
+
+                                      {/* List of arrangements under this date */}
+                                      {isExpanded && (
+                                        <div className="pl-1 space-y-1 animate-fadeIn">
+                                          {items.map(({ originalName, baseName }) => {
+                                            const isActive = currentArrangementName === originalName || 
+                                                             currentArrangementName === baseName ||
+                                                             getPresetInputDisplayName(currentArrangementName) === baseName;
+                                            return (
+                                              <div
+                                                key={originalName}
+                                                className={`flex items-center justify-between p-1.5 rounded-xl border transition-all text-[10px] ${
+                                                  isActive
+                                                    ? 'bg-emerald-500/10 border-emerald-500/30 shadow-[0_0_10px_rgba(16,185,129,0.1)]'
+                                                    : 'bg-white/5 hover:bg-white/10 border-white/5'
+                                                }`}
+                                              >
+                                                <button
+                                                  onClick={() => {
+                                                    if (isActive) {
+                                                      if (currentSong) {
+                                                        executeSongLoad(currentSong, true);
+                                                        showToast('Deselected arrangement. Restored default song flow.', 'info');
+                                                      }
+                                                    } else {
+                                                      loadPresetArrangement(originalName);
+                                                      setCurrentArrangementName(originalName);
+                                                    }
+                                                  }}
+                                                  className={`flex-1 text-left font-bold truncate pr-1.5 cursor-pointer text-[9px] uppercase ${
+                                                    isActive ? 'text-emerald-400' : 'text-gray-300 hover:text-white'
+                                                  }`}
+                                                  title={isActive ? 'Click to deselect / restore default flow' : `Load preset: ${originalName}`}
+                                                >
+                                                  {isActive ? `✓ ${baseName}` : baseName}
+                                                </button>
+                                                <button
+                                                  onClick={() => deletePresetArrangement(originalName)}
+                                                  className="text-rose-400/60 hover:text-rose-400 px-1.5 py-0.5 font-bold text-[10px] cursor-pointer"
+                                                  title="Delete arrangement"
+                                                >
+                                                  ✕
+                                                </button>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                });
+                              })()}
                             </div>
                           </div>
 
                           <div className="flex flex-col justify-between">
                             <div className="text-[9px] text-indigo-400 uppercase tracking-widest font-bold mb-1.5 select-none">
-                              Save Arrangement
+                              {currentArrangementName && !currentArrangementName.startsWith('Set:') ? 'Save / Modify Arrangement' : 'Save New Arrangement'}
                             </div>
                             <div className="space-y-1.5">
                               <input
                                 type="text"
                                 id="presetNameInput"
-                                placeholder="Preset name (e.g. Acoustic)"
-                                className="w-full bg-black/50 p-2 rounded-lg text-[10px] text-white border border-white/5 outline-none focus:ring-1 focus:ring-indigo-500/30"
+                                value={getPresetInputDisplayName(currentArrangementName)}
+                                onChange={(e) => setCurrentArrangementName(e.target.value)}
+                                disabled={isArrangementLocked}
+                                placeholder={isArrangementLocked ? "Arrangement is locked" : "Preset name (e.g. Acoustic)"}
+                                className="w-full bg-black/50 p-2 rounded-lg text-[10px] text-white border border-white/5 outline-none focus:ring-1 focus:ring-indigo-500/30 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
                               />
                               <button
                                 onClick={savePresetArrangement}
-                                className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[9px] font-bold tracking-wider uppercase transition-all active:scale-95 cursor-pointer"
+                                disabled={isArrangementLocked}
+                                className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[9px] font-bold tracking-wider uppercase transition-all active:scale-95 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
                               >
                                 Save Active Flow
                               </button>
                             </div>
                           </div>
                         </div>
+
+                        {/* Lock / Unlocked Status Banner */}
+                        {isArrangementLocked ? (
+                          <div className="flex items-center justify-between p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl animate-fadeIn">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="text-xs shrink-0">🔒</span>
+                              <div className="min-w-0">
+                                <div className="text-[10px] font-bold text-amber-300 truncate">Arrangement Locked</div>
+                                <div className="text-[8.5px] text-gray-400 truncate">Unlock to modify sequence blocks or lines.</div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                onClick={() => {
+                                  if (currentSong) {
+                                    executeSongLoad(currentSong, true);
+                                    showToast('Restored default song arrangement.', 'info');
+                                  }
+                                }}
+                                className="px-2.5 py-1 bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 rounded-lg text-[8.5px] font-bold uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
+                                title="Unload arrangement and restore original song sequence"
+                              >
+                                Default Flow
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setRoadmapBackup(activeRoadmap.map(b => ({
+                                    id: b.id,
+                                    name: b.name,
+                                    enabledLines: b.enabledLines ? [...b.enabledLines] : [],
+                                    keyOffset: b.keyOffset || 0
+                                  })));
+                                  setNameBackup(currentArrangementName);
+                                  setIsArrangementLocked(false);
+                                  showToast('Arrangement is now in editing mode. Changes will be saved.', 'info');
+                                }}
+                                className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
+                              >
+                                Modify
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-between p-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded-xl animate-fadeIn">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="text-xs shrink-0">✍️</span>
+                              <div className="min-w-0">
+                                <div className="text-[10px] font-bold text-emerald-300 truncate">Active Editing Mode</div>
+                                <div className="text-[8.5px] text-emerald-400/80 truncate">Esc or Cancel button to revert/cancel edit attempt.</div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                onClick={cancelArrangementEdit}
+                                className="px-2.5 py-1 bg-rose-500/25 hover:bg-rose-500/40 text-rose-300 border border-rose-500/30 rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
+                              >
+                                Cancel
+                              </button>
+                              <span className="px-2 py-1 bg-emerald-500/20 text-emerald-300 rounded-lg text-[7.5px] font-mono font-black uppercase tracking-widest select-none">
+                                Unlocked
+                              </span>
+                            </div>
+                          </div>
+                        )}
 
                         <div>
                           <div className="text-[9px] text-indigo-400 uppercase tracking-widest font-bold mb-1.5 select-none">
@@ -1665,12 +2608,14 @@ export default function App() {
                               return (
                                 <div
                                   key={block.id}
-                                  draggable
+                                  draggable={!isArrangementLocked}
                                   onDragStart={() => handleDragStart(idx)}
                                   onDragOver={(e) => e.preventDefault()}
                                   onDrop={() => handleDrop(idx)}
                                   onClick={() => setEditingBlockId(editingBlockId === block.id ? null : block.id)}
-                                  className={`flex flex-col items-center border rounded-lg p-2 min-w-[105px] select-none relative group transition-all cursor-grab active:cursor-grabbing mt-1 ${
+                                  className={`flex flex-col items-center border rounded-lg p-2 min-w-[105px] select-none relative group transition-all mt-1 ${
+                                    isArrangementLocked ? 'cursor-not-allowed opacity-75' : 'cursor-grab active:cursor-grabbing'
+                                  } ${
                                     editingBlockId === block.id
                                       ? 'bg-indigo-600/20 border-indigo-500 shadow-[0_0_12px_rgba(99,102,241,0.2)] scale-105 z-10'
                                       : 'bg-indigo-500/10 border-indigo-500/20 hover:bg-indigo-500/15'
@@ -1700,8 +2645,9 @@ export default function App() {
                                     </span>
                                     <div className="flex items-center gap-1">
                                       <button
+                                        disabled={isArrangementLocked}
                                         onClick={() => adjustBlockModulation(block.id, -1)}
-                                        className="w-5 h-5 rounded bg-black/40 hover:bg-white/10 text-xs flex items-center justify-center text-indigo-300 font-bold transition-colors cursor-pointer"
+                                        className="w-5 h-5 rounded bg-black/40 hover:bg-white/10 text-xs flex items-center justify-center text-indigo-300 font-bold transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
                                       >
                                         -
                                       </button>
@@ -1710,8 +2656,9 @@ export default function App() {
                                         {block.keyOffset || 0}
                                       </span>
                                       <button
+                                        disabled={isArrangementLocked}
                                         onClick={() => adjustBlockModulation(block.id, 1)}
-                                        className="w-5 h-5 rounded bg-black/40 hover:bg-white/10 text-xs flex items-center justify-center text-indigo-300 font-bold transition-colors cursor-pointer"
+                                        className="w-5 h-5 rounded bg-black/40 hover:bg-white/10 text-xs flex items-center justify-center text-indigo-300 font-bold transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
                                       >
                                         +
                                       </button>
@@ -1720,8 +2667,13 @@ export default function App() {
 
                                   <div className="flex gap-1.5 mt-2 w-full justify-center">
                                     <button
+                                      disabled={isArrangementLocked || idx === 0}
                                       onClick={(e) => {
                                         e.stopPropagation();
+                                        if (isArrangementLocked) {
+                                          showToast("Arrangement is locked. Click 'Modify' to unlock and edit.", 'warning');
+                                          return;
+                                        }
                                         if (idx > 0) {
                                           const next = [...activeRoadmap];
                                           const temp = next[idx];
@@ -1731,22 +2683,28 @@ export default function App() {
                                           showToast('Shifted left', 'success');
                                         }
                                       }}
-                                      className="w-6 h-6 rounded bg-black/30 hover:bg-white/10 active:scale-125 text-[10px] flex items-center justify-center transition-all shadow-sm cursor-pointer"
+                                      className="w-6 h-6 rounded bg-black/30 hover:bg-white/10 active:scale-125 text-[10px] flex items-center justify-center transition-all shadow-sm cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
                                     >
                                       ◀
                                     </button>
                                     <button
+                                      disabled={isArrangementLocked}
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         deleteRoadmapBlock(idx);
                                       }}
-                                      className="w-6 h-6 rounded bg-rose-500/10 hover:bg-rose-500/30 text-rose-400 active:scale-125 text-[10px] flex items-center justify-center transition-all shadow-sm cursor-pointer"
+                                      className="w-6 h-6 rounded bg-rose-500/10 hover:bg-rose-500/30 text-rose-400 active:scale-125 text-[10px] flex items-center justify-center transition-all shadow-sm cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
                                     >
                                       ✕
                                     </button>
                                     <button
+                                      disabled={isArrangementLocked || idx === activeRoadmap.length - 1}
                                       onClick={(e) => {
                                         e.stopPropagation();
+                                        if (isArrangementLocked) {
+                                          showToast("Arrangement is locked. Click 'Modify' to unlock and edit.", 'warning');
+                                          return;
+                                        }
                                         if (idx < activeRoadmap.length - 1) {
                                           const next = [...activeRoadmap];
                                           const temp = next[idx];
@@ -1756,7 +2714,7 @@ export default function App() {
                                           showToast('Shifted right', 'success');
                                         }
                                       }}
-                                      className="w-6 h-6 rounded bg-black/30 hover:bg-white/10 active:scale-125 text-[10px] flex items-center justify-center transition-all shadow-sm cursor-pointer"
+                                      className="w-6 h-6 rounded bg-black/30 hover:bg-white/10 active:scale-125 text-[10px] flex items-center justify-center transition-all shadow-sm cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
                                     >
                                       ▶
                                     </button>
@@ -1794,11 +2752,15 @@ export default function App() {
                                   <div
                                     key={lIdx}
                                     onClick={() => toggleLineInBlock(editingBlockId, lIdx)}
-                                    className={`flex items-center justify-between p-2 rounded-lg transition-all cursor-pointer ${
+                                    className={`flex items-center justify-between p-2 rounded-lg transition-all ${
+                                      isArrangementLocked ? 'cursor-not-allowed' : 'cursor-pointer'
+                                    } ${
                                       isEnabled
                                         ? 'bg-white/5 border border-indigo-500/30'
                                         : 'bg-black/20 border border-transparent opacity-40'
-                                    } text-[10px] hover:bg-white/10`}
+                                    } text-[10px] ${
+                                      isArrangementLocked ? '' : 'hover:bg-white/10'
+                                    }`}
                                   >
                                     <div className="flex items-center gap-2 truncate pr-2">
                                       <span className="font-mono text-[9px] text-gray-500">
@@ -1856,16 +2818,18 @@ export default function App() {
                             {Object.keys(sectionTemplates).map((sec) => (
                               <button
                                 key={sec}
+                                disabled={isArrangementLocked}
                                 onClick={() => addRoadmapBlock(sec)}
-                                className="px-2 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded text-[8px] font-bold uppercase tracking-widest text-emerald-300 transition-all active:scale-95 cursor-pointer"
+                                className="px-2 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded text-[8px] font-bold uppercase tracking-widest text-emerald-300 transition-all active:scale-95 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
                               >
                                 + {sec}
                               </button>
                             ))}
                           </div>
                           <button
+                            disabled={isArrangementLocked}
                             onClick={resetRoadmapBlocks}
-                            className="px-2 py-1 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 rounded text-[8px] font-bold uppercase tracking-widest text-rose-300 transition-all active:scale-95 cursor-pointer"
+                            className="px-2 py-1 bg-rose-500/10 hover:bg-[#16121f] text-rose-400 active:scale-125 border border-rose-500/30 rounded text-[8px] font-bold uppercase tracking-widest transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
                           >
                             Reset Default
                           </button>
@@ -1874,60 +2838,113 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-
-                {/* Family chords visual references */}
-                <div className="pt-2 sm:pt-3 border-t border-indigo-500/20">
-                  {renderFamilyChordsList()}
-                </div>
-              </div>
-            </div>
-
-            {/* Performance Controls Toolbar Drawer */}
-            <div id="lyricsFullscreenWrap" className="mt-2 flex flex-col flex-1 relative min-h-0 bg-transparent transition-all">
-              <div className="flex justify-between items-center mb-1.5 pr-1 sm:pr-2">
-                <span className="text-[9px] sm:text-[10px] text-indigo-400 uppercase tracking-widest font-extrabold select-none flex-shrink-0">
-                  Sheet View
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    id="controlsToggleBtn"
-                    onClick={() => setControlsExpanded((prev) => !prev)}
-                    className="px-2 py-1 bg-white/5 hover:bg-white/10 text-indigo-300 rounded flex items-center gap-1 text-[9px] font-bold transition-all border border-white/5 shadow-sm active:scale-95 cursor-pointer"
-                  >
-                    {controlsExpanded ? '▲ Hide Tools' : '▼ Show Tools'}
-                  </button>
-                  <button
-                    onClick={toggleFullScreen}
-                    className="fs-hide-btn px-2 py-1 bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white rounded flex items-center gap-1.5 text-[9px] uppercase tracking-wider font-bold transition-all border border-white/5 shadow-sm active:scale-95 cursor-pointer"
-                    title="Fullscreen Lyrics"
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth="2"
-                        d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"
-                      />
-                    </svg>
-                    <span className="hidden sm:inline">Fullscreen</span>
-                  </button>
-                </div>
               </div>
 
-              {/* Toolbar contents */}
-              <div className={`panel-wrap ${controlsExpanded ? 'is-open' : ''}`}>
-                <div className="panel-inner">
-                  <div className="pt-1 pb-1.5">
-                    <div className="grid grid-cols-12 gap-2 w-full p-2 bg-[#0d0f1e]/40 rounded-xl border border-indigo-500/20 shadow-sm select-none">
+              {/* Consolidated Collapsible Controls Panel */}
+              <div className="mt-2.5 flex-shrink-0 bg-[#0d0f1e]/40 backdrop-blur-md rounded-xl p-2.5 border border-indigo-500/25 space-y-2 select-none shadow-[inset_0_2px_8px_rgba(0,0,0,0.4)]">
+              
+              {/* 1. Collapsible Roadmap Flow */}
+              <div className="border-b border-white/5 last:border-0 pb-1.5 last:pb-0">
+                <div
+                  onClick={() => setIsRoadmapFlowCollapsed(!isRoadmapFlowCollapsed)}
+                  className="flex items-center justify-between cursor-pointer select-none text-[9px] sm:text-[10px] text-indigo-300 font-extrabold uppercase tracking-widest px-1 py-0.5 hover:text-white transition-colors"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>🧭</span> Roadmap Flow
+                  </span>
+                  <span className="text-[10px] font-mono font-black text-indigo-400">
+                    {isRoadmapFlowCollapsed ? '▼' : '▲'}
+                  </span>
+                </div>
+                <div className={`panel-wrap ${!isRoadmapFlowCollapsed ? 'is-open' : ''}`}>
+                  <div className="panel-inner pt-1.5 px-1">
+                    {activeRoadmap.length > 0 ? (
+                      <div className="flex flex-wrap items-center gap-1.5 w-full py-0.5">
+                        {activeRoadmap.map((block, idx) => {
+                          const blockRep = repInfo[idx];
+                          if (blockRep?.isRepeat) {
+                            return null; // Skip rendering identical consecutive repeats
+                          }
+
+                          let badgeStyle = 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20 hover:bg-indigo-500/20';
+                          const nameLower = block.name.toLowerCase();
+                          if (nameLower.includes('chorus')) {
+                            badgeStyle = 'bg-amber-500/10 text-amber-300 border-amber-500/20 hover:bg-amber-500/20';
+                          } else if (nameLower.includes('verse')) {
+                            badgeStyle = 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20 hover:bg-emerald-500/20';
+                          } else if (nameLower.includes('bridge')) {
+                            badgeStyle = 'bg-purple-500/10 text-purple-300 border-purple-500/20 hover:bg-purple-500/20';
+                          } else if (nameLower.includes('intro') || nameLower.includes('outro')) {
+                            badgeStyle = 'bg-sky-500/10 text-sky-300 border-sky-500/20 hover:bg-sky-500/20';
+                          }
+
+                          return (
+                            <div key={block.id} className="flex items-center gap-1 shrink-0">
+                              {idx > 0 && (
+                                <span className="text-gray-600 text-[9px] font-bold font-mono px-0.5 select-none">➔</span>
+                              )}
+                              <button
+                                onClick={() => {
+                                  const element = document.getElementById(`sec-wrapper-${idx}`);
+                                  if (element) {
+                                    element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                    element.classList.add('ring-2', 'ring-indigo-500/50', 'rounded-xl');
+                                    setTimeout(() => {
+                                      element.classList.remove('ring-2', 'ring-indigo-500/50');
+                                    }, 1500);
+                                  }
+                                }}
+                                className={`px-2 py-0.5 text-[9px] font-semibold rounded-md border transition-all active:scale-95 cursor-pointer flex items-center gap-1 ${badgeStyle} shadow-sm`}
+                                title={`Click to jump to ${block.name}`}
+                              >
+                                <span>{block.name.toUpperCase()}</span>
+                                {block.keyOffset && block.keyOffset !== 0 ? (
+                                  <span className="text-[7px] bg-red-500/20 text-red-300 px-0.5 rounded">
+                                    {block.keyOffset > 0 ? `+${block.keyOffset}` : block.keyOffset}
+                                  </span>
+                                ) : null}
+                                {blockRep && blockRep.totalInRun > 1 && (
+                                  <span className="text-[7.5px] bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded px-1 font-mono font-black select-none ml-0.5">
+                                    {blockRep.totalInRun}x
+                                  </span>
+                                )}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="text-[9px] text-gray-500 italic">No roadmap defined for this song.</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* 2. Collapsible Performance Panel */}
+              <div className="border-b border-white/5 last:border-0 pb-1.5 last:pb-0">
+                <div
+                  onClick={() => setIsPerformancePanelCollapsed(!isPerformancePanelCollapsed)}
+                  className="flex items-center justify-between cursor-pointer select-none text-[9px] sm:text-[10px] text-indigo-300 font-extrabold uppercase tracking-widest px-1 py-0.5 hover:text-white transition-colors"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>⚙️</span> Performance Settings
+                  </span>
+                  <span className="text-[10px] font-mono font-black text-indigo-400">
+                    {isPerformancePanelCollapsed ? '▼' : '▲'}
+                  </span>
+                </div>
+                <div className={`panel-wrap ${!isPerformancePanelCollapsed ? 'is-open' : ''}`}>
+                  <div className="panel-inner pt-1.5 px-1">
+                    <div className="grid grid-cols-12 gap-2 w-full p-2 bg-black/25 rounded-xl border border-indigo-500/10 shadow-sm select-none">
                       
                       {/* Widget 1: Key & Zoom */}
-                      <div className="col-span-12 sm:col-span-6 lg:col-span-3 flex items-center justify-between gap-2.5 bg-black/25 border border-white/5 rounded-lg px-2.5 py-1.5 shadow-inner">
+                      <div className="col-span-12 sm:col-span-6 lg:col-span-3 flex items-center justify-between gap-2.5 bg-black/20 border border-white/5 rounded-lg px-2.5 py-1.5 shadow-inner">
                         <div className="flex flex-col flex-1">
-                          <span className="text-[7.5px] text-indigo-300 uppercase tracking-widest font-black font-mono">Transpose</span>
+                          <span className="text-[7.5px] text-indigo-300/80 uppercase tracking-widest font-black font-mono">Transpose</span>
                           <div className="flex items-center gap-1 mt-0.5">
                             <button
                               onClick={() => shiftKey(-1)}
-                              className="w-5 h-5 rounded-md bg-white/5 hover:bg-white/10 active:scale-90 flex items-center justify-center font-black text-xs text-indigo-300 transition-all cursor-pointer"
+                              className="w-5 h-5 rounded bg-white/5 hover:bg-white/10 active:scale-90 flex items-center justify-center font-black text-xs text-indigo-300 transition-all cursor-pointer"
                             >
                               -
                             </button>
@@ -1936,7 +2953,7 @@ export default function App() {
                             </span>
                             <button
                               onClick={() => shiftKey(1)}
-                              className="w-5 h-5 rounded-md bg-white/5 hover:bg-white/10 active:scale-90 flex items-center justify-center font-black text-xs text-indigo-300 transition-all cursor-pointer"
+                              className="w-5 h-5 rounded bg-white/5 hover:bg-white/10 active:scale-90 flex items-center justify-center font-black text-xs text-indigo-300 transition-all cursor-pointer"
                             >
                               +
                             </button>
@@ -1944,17 +2961,17 @@ export default function App() {
                         </div>
                         <div className="h-6 w-[1px] bg-white/10 self-center" />
                         <div className="flex flex-col items-end flex-1">
-                          <span className="text-[7.5px] text-indigo-300 uppercase tracking-widest font-black font-mono">Zoom</span>
+                          <span className="text-[7.5px] text-indigo-300/80 uppercase tracking-widest font-black font-mono">Zoom</span>
                           <div className="flex items-center gap-1 mt-0.5">
                             <button
                               onClick={() => adjustZoom(-0.1)}
-                              className="w-5 h-5 rounded-md bg-white/5 hover:bg-white/10 flex items-center justify-center font-black text-[9px] text-gray-300 active:scale-90 transition-all cursor-pointer"
+                              className="w-5 h-5 rounded bg-white/5 hover:bg-white/10 flex items-center justify-center font-black text-[9px] text-gray-300 active:scale-90 transition-all cursor-pointer"
                             >
                               A-
                             </button>
                             <button
                               onClick={() => adjustZoom(0.1)}
-                              className="w-5 h-5 rounded-md bg-white/5 hover:bg-white/10 flex items-center justify-center font-black text-[9px] text-gray-300 active:scale-90 transition-all cursor-pointer"
+                              className="w-5 h-5 rounded bg-white/5 hover:bg-white/10 flex items-center justify-center font-black text-[9px] text-gray-300 active:scale-90 transition-all cursor-pointer"
                             >
                               A+
                             </button>
@@ -1963,8 +2980,8 @@ export default function App() {
                       </div>
 
                       {/* Widget 2: Display & Toggles */}
-                      <div className="col-span-12 sm:col-span-6 lg:col-span-4 flex flex-col justify-between gap-1 bg-black/25 border border-white/5 rounded-lg px-2.5 py-1.5 shadow-inner">
-                        <span className="text-[7.5px] text-indigo-300 uppercase tracking-widest font-black font-mono">View & Layout Options</span>
+                      <div className="col-span-12 sm:col-span-6 lg:col-span-4 flex flex-col justify-between gap-1 bg-black/20 border border-white/5 rounded-lg px-2.5 py-1.5 shadow-inner">
+                        <span className="text-[7.5px] text-indigo-300/80 uppercase tracking-widest font-black font-mono">View & Layout Options</span>
                         <div className="grid grid-cols-3 gap-1 items-center mt-0.5">
                           <select
                             value={displayMode}
@@ -1982,7 +2999,6 @@ export default function App() {
                                 ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30 hover:bg-indigo-500/30'
                                 : 'bg-white/5 text-gray-400 border-white/5 hover:bg-white/10 hover:text-white'
                             }`}
-                            title="Toggle Lyrics visibility on the sheet"
                           >
                             {showLyrics ? 'Lyrics On' : 'Lyrics Off'}
                           </button>
@@ -1993,7 +3009,6 @@ export default function App() {
                                 ? 'bg-amber-500/15 text-amber-300 border-amber-500/25 hover:bg-amber-500/25 shadow-sm'
                                 : 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20 hover:bg-indigo-500/20 shadow-sm'
                             }`}
-                            title="Switch between Flow View and Compact View"
                           >
                             {sheetLayoutMode === 'compact' ? 'Show Flow' : 'Show Compact'}
                           </button>
@@ -2001,8 +3016,8 @@ export default function App() {
                       </div>
 
                       {/* Widget 3: Autoscroll */}
-                      <div className="col-span-12 sm:col-span-6 lg:col-span-2 flex flex-col justify-between gap-1 bg-black/25 border border-white/5 rounded-lg px-2.5 py-1.5 shadow-inner">
-                        <span className="text-[7.5px] text-indigo-300 uppercase tracking-widest font-black font-mono">Autoscroll</span>
+                      <div className="col-span-12 sm:col-span-6 lg:col-span-2 flex flex-col justify-between gap-1 bg-black/20 border border-white/5 rounded-lg px-2.5 py-1.5 shadow-inner">
+                        <span className="text-[7.5px] text-indigo-300/80 uppercase tracking-widest font-black font-mono">Autoscroll</span>
                         <div className="flex items-center justify-center gap-1.5 mt-1">
                           <button
                             onClick={() => setIsScrollingActive((prev) => !prev)}
@@ -2015,11 +3030,10 @@ export default function App() {
                             {isScrollingActive ? '⏸️ Stop' : '▶️ Play'}
                           </button>
                           
-                          <div className="flex items-center justify-center gap-1 bg-black/40 rounded-md px-1 py-0.5 border border-white/5 shadow-inner">
+                          <div className="flex items-center justify-center gap-1 bg-black/40 rounded px-1 py-0.5 border border-white/5 shadow-inner">
                             <button
                               onClick={() => setScrollSpeed((prev) => Math.max(0.1, prev - 0.2))}
                               className="w-5 h-5 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded text-gray-300 font-bold active:scale-90 cursor-pointer select-none transition-colors"
-                              title="Decrease Speed"
                             >
                               -
                             </button>
@@ -2029,7 +3043,6 @@ export default function App() {
                             <button
                               onClick={() => setScrollSpeed((prev) => Math.min(10, prev + 0.2))}
                               className="w-5 h-5 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded text-gray-300 font-bold active:scale-90 cursor-pointer select-none transition-colors"
-                              title="Increase Speed"
                             >
                               +
                             </button>
@@ -2038,8 +3051,8 @@ export default function App() {
                       </div>
 
                       {/* Widget 4: Metronome & Tempo */}
-                      <div className="col-span-12 sm:col-span-6 lg:col-span-3 flex flex-col justify-between gap-1 bg-black/25 border border-white/5 rounded-lg px-2 py-1.5 shadow-inner">
-                        <span className="text-[7.5px] text-indigo-300 uppercase tracking-widest font-black font-mono">Metronome & Tempo</span>
+                      <div className="col-span-12 sm:col-span-6 lg:col-span-3 flex flex-col justify-between gap-1 bg-black/20 border border-white/5 rounded-lg px-2.5 py-1.5 shadow-inner">
+                        <span className="text-[7.5px] text-indigo-300/80 uppercase tracking-widest font-black font-mono">Metronome & Tempo</span>
                         <div className="flex items-center justify-center gap-1.5 mt-0.5">
                           <button
                             onClick={() => setIsMetronomeActive((prev) => !prev)}
@@ -2050,8 +3063,7 @@ export default function App() {
                             }`}
                           >
                             <span
-                              id="metronomeDot"
-                              className="w-1.5 h-1.5 rounded-full bg-rose-500 opacity-20 scale-90 transition-all duration-100"
+                              className={`w-1.5 h-1.5 rounded-full bg-rose-500 scale-90 transition-all duration-100 ${isMetronomeActive ? 'opacity-100 animate-pulse' : 'opacity-20'}`}
                             />
                             Metro
                           </button>
@@ -2071,82 +3083,46 @@ export default function App() {
                           />
                         </div>
                       </div>
-
                     </div>
                   </div>
                 </div>
               </div>
 
-
-              {/* Roadmap Flow Progression bar above chords & lyrics */}
-              {activeRoadmap.length > 0 && (
-                <div className="mb-2 bg-indigo-950/40 border border-indigo-500/20 rounded-xl px-3 py-1.5 flex items-center gap-2 select-none overflow-x-auto custom-scrollbar shadow-inner backdrop-blur-sm shrink-0">
-                  <div className="flex items-center gap-1.5 text-[8px] font-mono font-black uppercase text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 rounded px-1.5 py-0.5 shrink-0 shadow-sm select-none">
-                    <span>🧭</span> ROADMAP
-                  </div>
-                  <div className="flex items-center gap-1 flex-nowrap py-0.5">
-                    {activeRoadmap.map((block, idx) => {
-                      const blockRep = repInfo[idx];
-                      if (blockRep?.isRepeat) {
-                        return null; // Skip rendering identical consecutive repeats
-                      }
-
-                      let badgeStyle = 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20 hover:bg-indigo-500/20';
-                      const nameLower = block.name.toLowerCase();
-                      if (nameLower.includes('chorus')) {
-                        badgeStyle = 'bg-amber-500/10 text-amber-300 border-amber-500/20 hover:bg-amber-500/20';
-                      } else if (nameLower.includes('verse')) {
-                        badgeStyle = 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20 hover:bg-emerald-500/20';
-                      } else if (nameLower.includes('bridge')) {
-                        badgeStyle = 'bg-purple-500/10 text-purple-300 border-purple-500/20 hover:bg-purple-500/20';
-                      } else if (nameLower.includes('intro') || nameLower.includes('outro')) {
-                        badgeStyle = 'bg-sky-500/10 text-sky-300 border-sky-500/20 hover:bg-sky-500/20';
-                      }
-
-                      return (
-                        <div key={block.id} className="flex items-center gap-1 shrink-0">
-                          {idx > 0 && (
-                            <span className="text-gray-600 text-[9px] font-bold font-mono px-0.5 select-none">➔</span>
-                          )}
-                          <button
-                            onClick={() => {
-                              const element = document.getElementById(`sec-wrapper-${idx}`);
-                              if (element) {
-                                element.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                element.classList.add('ring-2', 'ring-indigo-500/50', 'rounded-xl');
-                                setTimeout(() => {
-                                  element.classList.remove('ring-2', 'ring-indigo-500/50');
-                                }, 1500);
-                              }
-                            }}
-                            className={`px-2 py-0.5 text-[9px] font-semibold rounded-md border transition-all active:scale-95 cursor-pointer flex items-center gap-1 ${badgeStyle} shadow-sm`}
-                            title={`Click to jump to ${block.name}`}
-                          >
-                            <span>{block.name}</span>
-                            {block.keyOffset && block.keyOffset !== 0 ? (
-                              <span className="text-[7px] bg-red-500/20 text-red-300 px-0.5 rounded">
-                                {block.keyOffset > 0 ? `+${block.keyOffset}` : block.keyOffset}
-                              </span>
-                            ) : null}
-                            {blockRep && blockRep.totalInRun > 1 && (
-                              <span className="text-[7.5px] bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded px-1 font-mono font-black select-none ml-0.5">
-                                {blockRep.totalInRun}x
-                              </span>
-                            )}
-                          </button>
-                        </div>
-                      );
-                    })}
+              {/* 3. Collapsible Family Chords */}
+              <div className="border-b border-white/5 last:border-0 pb-1.5 last:pb-0">
+                <div
+                  onClick={() => setIsFamilyChordsCollapsed(!isFamilyChordsCollapsed)}
+                  className="flex items-center justify-between cursor-pointer select-none text-[9px] sm:text-[10px] text-indigo-300 font-extrabold uppercase tracking-widest px-1 py-0.5 hover:text-white transition-colors"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span>🎸</span> Family Chords
+                  </span>
+                  <span className="text-[10px] font-mono font-black text-indigo-400">
+                    {isFamilyChordsCollapsed ? '▼' : '▲'}
+                  </span>
+                </div>
+                <div className={`panel-wrap ${!isFamilyChordsCollapsed ? 'is-open' : ''}`}>
+                  <div className="panel-inner pt-1.5 px-1">
+                    {renderFamilyChordsList(true)}
                   </div>
                 </div>
-              )}
+              </div>
 
+            </div>
 
-              {/* Scrollable song sheet grid */}
+            {/* Chords & Lyrics Sheet Main Body Panel */}
+            <div id="lyricsFullscreenWrap" className="mt-2.5 flex flex-col relative bg-transparent transition-all">
+              <div className="flex justify-between items-center mb-1.5 pr-1 sm:pr-2">
+                <span className="text-[9px] sm:text-[10px] text-indigo-400 uppercase tracking-widest font-extrabold select-none flex-shrink-0">
+                  Sheet View
+                </span>
+              </div>
+
+              {/* Scrollable song sheet grid - styled beautifully as a white physical binder sheet */}
               <div
-                className={`pr-1 sm:pr-2 pb-16 song-scroll-container flex-1 overflow-y-auto custom-scrollbar w-full ${
+                className={`p-4 sm:p-6 md:p-8 pb-20 song-scroll-container w-full sheet-white rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.3)] ${
                   focusedLineId ? 'focused-parent' : ''
-                } ${controlsExpanded ? 'mt-0' : 'mt-1'}`}
+                } mt-1.5`}
               >
                 {activeRoadmap.map((block, idx) => {
                   let blockDisplayName = block.name;
@@ -2174,11 +3150,10 @@ export default function App() {
 
                   const blockRep = repInfo[idx];
                   
-                  // If this block is an identical repetition of the previous block, we skip rendering it entirely.
-                  // This is because we display the multiplier label (e.g. 2x, 3x) on the very first instance.
-                  if (sheetLayoutMode === 'sequence' && blockRep?.isRepeat) {
-                    return null;
-                  }
+                   // Reveal consecutive repeating sections fully as requested
+                   // if (sheetLayoutMode === 'sequence' && blockRep?.isRepeat) {
+                   //   return null;
+                   // }
 
                   const templateLines = sectionTemplates[block.name] || [];
                   const blockOffset = block.keyOffset || 0;
@@ -2206,8 +3181,8 @@ export default function App() {
                     lineColor = 'bg-sky-500/20';
                   }
 
-                  // Non-consecutive duplicates: Check if this block is an identical repetition of a PREVIOUS block in the flow
-                  if (sheetLayoutMode === 'sequence') {
+                  // Non-consecutive duplicates: Check if this block is an identical repetition of a PREVIOUS block in the flow (Fully revealed as requested)
+                  if (false) {
                     const firstIdenticalIdx = activeRoadmap.findIndex((b, bIdx) => bIdx < idx && areBlocksIdentical(b, block));
                     if (firstIdenticalIdx !== -1) {
                       // Skip rendering full chords/lyrics, instead render a beautiful compact repeat card!
@@ -2267,7 +3242,7 @@ export default function App() {
                             className={`font-mono uppercase tracking-widest font-black ${textColor} shrink-0 flex items-center gap-1.5`}
                             style={{ fontSize: `${Math.max(12, 14 * lyricZoom)}px` }}
                           >
-                            {blockDisplayName}
+                            {blockDisplayName.toUpperCase()}
                             {blockRep && blockRep.totalInRun > 1 && (
                               <span className="text-[8px] bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded-md px-1.5 py-0.5 font-mono font-black select-none animate-pulse">
                                 {blockRep.totalInRun}x
@@ -2679,6 +3654,44 @@ export default function App() {
                     </div>
                   );
                 })}
+
+                {/* Next Song Transition Banner */}
+                {(() => {
+                  const currentIndexInSet = setlists.indexOf(String(currentSong.SongID));
+                  if (currentIndexInSet !== -1 && currentIndexInSet < setlists.length - 1) {
+                    const nextSongID = setlists[currentIndexInSet + 1];
+                    const nextSong = songs.find((s) => String(s.SongID) === nextSongID);
+                    if (nextSong) {
+                      return (
+                        <div className="mt-12 pt-8 border-t border-indigo-100/10">
+                          <button
+                            onClick={() => executeSongLoad(nextSong)}
+                            className="w-full text-left p-5 rounded-2xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white shadow-lg shadow-indigo-600/25 transition-all hover:shadow-xl hover:shadow-indigo-600/35 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.99] group cursor-pointer"
+                          >
+                            <div className="flex items-center justify-between gap-4">
+                              <div className="min-w-0">
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-200/90 block mb-1">
+                                  Up Next in Setlist
+                                </span>
+                                <h3 className="text-base sm:text-lg font-black tracking-tight leading-snug truncate text-white">
+                                  {nextSong.Title}
+                                </h3>
+                                <span className="text-xs text-indigo-100/80 truncate block mt-0.5 font-medium">
+                                  by {nextSong.Artist || 'Unknown Artist'}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 bg-white/10 group-hover:bg-white/20 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold uppercase tracking-wider transition-colors shrink-0">
+                                <span>Next</span>
+                                <span className="text-base sm:text-lg group-hover:translate-x-1 transition-transform duration-200 inline-block">⏭️</span>
+                              </div>
+                            </div>
+                          </button>
+                        </div>
+                      );
+                    }
+                  }
+                  return null;
+                })()}
               </div>
             </div>
           </div>
@@ -2715,10 +3728,30 @@ export default function App() {
         onToggleFullScreen={toggleFullScreen}
         triggerCapability={handleTriggerCapability}
         onRunDiagnostics={() => setIsDiagnosticModalOpen(true)}
+        allSharedSetlists={allSharedSetlists}
+        onSaveSetlistOrder={saveSetlistOrder}
+        onDeleteSetlist={deleteSetlistFolder}
+        onRemoveSongFromSetlist={removeSongFromSetlist}
+        onSelectSongFromSetlist={selectSongFromSetlist}
+        onCreateSetlist={createNewSetlistFolder}
+        activeSetlistFolder={activeSetlistFolder}
       />
 
       {/* Shortcuts Modal dialog */}
       <ShortcutsModal isOpen={isShortcutsOpen} onClose={() => setIsShortcutsOpen(false)} />
+
+      {/* Setlist Selector Dialog */}
+      {currentSong && (
+        <SetlistSelectorDialog
+          isOpen={isSetlistManagerOpen}
+          onClose={() => setIsSetlistManagerOpen(false)}
+          currentSong={currentSong}
+          allSharedSetlists={allSharedSetlists}
+          onAddSongToSet={saveSongToSetlist}
+          onRemoveSongFromSet={removeSongFromSetlist}
+          onCreateNewSetlist={createNewSetlistFolder}
+        />
+      )}
 
       {/* Admin lock password dialog */}
       {isAdminModalOpen && (
@@ -2860,6 +3893,141 @@ export default function App() {
         </div>
       )}
 
+      {/* Pre-load View & Layout Settings Modal */}
+      {pendingSong && (
+        <div className="fixed inset-0 bg-[#020205]/85 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn">
+          <div className="w-full max-w-sm bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-5 select-none flex flex-col space-y-4">
+            
+            {/* Header */}
+            <div className="flex justify-between items-start">
+              <div>
+                <h3 className="text-sm font-bold text-indigo-200 tracking-wider uppercase font-sans">
+                  Load & Configure
+                </h3>
+                <p className="text-[11px] text-gray-400 mt-0.5 line-clamp-1 font-mono">
+                  {pendingSong.Title}
+                </p>
+              </div>
+              <button
+                onClick={() => setPendingSong(null)}
+                className="w-6 h-6 rounded-full bg-white/5 hover:bg-white/10 active:scale-90 flex items-center justify-center text-gray-400 hover:text-white transition-all cursor-pointer font-bold text-xs"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Content Form */}
+            <div className="space-y-3.5">
+              
+              {/* Option 1: Display Mode */}
+              <div className="space-y-1.5">
+                <label className="text-[9px] text-indigo-400 font-extrabold uppercase tracking-widest font-mono">
+                  Display Mode
+                </label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(['chords', 'numbers', 'both'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      onClick={() => setModalDisplayMode(mode)}
+                      className={`px-2 py-1.5 rounded-lg text-[9.5px] uppercase tracking-wider font-bold border transition-all active:scale-95 cursor-pointer ${
+                        modalDisplayMode === mode
+                          ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 shadow-inner'
+                          : 'bg-white/5 text-gray-400 border-white/5 hover:text-gray-200'
+                      }`}
+                    >
+                      {mode}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Option 2: Lyrics Toggle */}
+              <div className="flex items-center justify-between py-1 border-t border-b border-white/5">
+                <div className="flex flex-col">
+                  <span className="text-[10.5px] text-gray-300 font-bold font-sans">Show Lyrics</span>
+                  <span className="text-[8.5px] text-gray-500 font-mono">Display text sheet with chords</span>
+                </div>
+                <button
+                  onClick={() => setModalShowLyrics(!modalShowLyrics)}
+                  className={`px-3 py-1 rounded-lg text-[9.5px] uppercase font-bold border tracking-wider transition-all active:scale-90 cursor-pointer ${
+                    modalShowLyrics
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                      : 'bg-white/5 text-gray-400 border-white/5 hover:text-white'
+                  }`}
+                >
+                  {modalShowLyrics ? 'ON' : 'OFF'}
+                </button>
+              </div>
+
+              {/* Option 3: Sheet Layout Mode */}
+              <div className="flex items-center justify-between py-1">
+                <div className="flex flex-col">
+                  <span className="text-[10.5px] text-gray-300 font-bold font-sans">Sheet Layout</span>
+                  <span className="text-[8.5px] text-gray-500 font-mono">Flow/Sequence vs Compact View</span>
+                </div>
+                <div className="flex gap-1 bg-black/40 p-0.5 rounded-lg border border-white/5 shadow-inner">
+                  <button
+                    onClick={() => setModalSheetLayoutMode('sequence')}
+                    className={`px-2 py-1 rounded-md text-[8.5px] uppercase font-black transition-all cursor-pointer ${
+                      modalSheetLayoutMode === 'sequence'
+                        ? 'bg-indigo-500/20 text-indigo-300'
+                        : 'text-gray-400 hover:text-gray-200'
+                    }`}
+                  >
+                    Flow
+                  </button>
+                  <button
+                    onClick={() => setModalSheetLayoutMode('compact')}
+                    className={`px-2 py-1 rounded-md text-[8.5px] uppercase font-black transition-all cursor-pointer ${
+                      modalSheetLayoutMode === 'compact'
+                        ? 'bg-amber-500/20 text-amber-300'
+                        : 'text-gray-400 hover:text-gray-200'
+                    }`}
+                  >
+                    Compact
+                  </button>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex gap-2 pt-2 border-t border-white/5">
+              <button
+                onClick={() => {
+                  setPendingSong(null);
+                  setPendingSetlistName('');
+                }}
+                className="flex-1 py-2 rounded-xl text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 active:scale-95 transition-all font-bold text-[10px] uppercase tracking-wider cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setDisplayMode(modalDisplayMode);
+                  setShowLyrics(modalShowLyrics);
+                  setSheetLayoutMode(modalSheetLayoutMode);
+                  if (pendingSetlistName) {
+                    setActiveSetlistFolder(pendingSetlistName);
+                    executeSongLoad(pendingSong, false, pendingSetlistName);
+                    showToast(`Loaded "${pendingSong.Title}" with arrangement for "${pendingSetlistName}"`, 'success');
+                    setPendingSetlistName('');
+                  } else {
+                    setActiveSetlistFolder('');
+                    executeSongLoad(pendingSong, true, '');
+                  }
+                  setPendingSong(null);
+                }}
+                className="flex-1 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white active:scale-95 transition-all font-bold text-[10px] uppercase tracking-wider shadow-md shadow-indigo-500/10 cursor-pointer"
+              >
+                Generate
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
       {/* Database Diagnostic Modal */}
       <DatabaseDiagnosticModal
         isOpen={isDiagnosticModalOpen}
@@ -2878,6 +4046,9 @@ export default function App() {
           } else if (toast.type === 'error') {
             theme = 'bg-rose-500/10 text-rose-300 border-rose-500/20';
             symbol = '✕';
+          } else if (toast.type === 'warning') {
+            theme = 'bg-amber-500/10 text-amber-300 border-amber-500/20';
+            symbol = '⚠️';
           }
           return (
             <div

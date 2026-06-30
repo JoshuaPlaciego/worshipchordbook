@@ -56,6 +56,7 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
   const [expandedSets, setExpandedSets] = useState<{ [setName: string]: boolean }>({});
   const [draggedItem, setDraggedItem] = useState<{ setName: string; index: number } | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [deleteConfirmSet, setDeleteConfirmSet] = useState<string | null>(null);
 
   const [prevIsOpen, setPrevIsOpen] = useState(false);
   const [prevTab, setPrevTab] = useState(currentTab);
@@ -66,6 +67,10 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
 
     if ((openedNow || switchedToSetlistsNow) && activeSetlistFolder) {
       setExpandedSets({ [activeSetlistFolder]: true });
+    }
+
+    if (openedNow || switchedToSetlistsNow) {
+      setDeleteConfirmSet(null);
     }
 
     setPrevIsOpen(isOpen);
@@ -314,46 +319,73 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                           </div>
                           
                           <div className="flex items-center gap-2">
-                            {folderSongs.length > 0 && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (onSelectSongFromSetlist) {
-                                    onSelectSongFromSetlist(folderSongs[0], setName);
-                                    onClose();
-                                  }
-                                }}
-                                className={
-                                  activeSetlistFolder === setName
-                                    ? "px-2 py-1 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 hover:text-emerald-350 border border-emerald-500/30 rounded-md text-[10px] font-extrabold transition-all cursor-pointer flex items-center gap-1.5 shrink-0 shadow-[0_0_12px_rgba(16,185,129,0.1)]"
-                                    : "px-2 py-1 bg-indigo-500/10 hover:bg-indigo-500/30 text-indigo-300 hover:text-white rounded-md text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shrink-0"
-                                }
-                                title={activeSetlistFolder === setName ? "Setlist is Live" : "Start Setlist"}
-                              >
-                                {activeSetlistFolder === setName ? (
-                                  <>
-                                    <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping shrink-0" />
-                                    <span>LIVE</span>
-                                  </>
-                                ) : (
-                                  <>▶ Start</>
+                            {deleteConfirmSet === setName ? (
+                              <div className="flex items-center gap-1.5 bg-rose-500/10 border border-rose-500/30 px-1.5 py-0.5 rounded-lg">
+                                <span className="text-[9px] text-rose-300 font-bold select-none">Delete?</span>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (onDeleteSetlist) {
+                                      onDeleteSetlist(setName);
+                                    }
+                                    setDeleteConfirmSet(null);
+                                  }}
+                                  className="px-1.5 py-0.5 bg-rose-600 hover:bg-rose-500 text-white text-[9px] font-black rounded cursor-pointer transition-all active:scale-90"
+                                >
+                                  Yes
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDeleteConfirmSet(null);
+                                  }}
+                                  className="px-1.5 py-0.5 bg-indigo-950 hover:bg-indigo-900 border border-indigo-500/20 text-indigo-200 text-[9px] font-bold rounded cursor-pointer transition-all active:scale-90"
+                                >
+                                  No
+                                </button>
+                              </div>
+                            ) : (
+                              <>
+                                {folderSongs.length > 0 && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (onSelectSongFromSetlist) {
+                                        onSelectSongFromSetlist(folderSongs[0], setName);
+                                        onClose();
+                                      }
+                                    }}
+                                    className={
+                                      activeSetlistFolder === setName
+                                        ? "px-2 py-1 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 hover:text-emerald-350 border border-emerald-500/30 rounded-md text-[10px] font-extrabold transition-all cursor-pointer flex items-center gap-1.5 shrink-0 shadow-[0_0_12px_rgba(16,185,129,0.1)]"
+                                        : "px-2 py-1 bg-indigo-500/10 hover:bg-indigo-500/30 text-indigo-300 hover:text-white rounded-md text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shrink-0"
+                                    }
+                                    title={activeSetlistFolder === setName ? "Setlist is Live" : "Start Setlist"}
+                                  >
+                                    {activeSetlistFolder === setName ? (
+                                      <>
+                                        <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-ping shrink-0" />
+                                        <span>LIVE</span>
+                                      </>
+                                    ) : (
+                                      <>▶ Start</>
+                                    )}
+                                  </button>
                                 )}
-                              </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDeleteConfirmSet(setName);
+                                  }}
+                                  className="p-1 hover:bg-rose-500/10 text-gray-500 hover:text-rose-400 rounded-md transition-colors cursor-pointer"
+                                  title="Delete Setlist Folder"
+                                >
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                </button>
+                              </>
                             )}
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (confirm(`Are you sure you want to delete the setlist folder "${setName}"?`)) {
-                                  if (onDeleteSetlist) onDeleteSetlist(setName);
-                                }
-                              }}
-                              className="p-1 hover:bg-rose-500/10 text-gray-500 hover:text-rose-400 rounded-md transition-colors cursor-pointer"
-                              title="Delete Setlist Folder"
-                            >
-                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                              </svg>
-                            </button>
                             <span className={`text-[10px] text-gray-400 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}>
                               ▼
                             </span>

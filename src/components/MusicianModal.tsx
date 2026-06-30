@@ -3,6 +3,159 @@ import { getChordTheoryData, NOTE_TO_INDEX, GUITAR_DIAGRAMS } from '../utils';
 import { FretboardVisualizer } from './FretboardVisualizer';
 import { PianoVisualizer } from './PianoVisualizer';
 
+class WebAudioSynth {
+  private ctx: AudioContext | null = null;
+  private masterGain: GainNode | null = null;
+  private volume: number = 0.7;
+
+  constructor() {
+    try {
+      const stored = localStorage.getItem('musician_modal_volume');
+      if (stored !== null) {
+        const parsed = parseFloat(stored);
+        if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) {
+          this.volume = parsed;
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to load volume from localStorage:", e);
+    }
+  }
+
+  private initCtx() {
+    if (!this.ctx) {
+      this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    if (!this.masterGain) {
+      this.masterGain = this.ctx.createGain();
+      this.masterGain.gain.setValueAtTime(this.volume, this.ctx.currentTime);
+      this.masterGain.connect(this.ctx.destination);
+    }
+    if (this.ctx.state === 'suspended') {
+      this.ctx.resume();
+    }
+    return this.ctx;
+  }
+
+  public getVolume() {
+    return this.volume;
+  }
+
+  public setVolume(vol: number) {
+    this.volume = Math.max(0, Math.min(1, vol));
+    try {
+      localStorage.setItem('musician_modal_volume', String(this.volume));
+    } catch (e) {
+      console.warn("Failed to save volume to localStorage:", e);
+    }
+    if (this.ctx && this.masterGain) {
+      this.masterGain.gain.setValueAtTime(this.volume, this.ctx.currentTime);
+    }
+  }
+
+  private getDestination(ctx: AudioContext): AudioNode {
+    this.initCtx();
+    return this.masterGain || ctx.destination;
+  }
+
+  public playMidiNotes(midiNotes: number[], type: 'chord' | 'scale', instrument: 'piano' | 'guitar' | 'bass' | 'lead' = 'piano') {
+    try {
+      const ctx = this.initCtx();
+      const now = ctx.currentTime;
+
+      if (type === 'chord') {
+        const sortedNotes = [...midiNotes].sort((a, b) => a - b);
+        sortedNotes.forEach((midi, idx) => {
+          const time = now + idx * 0.04;
+          this.playSingleTone(ctx, midi, time, 1.6, instrument);
+        });
+      } else {
+        midiNotes.forEach((midi, idx) => {
+          const time = now + idx * 0.22;
+          this.playSingleTone(ctx, midi, time, 0.45, instrument);
+        });
+      }
+    } catch (e) {
+      console.warn("Audio play failed:", e);
+    }
+  }
+
+  private playSingleTone(ctx: AudioContext, midi: number, startTime: number, duration: number, instrument: string) {
+    const osc = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    const filter = ctx.createBiquadFilter();
+    const dest = this.getDestination(ctx);
+
+    const freq = 440 * Math.pow(2, (midi - 69) / 12);
+    osc.frequency.setValueAtTime(freq, startTime);
+
+    if (instrument === 'bass') {
+      osc.type = 'triangle';
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(180, startTime);
+      filter.Q.setValueAtTime(1, startTime);
+
+      gainNode.gain.setValueAtTime(0, startTime);
+      gainNode.gain.linearRampToValueAtTime(0.45, startTime + 0.03);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+    } else if (instrument === 'guitar' || instrument === 'lead') {
+      osc.type = 'triangle';
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(1100, startTime);
+      filter.frequency.exponentialRampToValueAtTime(320, startTime + duration);
+
+      gainNode.gain.setValueAtTime(0, startTime);
+      gainNode.gain.linearRampToValueAtTime(0.35, startTime + 0.015);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+
+      if (instrument === 'lead') {
+        const overtone = ctx.createOscillator();
+        const overtoneGain = ctx.createGain();
+        overtone.type = 'sine';
+        overtone.frequency.setValueAtTime(freq * 2, startTime);
+        
+        overtoneGain.gain.setValueAtTime(0.06, startTime);
+        overtoneGain.gain.exponentialRampToValueAtTime(0.001, startTime + duration * 0.7);
+
+        overtone.connect(overtoneGain);
+        overtoneGain.connect(dest);
+        overtone.start(startTime);
+        overtone.stop(startTime + duration * 0.7);
+      }
+    } else {
+      osc.type = 'sine';
+      
+      const harm = ctx.createOscillator();
+      const harmGain = ctx.createGain();
+      harm.type = 'triangle';
+      harm.frequency.setValueAtTime(freq * 2, startTime);
+      harmGain.gain.setValueAtTime(0.04, startTime);
+      harmGain.gain.exponentialRampToValueAtTime(0.001, startTime + duration * 0.5);
+
+      harm.connect(harmGain);
+      harmGain.connect(dest);
+      harm.start(startTime);
+      harm.stop(startTime + duration * 0.5);
+
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(1400, startTime);
+
+      gainNode.gain.setValueAtTime(0, startTime);
+      gainNode.gain.linearRampToValueAtTime(0.35, startTime + 0.02);
+      gainNode.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+    }
+
+    osc.connect(filter);
+    filter.connect(gainNode);
+    gainNode.connect(dest);
+
+    osc.start(startTime);
+    osc.stop(startTime + duration);
+  }
+}
+
+const audioSynth = new WebAudioSynth();
+
 interface MusicianModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -25,14 +178,98 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
   const [activeTab, setActiveTab] = useState<TabType>('keys');
   const [selectedSubChord, setSelectedSubChord] = useState<string | null>(null);
   const [selectedLeadScale, setSelectedLeadScale] = useState<string | null>(null);
+  const [volume, setVolumeState] = useState<number>(() => audioSynth.getVolume());
+
+  const handleVolumeChange = (newVol: number) => {
+    setVolumeState(newVol);
+    audioSynth.setVolume(newVol);
+  };
+
+  const [activeHelpDetail, setActiveHelpDetail] = useState<{
+    title: string;
+    type: 'chord' | 'scale' | 'riff' | 'voicing';
+    instrument: 'guitar' | 'keys' | 'bass' | 'lead';
+    notes: string[];
+    theoryInfo: string;
+    dotsOrAbsoluteNotes: any[];
+    technique: string;
+  } | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       setActiveTab('keys');
       setSelectedSubChord(null);
       setSelectedLeadScale(null);
+      setActiveHelpDetail(null);
     }
   }, [isOpen]);
+
+  const handleOpenHelpDetail = (
+    title: string,
+    instrument: 'guitar' | 'keys' | 'bass' | 'lead',
+    type: 'chord' | 'scale' | 'riff' | 'voicing',
+    dotsOrAbsoluteNotes: any[],
+    customTechnique?: string
+  ) => {
+    let noteNames: string[] = [];
+    if (instrument === 'keys') {
+      noteNames = (dotsOrAbsoluteNotes as number[]).map(n => {
+        const index = (48 + n) % 12;
+        return ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'][index];
+      });
+    } else {
+      const bases = instrument === 'bass' ? [43, 38, 33, 28] : [64, 59, 55, 50, 45, 40];
+      noteNames = (dotsOrAbsoluteNotes as any[]).map(d => {
+        const midi = bases[d.s] + d.f;
+        return ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'][midi % 12];
+      });
+    }
+
+    const uniqueNotes = Array.from(new Set(noteNames));
+
+    let theoryInfo = "";
+    let defaultTechnique = "";
+
+    if (type === 'chord') {
+      theoryInfo = `This chord consists of the notes: ${uniqueNotes.join(', ')}. In modern music theory, chords are built from stacked thirds (Root, Third, Fifth, and optional Seventh). This specific voicing is chosen for optimal performance weight, pitch separation, and smooth transitions on your instrument.`;
+      
+      if (instrument === 'guitar') {
+        defaultTechnique = "• Press down firmly near the frets.\n• Mute unused strings marked 'X' with the fleshy part of your fretting fingers or thumb.\n• Strum with a relaxed wrist to produce a light, floating acoustic ring.";
+      } else if (instrument === 'keys') {
+        defaultTechnique = "• Keep your hands relaxed and curved.\n• Place the chord root/fifth in the lower-middle register to define structural harmony.\n• Play the inversions in your right hand to stay clear of other lead instruments.";
+      } else if (instrument === 'bass') {
+        defaultTechnique = "• Rest your thumb on the pickup or E-string.\n• Keep your notes clean, locking strictly with the drummer's bass-drum kicks.\n• Dampen unused strings with your fretting hand to avoid low-end mud.";
+      }
+    } else if (type === 'scale') {
+      theoryInfo = `This scale zone maps out the melodic pathway for improvisation over the active chord. Scales provide the building blocks for hooks, solos, and fills. Utilizing these shapes ensures your melodic phrases are in-key and emotionally coherent.`;
+      
+      if (instrument === 'guitar' || instrument === 'lead') {
+        defaultTechnique = "• Memorize the root note (Indigo) as your landing home-base.\n• Practice sliding and bending into target chord tones (Thirds and Fifths).\n• Practice with alternate picking (Down-Up-Down-Up) to build speed and accuracy.";
+      } else if (instrument === 'bass') {
+        defaultTechnique = "• Use this scale zone to walk smoothly from one chord to the next.\n• Emphasize the Root on beat 1, then use other scale degrees for fills on beats 3 and 4.\n• Keep your rhythm perfectly steady.";
+      } else if (instrument === 'keys') {
+        defaultTechnique = "• Play smooth, legato runs on the keyboard.\n• Use standard thumb-under tucks to navigate the full octave range seamlessly.\n• Use a touch of sustain pedal to blend the notes without washing out.";
+      }
+    } else {
+      theoryInfo = `This melodic figure/rhythm pattern represents a classic stylistic motif used in contemporary worship and modern pop arrangements. It creates movement and adds texture without distracting from the main vocals.`;
+      
+      if (instrument === 'guitar' || instrument === 'lead') {
+        defaultTechnique = "• Let the high notes ring out over each other to create an ambient shimmer.\n• Use a warm delay pedal (dotted-eighth timing) to double your rhythmic layers.\n• Play with soft, expressive dynamics.";
+      } else if (instrument === 'keys') {
+        defaultTechnique = "• Use soft pedal pressure to keep the texture clean.\n• Focus on steady rhythmic spacing, locking with the acoustic guitar or hi-hat.\n• Keep the volume delicate.";
+      }
+    }
+
+    setActiveHelpDetail({
+      title,
+      instrument,
+      type,
+      notes: uniqueNotes,
+      theoryInfo,
+      dotsOrAbsoluteNotes,
+      technique: customTechnique || defaultTechnique
+    });
+  };
 
   if (!isOpen || !chordName) return null;
 
@@ -219,6 +456,12 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               minFret={displayMinFret}
               sequenceLine={true}
               boxName={t.name}
+              onPlayClick={() => {
+                const bases = [64, 59, 55, 50, 45, 40];
+                const midi = dots.map(d => bases[d.s] + d.f);
+                audioSynth.playMidiNotes(midi, 'chord', 'guitar');
+              }}
+              onHelpClick={() => handleOpenHelpDetail(t.name, 'guitar', 'chord', dots)}
             />
           );
         })}
@@ -325,6 +568,12 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               minFret={displayMinFret}
               sequenceLine={false}
               boxName={s.name}
+              onPlayClick={() => {
+                const bases = [64, 59, 55, 50, 45, 40];
+                const midi = s.dots.map(d => bases[d.s] + d.f);
+                audioSynth.playMidiNotes(midi, 'chord', 'guitar');
+              }}
+              onHelpClick={() => handleOpenHelpDetail(s.name, 'guitar', 'chord', s.dots)}
             />
           );
         })}
@@ -370,6 +619,12 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               minFret={Math.max(1, minF - 1)}
               sequenceLine={false}
               boxName={s.name}
+              onPlayClick={() => {
+                const bases = [64, 59, 55, 50, 45, 40];
+                const midi = s.dots.map(d => bases[d.s] + d.f);
+                audioSynth.playMidiNotes(midi, 'chord', 'guitar');
+              }}
+              onHelpClick={() => handleOpenHelpDetail(s.name, 'guitar', 'chord', s.dots)}
             />
           );
         })}
@@ -424,6 +679,12 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               minFret={Math.max(1, minF - 1)}
               sequenceLine={false}
               boxName={s.name}
+              onPlayClick={() => {
+                const bases = [64, 59, 55, 50, 45, 40];
+                const midi = s.dots.map(d => bases[d.s] + d.f);
+                audioSynth.playMidiNotes(midi, 'chord', 'guitar');
+              }}
+              onHelpClick={() => handleOpenHelpDetail(s.name, 'guitar', 'chord', s.dots)}
             />
           );
         })}
@@ -469,6 +730,12 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               minFret={box.minFret}
               sequenceLine={true}
               boxName={box.name}
+              onPlayClick={() => {
+                const bases = numStrings === 4 ? [43, 38, 33, 28] : [64, 59, 55, 50, 45, 40];
+                const midi = dots.map(d => bases[d.s] + d.f);
+                audioSynth.playMidiNotes(midi, 'scale', numStrings === 4 ? 'bass' : 'lead');
+              }}
+              onHelpClick={() => handleOpenHelpDetail(box.name, numStrings === 4 ? 'bass' : 'lead', 'scale', dots)}
             />
           );
         })}
@@ -544,6 +811,12 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               minFret={displayMinFret}
               sequenceLine={false}
               boxName={s.name}
+              onPlayClick={() => {
+                const bases = [43, 38, 33, 28];
+                const midi = s.dots.map(d => bases[d.s] + d.f);
+                audioSynth.playMidiNotes(midi, 'chord', 'bass');
+              }}
+              onHelpClick={() => handleOpenHelpDetail(s.name, 'bass', 'chord', s.dots)}
             />
           );
         })}
@@ -718,6 +991,12 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               minFret={displayMinFret}
               sequenceLine={true}
               boxName={s.name}
+              onPlayClick={() => {
+                const bases = [43, 38, 33, 28];
+                const midi = s.dots.map(d => bases[d.s] + d.f);
+                audioSynth.playMidiNotes(midi, 'scale', 'bass');
+              }}
+              onHelpClick={() => handleOpenHelpDetail(s.name, 'bass', 'scale', s.dots)}
             />
           );
         })}
@@ -786,6 +1065,12 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               minFret={displayMinFret}
               sequenceLine={false}
               boxName={s.name}
+              onPlayClick={() => {
+                const bases = [64, 59, 55, 50, 45, 40];
+                const midi = s.dots.map(d => bases[d.s] + d.f);
+                audioSynth.playMidiNotes(midi, 'chord', 'lead');
+              }}
+              onHelpClick={() => handleOpenHelpDetail(s.name, 'lead', 'chord', s.dots)}
             />
           );
         })}
@@ -869,6 +1154,12 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               minFret={displayMinFret}
               sequenceLine={true}
               boxName={s.name}
+              onPlayClick={() => {
+                const bases = [64, 59, 55, 50, 45, 40];
+                const midi = s.dots.map(d => bases[d.s] + d.f);
+                audioSynth.playMidiNotes(midi, 'scale', 'lead');
+              }}
+              onHelpClick={() => handleOpenHelpDetail(s.name, 'lead', 'riff', s.dots)}
             />
           );
         })}
@@ -962,12 +1253,54 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               </p>
             )}
           </div>
-          <button
-            onClick={onClose}
-            className="text-indigo-300 hover:text-white hover:bg-white/10 rounded-full w-8 h-8 flex items-center justify-center transition-all active:scale-95 flex-shrink-0 text-lg"
-          >
-            ✕
-          </button>
+          <div className="flex items-center gap-3 sm:gap-4 shrink-0">
+            {/* Master Volume Controller */}
+            <div className="flex items-center gap-1.5 bg-indigo-950/60 border border-indigo-500/30 px-2.5 py-1.5 rounded-full shadow-inner text-indigo-300">
+              <button
+                onClick={() => handleVolumeChange(volume === 0 ? 0.7 : 0)}
+                className="hover:text-amber-400 transition-colors active:scale-90 flex items-center justify-center"
+                title={volume === 0 ? "Unmute" : "Mute"}
+              >
+                {volume === 0 ? (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                  </svg>
+                ) : volume < 0.4 ? (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.54 8.46a5 5 0 010 7.07" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.54 8.46a5 5 0 010 7.07m2.83-9.9a9 9 0 010 12.73" />
+                  </svg>
+                )}
+              </button>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={volume}
+                onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
+                className="w-14 sm:w-20 accent-amber-400 h-1 bg-indigo-950 rounded-lg appearance-none cursor-pointer"
+                style={{
+                  background: `linear-gradient(to right, rgb(251, 191, 36) ${volume * 100}%, rgb(30, 27, 75) ${volume * 100}%)`
+                }}
+              />
+              <span className="text-[9px] font-mono text-indigo-300 font-semibold w-6 text-right">
+                {Math.round(volume * 100)}
+              </span>
+            </div>
+            <button
+              onClick={onClose}
+              className="text-indigo-300 hover:text-white hover:bg-white/10 rounded-full w-8 h-8 flex items-center justify-center transition-all active:scale-95 flex-shrink-0 text-lg"
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         {/* Tab Selection */}
@@ -1000,6 +1333,42 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                       <h4 className="text-[10px] sm:text-xs text-indigo-300 font-extrabold mb-2 uppercase tracking-widest text-center w-full">
                         Standard Open
                       </h4>
+                      {fingering && (
+                        <>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const staticBases = [40, 45, 50, 55, 59, 64];
+                              const midiNotes = fingering
+                                .map((fret, stringIdx) => fret >= 0 ? staticBases[stringIdx] + fret : -1)
+                                .filter(m => m !== -1);
+                              audioSynth.playMidiNotes(midiNotes, 'chord', 'guitar');
+                            }}
+                            className="absolute top-3 right-3 text-indigo-400 hover:text-emerald-400 transition-all p-1 z-10 hover:scale-110 active:scale-90"
+                            title="🔊 Listen to this Shape"
+                          >
+                            <svg className="w-4.5 h-4.5 drop-shadow-md" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const mappedDots = fingering
+                                .map((fret, stringIdx) => fret >= 0 ? { s: 5 - stringIdx, f: fret, label: 'Note' } : null)
+                                .filter((d): d is any => d !== null);
+                              handleOpenHelpDetail("Standard Open Shape", 'guitar', 'chord', mappedDots);
+                            }}
+                            className="absolute top-3 left-3 animate-bulb text-amber-400 hover:text-amber-300 transition-all p-1 z-10 scale-105 active:scale-95"
+                            title="💡 Learn Chord/Scale Secrets"
+                          >
+                            <svg className="w-4.5 h-4.5 drop-shadow-md" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                            </svg>
+                          </button>
+                        </>
+                      )}
                       {renderGuitarFretboardStatic()}
                       <div className="mt-4 w-full flex flex-wrap gap-1.5 justify-center">
                         {theory.capoOptions.map((opt, oIdx) => (
@@ -1078,22 +1447,29 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                 <div className="flex flex-col animate-fadeIn w-full pb-4">
                   <div className="flex flex-col sm:flex-row gap-5 shrink-0 w-full mb-5">
                     {/* Standard open and 10th positions */}
-                    <div className="sm:w-[45%] flex flex-col items-center bg-black/20 rounded-2xl p-4 sm:p-5 pt-10 border border-indigo-500/20 shadow-inner shrink-0 relative min-w-0">
-                      <h4 className="text-[10px] sm:text-xs text-indigo-300 font-extrabold mb-3 uppercase tracking-widest text-center w-full">
-                        Root Position
-                      </h4>
-                      <div className="w-full flex justify-center mt-1">
+                    <div className="sm:w-[45%] flex flex-col items-center bg-black/20 rounded-2xl p-4 sm:p-5 border border-indigo-500/20 shadow-inner shrink-0 relative min-w-0 justify-around">
+                      <div className="w-full flex flex-col gap-4 items-center">
                         <PianoVisualizer
                           absoluteNotes={theory.pianoInversions[0].notes}
-                          isStandalone={false}
+                          title="Root Position"
+                          isStandalone={true}
+                          onPlayClick={() => {
+                            const midi = theory.pianoInversions[0].notes.map(n => 48 + n);
+                            audioSynth.playMidiNotes(midi, 'chord', 'piano');
+                          }}
+                          onHelpClick={() => handleOpenHelpDetail("Root Position", 'keys', 'chord', theory.pianoInversions[0].notes)}
                         />
-                      </div>
-
-                      <h4 className="text-[10px] sm:text-xs text-indigo-300 font-extrabold mt-6 mb-3 pt-6 border-t border-indigo-500/20 uppercase tracking-widest text-center w-full">
-                        Open 10th (Big Sound)
-                      </h4>
-                      <div className="w-full flex justify-center mt-1">
-                        <PianoVisualizer absoluteNotes={theory.openTenthNotes} isStandalone={false} />
+                        <div className="w-full border-t border-indigo-500/20 my-1"></div>
+                        <PianoVisualizer
+                          absoluteNotes={theory.openTenthNotes}
+                          title="Open 10th (Big Sound)"
+                          isStandalone={true}
+                          onPlayClick={() => {
+                            const midi = theory.openTenthNotes.map(n => 48 + n);
+                            audioSynth.playMidiNotes(midi, 'chord', 'piano');
+                          }}
+                          onHelpClick={() => handleOpenHelpDetail("Open 10th (Big Sound)", 'keys', 'chord', theory.openTenthNotes)}
+                        />
                       </div>
                     </div>
 
@@ -1141,6 +1517,11 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                             absoluteNotes={inv.notes}
                             title={inv.name}
                             scale={0.9}
+                            onPlayClick={() => {
+                              const midi = inv.notes.map(n => 48 + n);
+                              audioSynth.playMidiNotes(midi, 'chord', 'piano');
+                            }}
+                            onHelpClick={() => handleOpenHelpDetail(inv.name, 'keys', 'chord', inv.notes)}
                           />
                         ))}
                       </div>
@@ -1156,6 +1537,11 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                             absoluteNotes={ext.notes}
                             title={ext.name}
                             scale={0.9}
+                            onPlayClick={() => {
+                              const midi = ext.notes.map(n => 48 + n);
+                              audioSynth.playMidiNotes(midi, 'chord', 'piano');
+                            }}
+                            onHelpClick={() => handleOpenHelpDetail(ext.name, 'keys', 'chord', ext.notes)}
                           />
                         ))}
                       </div>
@@ -1201,6 +1587,11 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                             title={scale.name}
                             scale={0.85}
                             delayMs={80}
+                            onPlayClick={() => {
+                              const midi = notes.map(n => 48 + n);
+                              audioSynth.playMidiNotes(midi, 'scale', 'piano');
+                            }}
+                            onHelpClick={() => handleOpenHelpDetail(scale.name, 'keys', 'scale', notes)}
                           />
                         );
                       })}
@@ -1446,10 +1837,46 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               {/* Overlay content side-by-side */}
               <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col sm:flex-row gap-5 pb-4">
                 {/* Guitar Panel */}
-                <div className="flex-1 flex flex-col items-center bg-black/40 rounded-2xl p-4 border border-indigo-500/20 shadow-inner min-w-0">
+                <div className="flex-1 flex flex-col items-center bg-black/40 rounded-2xl p-4 border border-indigo-500/20 shadow-inner min-w-0 relative">
                   <h4 className="text-xs text-indigo-300 font-black mb-3 uppercase tracking-wider text-center flex items-center gap-1.5">
                     🎸 Guitar Shape
                   </h4>
+                  {subFingering && (
+                    <>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const staticBases = [40, 45, 50, 55, 59, 64];
+                          const midiNotes = subFingering
+                            .map((fret, stringIdx) => fret >= 0 ? staticBases[stringIdx] + fret : -1)
+                            .filter(m => m !== -1);
+                          audioSynth.playMidiNotes(midiNotes, 'chord', 'guitar');
+                        }}
+                        className="absolute top-3 right-3 text-indigo-400 hover:text-emerald-400 transition-all p-1 z-10 hover:scale-110 active:scale-90"
+                        title="🔊 Listen to this Shape"
+                      >
+                        <svg className="w-4.5 h-4.5 drop-shadow-md" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const mappedDots = subFingering
+                            .map((fret, stringIdx) => fret >= 0 ? { s: 5 - stringIdx, f: fret, label: 'Note' } : null)
+                            .filter((d): d is any => d !== null);
+                          handleOpenHelpDetail(`${selectedSubChord} Guitar Shape`, 'guitar', 'chord', mappedDots);
+                        }}
+                        className="absolute top-3 left-3 animate-bulb text-amber-400 hover:text-amber-300 transition-all p-1 z-10 scale-105 active:scale-95"
+                        title="💡 Learn Chord/Scale Secrets"
+                      >
+                        <svg className="w-4.5 h-4.5 drop-shadow-md" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                        </svg>
+                      </button>
+                    </>
+                  )}
                   <div className="w-[180px] sm:w-[200px] flex-1 flex items-center justify-center">
                     {subFingering ? (
                       (() => {
@@ -1539,30 +1966,36 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                     🎹 Keyboard Voicing
                   </h4>
                   <div className="w-full flex-1 flex flex-col items-center justify-center gap-4">
-                    {subTheory && (
-                      <>
-                        <div className="text-center">
-                          <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider block mb-1">
-                            Root Position
-                          </span>
+                    {subTheory && (() => {
+                      const lushNotes = subTheory.keysExtensions[0]?.notes || subTheory.openTenthNotes;
+                      return (
+                        <div className="w-full flex flex-col gap-4 items-center">
                           <PianoVisualizer
                             absoluteNotes={subTheory.pianoInversions[0].notes}
-                            isStandalone={false}
+                            title="Root Position"
+                            isStandalone={true}
                             scale={0.9}
+                            onPlayClick={() => {
+                              const midi = subTheory.pianoInversions[0].notes.map(n => 48 + n);
+                              audioSynth.playMidiNotes(midi, 'chord', 'piano');
+                            }}
+                            onHelpClick={() => handleOpenHelpDetail(`${selectedSubChord} Root Position`, 'keys', 'chord', subTheory.pianoInversions[0].notes)}
                           />
-                        </div>
-                        <div className="text-center w-full border-t border-indigo-500/10 pt-3">
-                          <span className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider block mb-1">
-                            Lush Extension
-                          </span>
+                          <div className="w-full border-t border-indigo-500/20 my-1"></div>
                           <PianoVisualizer
-                            absoluteNotes={subTheory.keysExtensions[0]?.notes || subTheory.openTenthNotes}
-                            isStandalone={false}
+                            absoluteNotes={lushNotes}
+                            title="Lush Extension"
+                            isStandalone={true}
                             scale={0.9}
+                            onPlayClick={() => {
+                              const midi = lushNotes.map(n => 48 + n);
+                              audioSynth.playMidiNotes(midi, 'chord', 'piano');
+                            }}
+                            onHelpClick={() => handleOpenHelpDetail(`${selectedSubChord} Lush Extension`, 'keys', 'chord', lushNotes)}
                           />
                         </div>
-                      </>
-                    )}
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
@@ -1581,6 +2014,115 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
             </div>
           );
         })()}
+
+        {/* Help Detail Popup Overlay */}
+        {activeHelpDetail && (
+          <div className="absolute inset-0 z-[700] flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md animate-fadeIn">
+            <div className="bg-gradient-to-b from-indigo-950 to-slate-950 border border-amber-500/40 rounded-2xl max-w-md w-full p-5 sm:p-6 text-white shadow-2xl relative flex flex-col max-h-[90%] overflow-hidden animate-blur-fade">
+              
+              {/* Header */}
+              <div className="flex justify-between items-start gap-3 mb-4 shrink-0">
+                <div>
+                  <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                    <span className="text-[10px] font-black uppercase tracking-widest bg-amber-400 text-slate-950 px-2 py-0.5 rounded shadow-sm">
+                      {activeHelpDetail.type}
+                    </span>
+                    <span className="text-[10px] font-black uppercase tracking-widest bg-indigo-500/30 text-indigo-200 px-2 py-0.5 rounded border border-indigo-500/40">
+                      {activeHelpDetail.instrument}
+                    </span>
+                  </div>
+                  <h3 className="text-base sm:text-lg font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-300 to-amber-100 leading-tight">
+                    {activeHelpDetail.title}
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setActiveHelpDetail(null)}
+                  className="text-indigo-300 hover:text-white hover:bg-white/10 rounded-full w-8 h-8 flex items-center justify-center transition-all active:scale-95 text-lg"
+                  title="Close"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Scrollable Body */}
+              <div className="flex-1 overflow-y-auto custom-scrollbar pr-1.5 space-y-4 text-xs leading-relaxed text-indigo-100">
+                {/* Notes list */}
+                {activeHelpDetail.notes.length > 0 && (
+                  <div className="bg-indigo-950/40 p-3 rounded-xl border border-indigo-500/20 shadow-inner">
+                    <span className="text-[10px] font-bold text-amber-400 uppercase tracking-wider block mb-2">
+                      Voiced Notes
+                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {activeHelpDetail.notes.map((note, idx) => (
+                        <span key={idx} className="bg-indigo-500/20 border border-indigo-500/30 px-2.5 py-1 rounded-full font-mono text-xs text-amber-200 font-extrabold shadow-sm">
+                          {note}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Theory Info */}
+                <div className="bg-indigo-950/20 p-3 rounded-xl border border-indigo-500/10">
+                  <span className="text-[10px] font-bold text-indigo-300 uppercase tracking-wider block mb-1.5">
+                    Theory Insights
+                  </span>
+                  <p className="text-indigo-200 font-medium">
+                    {activeHelpDetail.theoryInfo}
+                  </p>
+                </div>
+
+                {/* Performance Technique */}
+                {activeHelpDetail.technique && (
+                  <div>
+                    <span className="text-[10px] font-bold text-indigo-300 uppercase tracking-wider block mb-2">
+                      Technique & Pro Tips
+                    </span>
+                    <div className="space-y-2 bg-black/30 p-3.5 rounded-xl border border-indigo-500/10 shadow-inner">
+                      {activeHelpDetail.technique.split('\n').filter(Boolean).map((line, lIdx) => (
+                        <p key={lIdx} className="text-indigo-100 flex items-start gap-1.5 font-medium">
+                          <span className="text-amber-400 mt-0.5 shrink-0">✦</span>
+                          <span>{line.replace(/^•\s*/, '')}</span>
+                        </p>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer / Actions */}
+              <div className="mt-5 pt-3 border-t border-indigo-500/20 flex gap-3 shrink-0">
+                <button
+                  onClick={() => {
+                    const inst = activeHelpDetail.instrument;
+                    if (inst === 'keys') {
+                      const midi = (activeHelpDetail.dotsOrAbsoluteNotes as number[]).map(n => 48 + n);
+                      audioSynth.playMidiNotes(midi, activeHelpDetail.type === 'chord' ? 'chord' : 'scale', 'piano');
+                    } else {
+                      const bases = inst === 'bass' ? [43, 38, 33, 28] : [64, 59, 55, 50, 45, 40];
+                      const midi = (activeHelpDetail.dotsOrAbsoluteNotes as any[]).map(d => bases[d.s] + d.f);
+                      audioSynth.playMidiNotes(midi, activeHelpDetail.type === 'chord' ? 'chord' : 'scale', inst === 'guitar' ? 'guitar' : inst === 'bass' ? 'bass' : 'lead');
+                    }
+                  }}
+                  className="flex-1 bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-xs py-2.5 px-4 rounded-xl shadow-lg shadow-amber-500/10 transition-all active:scale-[0.98] flex items-center justify-center gap-1.5 border border-amber-300/30"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <span>Hear Sound Voice</span>
+                </button>
+                <button
+                  onClick={() => setActiveHelpDetail(null)}
+                  className="bg-indigo-950 hover:bg-indigo-900 border border-indigo-500/30 hover:border-indigo-400/50 text-indigo-200 hover:text-white font-bold text-xs py-2.5 px-4 rounded-xl transition-all active:scale-[0.98]"
+                >
+                  Got it!
+                </button>
+              </div>
+
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

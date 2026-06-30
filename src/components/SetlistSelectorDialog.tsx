@@ -22,6 +22,7 @@ export default function SetlistSelectorDialog({
 }: SetlistSelectorDialogProps) {
   const [newSetName, setNewSetName] = useState('');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [removeConfirmSet, setRemoveConfirmSet] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -66,7 +67,6 @@ export default function SetlistSelectorDialog({
   };
 
   const handleRemoveFromSet = async (setName: string) => {
-    if (!confirm(`Are you sure you want to remove "${currentSong.Title}" from the setlist "${setName}"?`)) return;
     setActionLoading(`remove_${setName}`);
     try {
       await onRemoveSongFromSet(setName, String(currentSong.SongID));
@@ -159,7 +159,26 @@ export default function SetlistSelectorDialog({
                   </div>
 
                   <div className="flex items-center gap-1 flex-shrink-0">
-                    {hasSong ? (
+                    {removeConfirmSet === folder.PresetName ? (
+                      <div className="flex items-center gap-1.5 bg-rose-500/10 border border-rose-500/30 px-1.5 py-0.5 rounded-lg animate-fadeIn">
+                        <span className="text-[9px] text-rose-300 font-bold select-none">Remove?</span>
+                        <button
+                          onClick={() => {
+                            setRemoveConfirmSet(null);
+                            handleRemoveFromSet(folder.PresetName);
+                          }}
+                          className="px-1.5 py-0.5 bg-rose-600 hover:bg-rose-500 text-white text-[9px] font-black rounded cursor-pointer transition-all active:scale-90"
+                        >
+                          Yes
+                        </button>
+                        <button
+                          onClick={() => setRemoveConfirmSet(null)}
+                          className="px-1.5 py-0.5 bg-indigo-950 hover:bg-indigo-900 border border-indigo-500/20 text-indigo-200 text-[9px] font-bold rounded cursor-pointer transition-all active:scale-90"
+                        >
+                          No
+                        </button>
+                      </div>
+                    ) : hasSong ? (
                       <>
                         <button
                           onClick={() => handleAddToSet(folder.PresetName)}
@@ -170,7 +189,7 @@ export default function SetlistSelectorDialog({
                           🔄 Overwrite
                         </button>
                         <button
-                          onClick={() => handleRemoveFromSet(folder.PresetName)}
+                          onClick={() => setRemoveConfirmSet(folder.PresetName)}
                           disabled={actionLoading !== null}
                           className="bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/20 hover:border-red-500/40 text-[10px] px-2 py-1 rounded-lg font-bold transition-all disabled:opacity-50 cursor-pointer"
                           title="Remove from Set"

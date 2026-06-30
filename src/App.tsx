@@ -38,6 +38,68 @@ export const areBlocksIdentical = (b1: RoadmapBlock, b2: RoadmapBlock) => {
   return true;
 };
 
+export const areRoadmapsIdentical = (r1: any, r2: any): boolean => {
+  if (!r1 || !r2) return false;
+  
+  const blocks1 = Array.isArray(r1) ? r1 : (r1.roadmap && Array.isArray(r1.roadmap) ? r1.roadmap : []);
+  const blocks2 = Array.isArray(r2) ? r2 : (r2.roadmap && Array.isArray(r2.roadmap) ? r2.roadmap : []);
+  
+  if (blocks1.length !== blocks2.length) return false;
+  for (let i = 0; i < blocks1.length; i++) {
+    const b1 = blocks1[i];
+    const b2 = blocks2[i];
+    if (!b1 || !b2) return false;
+    if (b1.name !== b2.name) return false;
+    if ((b1.keyOffset || 0) !== (b2.keyOffset || 0)) return false;
+    const el1 = b1.enabledLines || [];
+    const el2 = b2.enabledLines || [];
+    if (el1.length !== el2.length) return false;
+    for (let j = 0; j < el1.length; j++) {
+      if (el1[j] !== el2[j]) return false;
+    }
+  }
+  return true;
+};
+
+export const resolveFriendlyArrangementName = (
+  songID: string | number,
+  roadmapBlocks: any[],
+  syncedSheetArrangements: any[]
+): string => {
+  if (!roadmapBlocks || roadmapBlocks.length === 0) return '';
+
+  for (const arr of syncedSheetArrangements) {
+    if (String(arr.SongID) !== String(songID)) continue;
+    if (arr.PresetName && arr.PresetName.startsWith('Set:')) continue;
+    try {
+      const presetData = JSON.parse(arr.RoadmapJSON);
+      const isObject = presetData && typeof presetData === 'object' && !Array.isArray(presetData);
+      const blocksArray = isObject ? (presetData.roadmap || []) : presetData;
+      if (areRoadmapsIdentical(blocksArray, roadmapBlocks)) {
+        return arr.PresetName;
+      }
+    } catch {}
+  }
+
+  try {
+    const local = localStorage.getItem(`custom_arrangements_${songID}`);
+    if (local) {
+      const localObj = JSON.parse(local);
+      for (const k of Object.keys(localObj)) {
+        if (k.startsWith('Set:')) continue;
+        const presetData = localObj[k];
+        const isObject = presetData && typeof presetData === 'object' && !Array.isArray(presetData);
+        const blocksArray = isObject ? (presetData.roadmap || []) : presetData;
+        if (areRoadmapsIdentical(blocksArray, roadmapBlocks)) {
+          return k;
+        }
+      }
+    }
+  } catch {}
+
+  return '';
+};
+
 export const parsePresetDate = (presetName: string): { baseName: string; dateStr: string } => {
   const regex = /\s*\((January|February|March|April|May|June|July|August|September|October|November|December)-\d{2}-\d{2}\)$/i;
   const match = presetName.match(regex);
@@ -53,10 +115,10 @@ export const parsePresetDate = (presetName: string): { baseName: string; dateStr
 export const getPresetInputDisplayName = (name: string): string => {
   if (!name) return '';
   if (name.startsWith('Set: ')) {
-    return name.slice(5);
+    return name.slice(5).toUpperCase();
   }
   const { baseName } = parsePresetDate(name);
-  return baseName;
+  return baseName.toUpperCase();
 };
 
 export const areBlocksChordsIdentical = (
@@ -190,6 +252,34 @@ export default function App() {
   const [currentArrangementName, setCurrentArrangementName] = useState<string>('');
   const [expandedArrangementDates, setExpandedArrangementDates] = useState<{ [dateStr: string]: boolean }>({});
   const [syncedSheetArrangements, setSyncedSheetArrangements] = useState<any[]>([]);
+  const [cloudArrangementUpdateNotice, setCloudArrangementUpdateNotice] = useState<{
+    name: string;
+    newRoadmap: any[];
+    newKey?: string;
+  } | null>(null);
+  const [cloudArrangementDeletionNotice, setCloudArrangementDeletionNotice] = useState<{
+    name: string;
+    newSongArrangements: any[];
+    allArrs: any[];
+  } | null>(null);
+
+  // Confirmation Modals states
+  const [pendingArrangementToLoad, setPendingArrangementToLoad] = useState<string | null>(null);
+  const [saveArrangementConfirmation, setSaveArrangementConfirmation] = useState<{
+    name: string;
+    isOverwrite: boolean;
+    shouldPromptApplyToSetlist: boolean;
+    roadmap: any[];
+  } | null>(null);
+  const [deleteArrangementConfirmation, setDeleteArrangementConfirmation] = useState<{
+    name: string;
+    isActive: boolean;
+  } | null>(null);
+  const [arrangementReplacementModal, setArrangementReplacementModal] = useState<{
+    songId: string;
+    deletedName: string;
+    availablePresets: any[];
+  } | null>(null);
 
   // Drag and Drop ordering
   const [draggedBlockIndex, setDraggedBlockIndex] = useState<number | null>(null);
@@ -306,27 +396,36 @@ export default function App() {
       ]);
       
       const presetsList = JSON.parse(presetsText);
+      let returnedPresets: any[] = [];
       if (Array.isArray(presetsList)) {
-        localStorage.setItem('cached_arrangements', JSON.stringify(presetsList));
-        setAllSharedArrangements(presetsList);
+        returnedPresets = presetsList.map((row: any) => ({
+          SongID: String(row.SongID),
+          PresetName: String(row.PresetName),
+          RoadmapJSON: String(row.RoadmapJSON),
+        }));
+        localStorage.setItem('cached_arrangements', JSON.stringify(returnedPresets));
+        setAllSharedArrangements(returnedPresets);
         if (currentSong) {
-          setSyncedSheetArrangements(
-            presetsList.filter((arr: any) => String(arr.SongID) === String(currentSong.SongID))
-          );
+          const matching = returnedPresets.filter((arr: any) => String(arr.SongID) === String(currentSong.SongID));
+          setSyncedSheetArrangements(matching);
+          handleBackgroundArrangementChange(matching, returnedPresets);
         }
       }
 
       const setlistsList = JSON.parse(setlistsText);
+      let returnedSetlists: any[] = [];
       if (Array.isArray(setlistsList)) {
-        const mappedSetlists = setlistsList.map((row: any) => ({
+        returnedSetlists = setlistsList.map((row: any) => ({
           PresetName: row.Set || row.PresetName || '',
           RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}',
         }));
-        localStorage.setItem('cached_setlists_meta', JSON.stringify(mappedSetlists));
-        setAllSharedSetlists(mappedSetlists);
+        localStorage.setItem('cached_setlists_meta', JSON.stringify(returnedSetlists));
+        setAllSharedSetlists(returnedSetlists);
       }
+      return { presets: returnedPresets, setlists: returnedSetlists };
     } catch (e) {
       console.warn('Error refetching arrangements and setlists', e);
+      return { presets: [], setlists: [] };
     }
   };
 
@@ -927,15 +1026,196 @@ export default function App() {
     setPendingSong(song);
   };
 
+  // Delayed collaborative cleanup execution when user clicks to resolve a deletion notice
+  const handleApplyArrangementDeletion = async (
+    deletedName: string,
+    newSongArrangements: any[],
+    allArrs: any[]
+  ) => {
+    if (!currentSong) return;
+
+    // 1. Clear local cached settings to prevent state locking
+    const rawSaved = localStorage.getItem('captured_song_settings');
+    if (rawSaved) {
+      try {
+        const dict = JSON.parse(rawSaved);
+        if (dict[String(currentSong.SongID)]) {
+          delete dict[String(currentSong.SongID)];
+          localStorage.setItem('captured_song_settings', JSON.stringify(dict));
+        }
+      } catch (e) {}
+    }
+
+    // Also clean up from local device custom arrangements
+    try {
+      const localRaw = localStorage.getItem(`custom_arrangements_${currentSong.SongID}`);
+      if (localRaw) {
+        const localObj = JSON.parse(localRaw);
+        let deletedAny = false;
+        Object.keys(localObj).forEach((k) => {
+          const kBase = parsePresetDate(k).baseName.toLowerCase().trim();
+          const targetBase = parsePresetDate(deletedName).baseName.toLowerCase().trim();
+          if (k.toLowerCase().trim() === deletedName.toLowerCase().trim() || kBase === targetBase) {
+            delete localObj[k];
+            deletedAny = true;
+          }
+        });
+        if (deletedAny) {
+          localStorage.setItem(`custom_arrangements_${currentSong.SongID}`, JSON.stringify(localObj));
+        }
+      }
+    } catch (e) {}
+
+    // Reset on screen
+    setCurrentArrangementName('');
+    setCloudArrangementUpdateNotice(null);
+    setCloudArrangementDeletionNotice(null);
+
+    // Safely revert the active screen to the song's default structure
+    await executeSongLoad(currentSong, true, undefined, allArrs.length > 0 ? allArrs : undefined);
+
+    // Collect available presets remaining for this song
+    const remainingPresets: any[] = [];
+    newSongArrangements.forEach((arr) => {
+      if (arr.PresetName.startsWith('Set: ')) return;
+      try {
+        const parsed = JSON.parse(arr.RoadmapJSON);
+        remainingPresets.push({
+          name: arr.PresetName,
+          roadmap: Array.isArray(parsed) ? parsed : (parsed.roadmap || []),
+          key: parsed.key || currentKey,
+        });
+      } catch {}
+    });
+
+    // Present the Arrangement Replacement Selection Dialog
+    setArrangementReplacementModal({
+      songId: String(currentSong.SongID),
+      deletedName: parsePresetDate(deletedName).baseName,
+      availablePresets: remainingPresets
+    });
+
+    showToast(`Cleared deleted arrangement. Reverted to default structure.`, 'info');
+  };
+
+  // Real-time collaborative band-sync check for arrangement modification or deletion
+  const handleBackgroundArrangementChange = (
+    newSongArrangements: any[],
+    allArrs: any[]
+  ) => {
+    if (!currentSong || !currentArrangementName) return;
+
+    // Do not check custom arrangement names created for sets ("Set: <SetlistName>")
+    if (currentArrangementName.startsWith('Set: ')) return;
+
+    // Find the currently active arrangement in the remote list
+    const remoteArr = newSongArrangements.find(
+      (a) => a.PresetName.toLowerCase().trim() === currentArrangementName.toLowerCase().trim()
+    );
+
+    if (remoteArr) {
+      try {
+        const parsedRemote = JSON.parse(remoteArr.RoadmapJSON);
+        const remoteRoadmap = Array.isArray(parsedRemote) ? parsedRemote : (parsedRemote.roadmap || []);
+        
+        const remoteJSON = JSON.stringify(remoteRoadmap);
+        const localJSON = JSON.stringify(activeRoadmap);
+        
+        if (remoteJSON !== localJSON) {
+          setCloudArrangementUpdateNotice({
+            name: currentArrangementName,
+            newRoadmap: remoteRoadmap,
+            newKey: parsedRemote.key
+          });
+        } else {
+          setCloudArrangementUpdateNotice(null);
+        }
+      } catch (e) {
+        console.warn('Failed to parse remote arrangement during background sync:', e);
+      }
+    } else {
+      // 🚨 Oh! The arrangement was deleted on the cloud by a bandmate!
+      // Rather than force-reloading their screen instantly, show the non-intrusive banner.
+      if (!cloudArrangementDeletionNotice) {
+        setCloudArrangementDeletionNotice({
+          name: currentArrangementName,
+          newSongArrangements,
+          allArrs
+        });
+        showToast(`⚠️ Active arrangement "${parsePresetDate(currentArrangementName).baseName}" was deleted on the cloud.`, 'warning');
+      }
+    }
+  };
+
+  // Periodic Background Collaboration Sync Loop (every 15 seconds)
+  useEffect(() => {
+    const syncInterval = setInterval(async () => {
+      // Only sync if the browser page is currently active/visible to avoid unnecessary sheet hits
+      if (document.visibilityState !== 'visible') return;
+
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+        const metaRes = await fetch(`${SCRIPT_URL}?tab=SyncVersion`, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        const metaText = await metaRes.text();
+        const metaData = JSON.parse(metaText);
+        if (Array.isArray(metaData) && metaData.length > 0) {
+          const arrRow = metaData.find(m => m.TabName === 'Arrangements');
+          const remoteArrVersion = arrRow ? String(arrRow.Version || arrRow.LastUpdated || arrRow.Date || arrRow.version) : null;
+          const cachedArrVersion = localStorage.getItem('cached_arrangements_version');
+
+          const setlistsRow = metaData.find(m => m.TabName === 'Setlists');
+          const remoteSetlistsVersion = setlistsRow ? String(setlistsRow.Version || setlistsRow.LastUpdated || setlistsRow.Date || setlistsRow.version) : null;
+          const cachedSetlistsVersion = localStorage.getItem('cached_setlists_version') || localStorage.getItem('cached_setlists_meta_version');
+
+          if (
+            (remoteArrVersion && remoteArrVersion !== cachedArrVersion) ||
+            (remoteSetlistsVersion && remoteSetlistsVersion !== cachedSetlistsVersion)
+          ) {
+            console.log('Background Sync: Collaborative updates detected on the cloud. Syncing...');
+            const result = await refetchArrangements();
+            
+            if (remoteArrVersion) {
+              localStorage.setItem('cached_arrangements_version', remoteArrVersion);
+            }
+            if (remoteSetlistsVersion) {
+              localStorage.setItem('cached_setlists_version', remoteSetlistsVersion);
+            }
+
+            if (result && Array.isArray(result.presets)) {
+              if (currentSong) {
+                const songIdStr = String(currentSong.SongID);
+                const matching = result.presets.filter((arr: any) => String(arr.SongID) === songIdStr);
+                handleBackgroundArrangementChange(matching, result.presets);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.debug('Background collaborative sync silent error:', e);
+      }
+    }, 15000);
+
+    return () => clearInterval(syncInterval);
+  }, [currentSong, currentArrangementName, activeRoadmap, currentKey]);
+
   // Change active selected song (actual loading execution)
   const executeSongLoad = async (
     song: Song,
     forceDefaultArrangement: boolean = false,
-    activeFolderOverride?: string
+    activeFolderOverride?: string,
+    arrsOverride?: any[]
   ) => {
     setIsLoading(true);
     setCurrentSong(song);
     setCurrentArrangementName('');
+    setCloudArrangementUpdateNotice(null);
+    setCloudArrangementDeletionNotice(null);
+
+    const arrangementsToUse = arrsOverride || allSharedArrangements;
 
     // Look up captured settings if any exist
     const rawSaved = localStorage.getItem('captured_song_settings');
@@ -953,7 +1233,7 @@ export default function App() {
     const activeFolder = activeFolderOverride !== undefined ? activeFolderOverride : activeSetlistFolder;
     let setlistPresetKey = '';
     if (activeFolder && !forceDefaultArrangement) {
-      const setPreset = allSharedArrangements.find(
+      const setPreset = arrangementsToUse.find(
         (arr) => String(arr.SongID) === String(song.SongID) && arr.PresetName === `Set: ${activeFolder}`
       );
       if (setPreset) {
@@ -1118,23 +1398,34 @@ export default function App() {
       let loadedCustomRoadmap = false;
       const activeFolder = activeFolderOverride !== undefined ? activeFolderOverride : activeSetlistFolder;
       if (!forceDefaultArrangement && activeFolder) {
-        const setPreset = allSharedArrangements.find(
+        const setPreset = arrangementsToUse.find(
           (arr) => String(arr.SongID) === String(song.SongID) && arr.PresetName === `Set: ${activeFolder}`
         );
         if (setPreset) {
           try {
             const settings = JSON.parse(setPreset.RoadmapJSON);
             if (settings && settings.roadmap && settings.roadmap.length > 0) {
-              setActiveRoadmap(
-                settings.roadmap.map((b: any) => ({
-                  id: b.id,
-                  name: b.name,
-                  enabledLines: [...(b.enabledLines || [])],
-                  keyOffset: b.keyOffset || 0,
-                }))
-              );
+              const mappedRoadmap = settings.roadmap.map((b: any) => ({
+                id: b.id,
+                name: b.name,
+                enabledLines: [...(b.enabledLines || [])],
+                keyOffset: b.keyOffset || 0,
+              }));
+              setActiveRoadmap(mappedRoadmap);
               loadedCustomRoadmap = true;
-              setCurrentArrangementName(`Set: ${activeFolder}`);
+              
+              // Resolve the friendly arrangement name instead of "Set: <Folder>"
+              let foundName = '';
+              if (settings.arrangementName) {
+                foundName = settings.arrangementName;
+              } else {
+                foundName = resolveFriendlyArrangementName(
+                  song.SongID,
+                  mappedRoadmap,
+                  syncedSheetArrangements
+                );
+              }
+              setCurrentArrangementName(foundName);
             }
           } catch (e) {
             console.error('Error parsing setlist arrangement inside load:', e);
@@ -1558,12 +1849,19 @@ export default function App() {
   // Shared Presets
   const getPresets = () => {
     const obj: { [key: string]: any } = {};
+    const seenNormalized = new Set<string>();
+
     syncedSheetArrangements.forEach((p) => {
       if (p.PresetName && p.PresetName.startsWith('Set: ')) {
         return;
       }
+      const norm = p.PresetName.trim().toLowerCase();
+      if (seenNormalized.has(norm)) {
+        return;
+      }
       try {
         obj[p.PresetName] = JSON.parse(p.RoadmapJSON);
+        seenNormalized.add(norm);
       } catch {
         // fail safe
       }
@@ -1574,7 +1872,11 @@ export default function App() {
       if (local) {
         const localObj = JSON.parse(local);
         Object.keys(localObj).forEach((k) => {
-          if (!obj[k]) obj[k] = localObj[k];
+          const norm = k.trim().toLowerCase();
+          if (!seenNormalized.has(norm)) {
+            obj[k] = localObj[k];
+            seenNormalized.add(norm);
+          }
         });
       }
     } catch {
@@ -1616,64 +1918,91 @@ export default function App() {
     }
   };
 
-  const savePresetArrangement = async () => {
-    let name = currentArrangementName.trim();
-    if (!name) {
-      showToast('Please enter an arrangement preset name first', 'error');
-      return;
-    }
+  const updateSetlistArrangementDirectly = async (
+    songId: string,
+    roadmap: any[],
+    targetKey: string,
+    optArrangementName?: string
+  ) => {
+    setIsLoading(true);
+    try {
+      const targetArrName = optArrangementName !== undefined ? optArrangementName : currentArrangementName;
+      const capturedSettings = {
+        key: targetKey,
+        roadmap: roadmap,
+        arrangementName: targetArrName,
+      };
+      
+      // 1. Save to spreadsheet via POST
+      const payloadArrangement = {
+        action: 'saveArrangement',
+        songId: songId,
+        name: `Set: ${activeSetlistFolder}`,
+        roadmap: capturedSettings,
+      };
+      
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify(payloadArrangement),
+      });
 
-    // Clean up "Set: " prefix if present
-    if (name.startsWith('Set: ')) {
-      name = name.slice(5);
-    }
-    // Clean up any existing date suffix from the name before appending the new one
-    const { baseName } = parsePresetDate(name);
-    name = baseName;
-
-    const months = [
-      'January', 'February', 'March', 'April', 'May', 'June',
-      'July', 'August', 'September', 'October', 'November', 'December'
-    ];
-    const d = new Date();
-    const monthName = months[d.getMonth()];
-    const day = String(d.getDate()).padStart(2, '0');
-    const year = String(d.getFullYear()).slice(-2);
-    const dateStr = `${monthName}-${day}-${year}`;
-
-    name = `${name} (${dateStr})`;
-
-    const presets = getPresets();
-    const isOverwrite = !!presets[name];
-
-    if (isOverwrite) {
-      const confirmOverwrite = window.confirm(
-        `Warning: An arrangement named "${name}" already exists.\n\nAre you sure you want to overwrite this existing arrangement?`
+      // 2. Add song to setlist metadata if not present
+      const existingMeta = allSharedSetlists.find(
+        (sl) => sl.PresetName === activeSetlistFolder
       );
-      if (!confirmOverwrite) {
-        return;
+      let songIds: string[] = [];
+      if (existingMeta) {
+        try {
+          const parsed = JSON.parse(existingMeta.RoadmapJSON);
+          songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
+        } catch {}
       }
-    }
-
-    let shouldApplyToSetlist = false;
-    if (!isOverwrite && activeSetlistFolder && currentSong) {
-      const confirmApply = window.confirm(
-        `Would you like to load this new arrangement ("${name}") to the active setlist ("${activeSetlistFolder}") for this song?\n\n` +
-        `• Click OK to load it to the active setlist.\n` +
-        `• Click Cancel to keep using the original arrangement set to this song in this setlist.`
-      );
-      if (confirmApply) {
-        shouldApplyToSetlist = true;
+      if (!songIds.includes(songId)) {
+        songIds.push(songId);
       }
-    }
+      const payloadMeta = {
+        action: 'saveSetlist',
+        name: activeSetlistFolder,
+        roadmap: { songIds, lastUpdated: Date.now() },
+      };
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify(payloadMeta),
+      });
 
+      showToast(`Setlist arrangement updated in the shared catalog!`, 'success');
+    } catch (err) {
+      console.error('Error syncing setlist arrangement:', err);
+    } finally {
+      // Offline fallback & Cache update
+      try {
+        const rawSaved = localStorage.getItem('captured_song_settings') || '{}';
+        const dict = JSON.parse(rawSaved);
+        dict[songId] = { key: targetKey, roadmap: roadmap };
+        localStorage.setItem('captured_song_settings', JSON.stringify(dict));
+        showToast('Saved setlist arrangement locally', 'success');
+      } catch (err) {
+        console.error('Error saving local fallback:', err);
+      }
+      
+      // Refetch shared arrangements and setlists to keep state in sync
+      try {
+        await refetchArrangements();
+      } catch (e) {
+        console.warn('Failed to refetch arrangements', e);
+      }
+      setIsLoading(false);
+    }
+  };
+
+  const executeSaveArrangement = async (name: string, shouldApplyToSetlist: boolean, roadmapToSave: any[]) => {
     setIsLoading(true);
     try {
       const payload = {
         action: 'saveArrangement',
         songId: String(currentSong?.SongID),
         name: name,
-        roadmap: activeRoadmap,
+        roadmap: roadmapToSave,
       };
 
       const res = await fetch(SCRIPT_URL, {
@@ -1692,7 +2021,8 @@ export default function App() {
       if (shouldApplyToSetlist && activeSetlistFolder && currentSong) {
         const capturedSettings = {
           key: currentKey,
-          roadmap: activeRoadmap,
+          roadmap: roadmapToSave,
+          arrangementName: name,
         };
         const payloadArrangement = {
           action: 'saveArrangement',
@@ -1732,39 +2062,125 @@ export default function App() {
         showToast(`Successfully loaded arrangement to active setlist: ${activeSetlistFolder}`, 'success');
       }
     } catch {
-      // offline fallback
-      const presetsFallback = getPresets();
-      presetsFallback[name] = activeRoadmap;
-      localStorage.setItem(`custom_arrangements_${currentSong?.SongID}`, JSON.stringify(presetsFallback));
+      // offline fallback - write only local-only presets to custom_arrangements_${currentSong?.SongID}
+      let localObj: { [key: string]: any } = {};
+      try {
+        const localRaw = localStorage.getItem(`custom_arrangements_${currentSong?.SongID}`);
+        if (localRaw) {
+          localObj = JSON.parse(localRaw);
+        }
+      } catch {}
+      localObj[name] = roadmapToSave;
+      localStorage.setItem(`custom_arrangements_${currentSong?.SongID}`, JSON.stringify(localObj));
       showToast(`Saved locally on this device as "${name}"`, 'success');
 
       if (shouldApplyToSetlist && currentSong) {
         const rawSaved = localStorage.getItem('captured_song_settings') || '{}';
         const dict = JSON.parse(rawSaved);
-        dict[String(currentSong.SongID)] = { key: currentKey, roadmap: activeRoadmap };
+        dict[String(currentSong.SongID)] = { key: currentKey, roadmap: roadmapToSave, arrangementName: name };
         localStorage.setItem('captured_song_settings', JSON.stringify(dict));
         showToast(`Loaded arrangement to active setlist locally on this device`, 'success');
       }
     } finally {
-      setCurrentArrangementName(name);
+      // Capture backups before clearing
+      const cachedBackupRoadmap = roadmapBackup;
+      const cachedBackupName = nameBackup;
+
       setIsArrangementLocked(true);
       setRoadmapBackup(null);
       setNameBackup('');
-      // Refetch shared presets
+      
+      let latestArrs: any[] = [];
       try {
-        const presetsRes = await fetch(`${SCRIPT_URL}?tab=Arrangements`);
-        const presetsText = await presetsRes.text();
-        const list = JSON.parse(presetsText);
-        if (Array.isArray(list)) {
-          localStorage.setItem('cached_arrangements', JSON.stringify(list));
-          setSyncedSheetArrangements(
-            list.filter((arr) => String(arr.SongID) === String(currentSong?.SongID))
-          );
+        const fetched = await refetchArrangements();
+        latestArrs = fetched?.presets || [];
+      } catch (e) {
+        console.warn('Failed to refetch arrangements:', e);
+      }
+
+      if (!shouldApplyToSetlist && activeSetlistFolder && currentSong) {
+        // Since user clicked "Keep Original" (meaning shouldApplyToSetlist is false and we are inside a setlist context),
+        // we must restore/reload the original setlist arrangement on screen.
+        if (cachedBackupRoadmap !== null) {
+          setActiveRoadmap(cachedBackupRoadmap);
+          setCurrentArrangementName(cachedBackupName || '');
+          showToast(`Setlist arrangement kept intact and restored on screen.`, 'info');
+        } else {
+          await executeSongLoad(currentSong, false, undefined, latestArrs.length > 0 ? latestArrs : undefined);
+          showToast(`Setlist arrangement kept intact and restored on screen.`, 'info');
         }
-      } catch {
-        // safe ignore
+      } else {
+        // Otherwise (or if there's no active setlist folder), keep the saved arrangement active on screen
+        setCurrentArrangementName(name);
       }
       setIsLoading(false);
+    }
+  };
+
+  const savePresetArrangement = async () => {
+    let name = currentArrangementName.trim().toUpperCase();
+    if (!name) {
+      showToast('Please enter an arrangement preset name first', 'error');
+      return;
+    }
+
+    // Clean up "Set: " prefix if present
+    if (name.startsWith('SET: ')) {
+      name = name.slice(5);
+    }
+    if (name.startsWith('Set: ')) {
+      name = name.slice(5);
+    }
+    
+    // Clean up any existing date suffix from the name before appending the new one
+    const { baseName } = parsePresetDate(name);
+    const enteredBaseName = baseName.toUpperCase();
+
+    const months = [
+      'JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
+      'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'
+    ];
+    const d = new Date();
+    const monthName = months[d.getMonth()];
+    const day = String(d.getDate()).padStart(2, '0');
+    const year = String(d.getFullYear()).slice(-2);
+    const dateStr = `${monthName}-${day}-${year}`;
+
+    const newFullName = `${enteredBaseName} (${dateStr})`;
+
+    const presets = getPresets();
+    
+    // Find if there is an existing preset with the same base name (ignoring date suffix)
+    const existingPresetKey = Object.keys(presets).find(k => {
+      const { baseName: pBase } = parsePresetDate(k);
+      return pBase.toUpperCase() === enteredBaseName;
+    });
+
+    const isModifyingExisting = !!existingPresetKey;
+
+    if (isModifyingExisting) {
+      // Modifying an existing arrangement: Ask user to confirm
+      setSaveArrangementConfirmation({
+        name: newFullName,
+        oldName: existingPresetKey,
+        isOverwrite: true,
+        shouldPromptApplyToSetlist: false,
+        roadmap: activeRoadmap,
+      });
+    } else {
+      // New arrangement
+      const shouldPromptApplyToSetlist = !!activeSetlistFolder && !!currentSong;
+      if (shouldPromptApplyToSetlist) {
+        // Prompt options: load to current setlist or keep original & just save
+        setSaveArrangementConfirmation({
+          name: newFullName,
+          isOverwrite: false,
+          shouldPromptApplyToSetlist: true,
+          roadmap: activeRoadmap,
+        });
+      } else {
+        await executeSaveArrangement(newFullName, false, activeRoadmap);
+      }
     }
   };
 
@@ -1781,9 +2197,28 @@ export default function App() {
     showToast('Cancelled editing. Reverted changes.', 'info');
   };
 
-  const deletePresetArrangement = async (name: string) => {
+  const deletePresetArrangement = async (name: string, isCurrentlyActive: boolean) => {
     setIsLoading(true);
+    const { baseName } = parsePresetDate(name);
     try {
+      // 1. Clear local memory/cache capturing this arrangement
+      const rawSaved = localStorage.getItem('captured_song_settings');
+      if (rawSaved) {
+        try {
+          const dict = JSON.parse(rawSaved);
+          if (dict[String(currentSong?.SongID)]) {
+            delete dict[String(currentSong?.SongID)];
+            localStorage.setItem('captured_song_settings', JSON.stringify(dict));
+          }
+        } catch (e) {}
+      }
+
+      // 2. Clear current arrangement name if it is active
+      if (isCurrentlyActive) {
+        setCurrentArrangementName('');
+      }
+
+      // 3. Delete the arrangement from the cloud database
       const payload = {
         action: 'deleteArrangement',
         songId: String(currentSong?.SongID),
@@ -1796,32 +2231,85 @@ export default function App() {
       });
       const result = await res.json();
       if (result.status === 'success') {
-        showToast(`Deleted from shared library: ${name}`, 'info');
+        showToast(`Deleted from shared library: ${baseName}`, 'info');
       } else {
         throw new Error();
       }
     } catch {
-      // Delete local
-      const presets = getPresets();
-      if (presets[name]) {
-        delete presets[name];
-        localStorage.setItem(`custom_arrangements_${currentSong?.SongID}`, JSON.stringify(presets));
-        showToast(`Deleted local preset: ${name}`, 'info');
-      }
+      showToast(`Could not delete from cloud, but cleaning up locally.`, 'info');
     } finally {
-      // Refetch
+      // Always delete from the local-only storage to avoid locking it locally!
       try {
-        const presetsRes = await fetch(`${SCRIPT_URL}?tab=Arrangements`);
-        const list = JSON.parse(await presetsRes.text());
-        if (Array.isArray(list)) {
-          localStorage.setItem('cached_arrangements', JSON.stringify(list));
-          setSyncedSheetArrangements(
-            list.filter((arr) => String(arr.SongID) === String(currentSong?.SongID))
-          );
+        const localRaw = localStorage.getItem(`custom_arrangements_${currentSong?.SongID}`);
+        if (localRaw) {
+          const localObj = JSON.parse(localRaw);
+          let deletedAny = false;
+          Object.keys(localObj).forEach((k) => {
+            // Case-insensitive/base-name match to completely clean up duplicate casings
+            const kBase = parsePresetDate(k).baseName.toLowerCase().trim();
+            const targetBase = baseName.toLowerCase().trim();
+            if (k.toLowerCase().trim() === name.toLowerCase().trim() || kBase === targetBase) {
+              delete localObj[k];
+              deletedAny = true;
+            }
+          });
+          if (deletedAny) {
+            localStorage.setItem(`custom_arrangements_${currentSong?.SongID}`, JSON.stringify(localObj));
+          }
         }
-      } catch {
-        // safe ignore
+      } catch (e) {
+        console.warn('Failed to clean local custom_arrangements:', e);
       }
+
+      // 4. If active and inside a setlist context, delete the setlist-specific arrangement from db
+      if (isCurrentlyActive && activeSetlistFolder && currentSong) {
+        try {
+          const payloadSet = {
+            action: 'deleteArrangement',
+            songId: String(currentSong.SongID),
+            name: `Set: ${activeSetlistFolder}`,
+          };
+          await fetch(SCRIPT_URL, {
+            method: 'POST',
+            body: JSON.stringify(payloadSet),
+          });
+        } catch (e) {
+          console.warn("Failed to delete setlist mapping:", e);
+        }
+      }
+
+      // 5. Refetch shared catalog
+      let latestArrs: any[] = [];
+      try {
+        const fetched = await refetchArrangements();
+        latestArrs = fetched?.presets || [];
+      } catch (e) {
+        console.warn('Failed to refetch arrangements:', e);
+      }
+
+      // 6. Trigger Replacement Modal if it was currently active
+      if (isCurrentlyActive && currentSong) {
+        const presets = getPresets();
+        const remainingKeys = Object.keys(presets).filter((k) => !k.startsWith('Set:'));
+        const availableList = remainingKeys.map((k) => {
+          const p = presets[k];
+          return {
+            name: k,
+            roadmap: Array.isArray(p) ? p : (p.roadmap || []),
+            key: p.key || currentKey
+          };
+        });
+
+        // Load default arrangement on screen
+        await executeSongLoad(currentSong, true, undefined, latestArrs.length > 0 ? latestArrs : undefined);
+
+        setArrangementReplacementModal({
+          songId: String(currentSong.SongID),
+          deletedName: baseName,
+          availablePresets: availableList
+        });
+      }
+
       setIsLoading(false);
     }
   };
@@ -2402,9 +2890,22 @@ export default function App() {
                               <div className="text-[9px] text-indigo-400 uppercase tracking-widest font-bold">
                                 Shared Band Presets
                               </div>
-                              <span className="text-[7px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded flex-shrink-0 font-bold uppercase tracking-widest font-mono select-none">
-                                ☁️ Cloud Sync
-                              </span>
+                              <button
+                                onClick={async () => {
+                                  setIsLoading(true);
+                                  try {
+                                    await refetchArrangements();
+                                    showToast('Cloud presets refreshed successfully!', 'success');
+                                  } catch (e) {
+                                    showToast('Could not sync with cloud.', 'error');
+                                  } finally {
+                                    setIsLoading(false);
+                                  }
+                                }}
+                                className="text-[7px] bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 hover:border-emerald-500/40 px-1.5 py-0.5 rounded flex-shrink-0 font-bold uppercase tracking-widest font-mono transition-all active:scale-95 cursor-pointer flex items-center gap-1 select-none"
+                              >
+                                <span>☁️</span> Cloud Sync
+                              </button>
                             </div>
                             <div className="space-y-2 overflow-y-auto max-h-[160px] pr-1 custom-scrollbar">
                               {(() => {
@@ -2476,8 +2977,19 @@ export default function App() {
                                                         showToast('Deselected arrangement. Restored default song flow.', 'info');
                                                       }
                                                     } else {
-                                                      loadPresetArrangement(originalName);
-                                                      setCurrentArrangementName(originalName);
+                                                      if (activeSetlistFolder && currentSong) {
+                                                        const presets = getPresets();
+                                                        const clickedPresetData = presets[originalName];
+                                                        if (clickedPresetData && areRoadmapsIdentical(clickedPresetData, activeRoadmap)) {
+                                                          setCurrentArrangementName(originalName);
+                                                          showToast(`"${baseName}" arrangement is already active for this song.`, 'info');
+                                                        } else {
+                                                          setPendingArrangementToLoad(originalName);
+                                                        }
+                                                      } else {
+                                                        loadPresetArrangement(originalName);
+                                                        setCurrentArrangementName(originalName);
+                                                      }
                                                     }
                                                   }}
                                                   className={`flex-1 text-left font-bold truncate pr-1.5 cursor-pointer text-[9px] uppercase ${
@@ -2488,7 +3000,12 @@ export default function App() {
                                                   {isActive ? `✓ ${baseName}` : baseName}
                                                 </button>
                                                 <button
-                                                  onClick={() => deletePresetArrangement(originalName)}
+                                                  onClick={() => {
+                                                    setDeleteArrangementConfirmation({
+                                                      name: originalName,
+                                                      isActive: isActive
+                                                    });
+                                                  }}
                                                   className="text-rose-400/60 hover:text-rose-400 px-1.5 py-0.5 font-bold text-[10px] cursor-pointer"
                                                   title="Delete arrangement"
                                                 >
@@ -2515,7 +3032,7 @@ export default function App() {
                                 type="text"
                                 id="presetNameInput"
                                 value={getPresetInputDisplayName(currentArrangementName)}
-                                onChange={(e) => setCurrentArrangementName(e.target.value)}
+                                onChange={(e) => setCurrentArrangementName(e.target.value.toUpperCase())}
                                 disabled={isArrangementLocked}
                                 placeholder={isArrangementLocked ? "Arrangement is locked" : "Preset name (e.g. Acoustic)"}
                                 className="w-full bg-black/50 p-2 rounded-lg text-[10px] text-white border border-white/5 outline-none focus:ring-1 focus:ring-indigo-500/30 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
@@ -2839,6 +3356,78 @@ export default function App() {
                   </div>
                 </div>
               </div>
+              
+              {/* Real-time Cloud Arrangement Modified Notice */}
+              {cloudArrangementUpdateNotice && (
+                <div className="mt-2.5 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-fadeIn select-none">
+                  <div className="flex items-start gap-2 text-amber-300">
+                    <span className="text-sm shrink-0 animate-pulse mt-0.5 sm:mt-0">🔄</span>
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-black uppercase tracking-wider">Arrangement Updated on Cloud</span>
+                      <span className="text-[9.5px] text-gray-300 font-medium leading-relaxed">
+                        A bandmate just modified the active arrangement: <strong className="text-amber-400 font-bold uppercase">{parsePresetDate(cloudArrangementUpdateNotice.name).baseName}</strong>.
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0 w-full sm:w-auto justify-end">
+                    <button
+                      onClick={async () => {
+                        // Accept and load the updated arrangement
+                        setActiveRoadmap(cloudArrangementUpdateNotice.newRoadmap);
+                        if (cloudArrangementUpdateNotice.newKey) {
+                          setCurrentKey(cloudArrangementUpdateNotice.newKey);
+                        }
+                        setCloudArrangementUpdateNotice(null);
+                        showToast(`Updated to bandmate's latest arrangement!`, 'success');
+                      }}
+                      className="px-2.5 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
+                    >
+                      Load Latest
+                    </button>
+                    <button
+                      onClick={() => setCloudArrangementUpdateNotice(null)}
+                      className="px-2 py-1.5 bg-transparent hover:bg-white/5 text-gray-400 rounded-lg text-[8px] font-bold uppercase tracking-wider transition-all cursor-pointer"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Real-time Cloud Arrangement Deleted Notice */}
+              {cloudArrangementDeletionNotice && (
+                <div className="mt-2.5 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-fadeIn select-none">
+                  <div className="flex items-start gap-2 text-rose-300">
+                    <span className="text-sm shrink-0 animate-pulse mt-0.5 sm:mt-0">🔄</span>
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-rose-400">Arrangement Deleted on Cloud</span>
+                      <span className="text-[9.5px] text-gray-300 font-medium leading-relaxed">
+                        A bandmate just deleted the active arrangement: <strong className="text-rose-400 font-bold uppercase">"{parsePresetDate(cloudArrangementDeletionNotice.name).baseName}"</strong>.
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0 w-full sm:w-auto justify-end">
+                    <button
+                      onClick={async () => {
+                        await handleApplyArrangementDeletion(
+                          cloudArrangementDeletionNotice.name,
+                          cloudArrangementDeletionNotice.newSongArrangements,
+                          cloudArrangementDeletionNotice.allArrs
+                        );
+                      }}
+                      className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
+                    >
+                      Refresh
+                    </button>
+                    <button
+                      onClick={() => setCloudArrangementDeletionNotice(null)}
+                      className="px-2 py-1.5 bg-transparent hover:bg-white/5 text-gray-400 rounded-lg text-[8px] font-bold uppercase tracking-wider transition-all cursor-pointer"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Consolidated Collapsible Controls Panel */}
               <div className="mt-2.5 flex-shrink-0 bg-[#0d0f1e]/40 backdrop-blur-md rounded-xl p-2.5 border border-indigo-500/25 space-y-2 select-none shadow-[inset_0_2px_8px_rgba(0,0,0,0.4)]">
@@ -4034,6 +4623,326 @@ export default function App() {
         onClose={() => setIsDiagnosticModalOpen(false)}
         scriptUrl={SCRIPT_URL}
       />
+
+      {/* Setlist Arrangement Change Confirmation Modal */}
+      {pendingArrangementToLoad && (
+        <div className="fixed inset-0 bg-[#020205]/85 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn select-none">
+          <div className="w-full max-w-sm bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-5 flex flex-col space-y-4">
+            <div className="flex items-center gap-2 text-indigo-300 font-bold text-xs uppercase tracking-wider">
+              <span>📋</span>
+              <span>Confirm Arrangement Change</span>
+            </div>
+            
+            <div className="space-y-1.5 text-xs text-gray-300 leading-relaxed">
+              <p>
+                You are loading a different arrangement for <strong className="text-white">"{currentSong?.Title}"</strong>:
+              </p>
+              <div className="p-2.5 bg-indigo-500/10 border border-indigo-500/20 text-emerald-400 font-black tracking-wide rounded-xl text-center uppercase text-[11px]">
+                {getPresetInputDisplayName(pendingArrangementToLoad)}
+              </div>
+              <p className="text-[10.5px] text-gray-400 mt-2">
+                Would you like to also update the active set list <strong className="text-indigo-400">"{activeSetlistFolder}"</strong> to use this arrangement, or keep the original set list arrangement and load it locally?
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-2 pt-1.5">
+              <button
+                onClick={async () => {
+                  const nameToLoad = pendingArrangementToLoad;
+                  setPendingArrangementToLoad(null);
+                  
+                  // 1. Load the arrangement
+                  loadPresetArrangement(nameToLoad);
+                  setCurrentArrangementName(nameToLoad);
+                  
+                  // 2. Find and extract the roadmap
+                  const presets = getPresets();
+                  const presetData = presets[nameToLoad];
+                  const isObject = presetData && typeof presetData === 'object' && !Array.isArray(presetData);
+                  const blocksArray = isObject ? (presetData.roadmap || []) : presetData;
+                  const newRoadmap = Array.isArray(blocksArray) ? blocksArray : [];
+                  const newKey = (isObject && presetData.key) ? presetData.key : (currentSong?.OriginalKey || 'C');
+                  
+                  // 3. Update active setlist with this roadmap
+                  if (currentSong) {
+                    await updateSetlistArrangementDirectly(String(currentSong.SongID), newRoadmap, newKey);
+                  }
+                }}
+                className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
+              >
+                Update Setlist & Load
+              </button>
+
+              <button
+                onClick={() => {
+                  const nameToLoad = pendingArrangementToLoad;
+                  setPendingArrangementToLoad(null);
+                  
+                  // Load preset arrangement locally
+                  loadPresetArrangement(nameToLoad);
+                  setCurrentArrangementName(nameToLoad);
+                  
+                  showToast('Arrangement loaded temporarily. Setlist remains unchanged.', 'info');
+                }}
+                className="w-full py-2.5 bg-white/5 hover:bg-white/10 text-gray-300 border border-white/5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
+              >
+                Keep Original Setlist / Load Locally Only
+              </button>
+
+              <button
+                onClick={() => {
+                  setPendingArrangementToLoad(null);
+                }}
+                className="w-full py-2 bg-transparent hover:bg-white/5 text-gray-400 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save / Overwrite / Apply to Setlist Confirmation Modal */}
+      {saveArrangementConfirmation && (
+        <div className="fixed inset-0 bg-[#020205]/85 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn select-none">
+          <div className="w-full max-w-sm bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-5 flex flex-col space-y-4">
+            <div className={`flex items-center gap-2 font-bold text-xs uppercase tracking-wider ${
+              saveArrangementConfirmation.isOverwrite ? 'text-amber-400' : 'text-emerald-400'
+            }`}>
+              <span>{saveArrangementConfirmation.isOverwrite ? '⚠️' : '📋'}</span>
+              <span>{saveArrangementConfirmation.isOverwrite ? 'Confirm Arrangement Update' : 'New Arrangement Added'}</span>
+            </div>
+
+            <div className="space-y-2.5 text-xs text-gray-300 leading-relaxed">
+              {saveArrangementConfirmation.isOverwrite ? (
+                <div className="space-y-2">
+                  <p className="text-[10.5px]">
+                    You are modifying an existing arrangement:
+                  </p>
+                  <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-300 font-black tracking-wide rounded-xl text-center uppercase text-[11px]">
+                    {getPresetInputDisplayName(saveArrangementConfirmation.name)}
+                  </div>
+                  <p className="text-[10.5px] text-gray-400 mt-2 font-bold">
+                    Do you want to confirm?
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-[10.5px]">
+                    This new arrangement will be added:
+                  </p>
+                  <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-black tracking-wide rounded-xl text-center uppercase text-[11px]">
+                    {getPresetInputDisplayName(saveArrangementConfirmation.name)}
+                  </div>
+                  <p className="text-[10.5px] text-gray-400 mt-2">
+                    Do you want to load this for this song in your current set list or just keep the original arrangement and just save this new arrangement?
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2 pt-1.5">
+              {saveArrangementConfirmation.isOverwrite ? (
+                <button
+                  onClick={async () => {
+                    const { name, roadmap } = saveArrangementConfirmation;
+                    setSaveArrangementConfirmation(null);
+                    await executeSaveArrangement(name, !!activeSetlistFolder, roadmap);
+                  }}
+                  className="w-full py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
+                >
+                  Confirm & Save
+                </button>
+              ) : (
+                <>
+                  <button
+                    onClick={async () => {
+                      const { name, roadmap } = saveArrangementConfirmation;
+                      setSaveArrangementConfirmation(null);
+                      await executeSaveArrangement(name, true, roadmap);
+                    }}
+                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
+                  >
+                    Load & Update Setlist
+                  </button>
+                  <button
+                    onClick={async () => {
+                      const { name, roadmap } = saveArrangementConfirmation;
+                      setSaveArrangementConfirmation(null);
+                      await executeSaveArrangement(name, false, roadmap);
+                    }}
+                    className="w-full py-2.5 bg-white/5 hover:bg-white/10 text-gray-300 border border-white/5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
+                  >
+                    Save to Catalog Only (Keep Original)
+                  </button>
+                </>
+              )}
+
+              <button
+                onClick={() => {
+                  setSaveArrangementConfirmation(null);
+                }}
+                className="w-full py-2 bg-transparent hover:bg-white/5 text-gray-400 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Arrangement Confirmation Modal */}
+      {deleteArrangementConfirmation && (
+        <div className="fixed inset-0 bg-[#020205]/85 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn select-none">
+          <div className="w-full max-w-sm bg-[#0c0d1b] border border-rose-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-5 flex flex-col space-y-4">
+            <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider text-rose-400">
+              <span>⚠️</span>
+              <span>Confirm Deletion</span>
+            </div>
+
+            <div className="space-y-2 text-xs text-gray-300 leading-relaxed">
+              <p className="text-[10.5px]">
+                Are you sure you want to permanently delete the arrangement:
+              </p>
+              <div className="p-2.5 bg-rose-500/10 border border-rose-500/20 text-rose-400 font-black tracking-wide rounded-xl text-center uppercase text-[11px]">
+                {getPresetInputDisplayName(deleteArrangementConfirmation.name)}
+              </div>
+              
+              {deleteArrangementConfirmation.isActive && (
+                <div className="p-3 bg-amber-500/15 border border-amber-500/20 rounded-xl space-y-1.5 mt-2">
+                  <p className="text-[10px] text-amber-300 font-black uppercase tracking-wider flex items-center gap-1">
+                    <span>🚨 Critical Warning:</span>
+                  </p>
+                  <p className="text-[9.5px] text-gray-400 leading-normal font-medium">
+                    This arrangement is currently active on screen! If deleted, the song will reset to its default arrangement, and you will be asked to choose a replacement to update your setlist mapping.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2 pt-1.5">
+              <button
+                onClick={async () => {
+                  const { name, isActive } = deleteArrangementConfirmation;
+                  setDeleteArrangementConfirmation(null);
+                  await deletePresetArrangement(name, isActive);
+                }}
+                className="w-full py-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
+              >
+                Yes, Delete Permanently
+              </button>
+              <button
+                onClick={() => {
+                  setDeleteArrangementConfirmation(null);
+                }}
+                className="w-full py-2 bg-transparent hover:bg-white/5 text-gray-400 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Arrangement Replacement Selection Modal */}
+      {arrangementReplacementModal && (
+        <div className="fixed inset-0 bg-[#020205]/90 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn select-none">
+          <div className="w-full max-w-sm bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-5 flex flex-col space-y-4">
+            <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider text-indigo-400">
+              <span>🔄</span>
+              <span>Choose Replacement</span>
+            </div>
+
+            <div className="space-y-2 text-xs text-gray-300 leading-relaxed">
+              <p className="text-[10.5px]">
+                The arrangement <span className="text-rose-400 font-bold uppercase">"{arrangementReplacementModal.deletedName}"</span> has been deleted and no longer exists.
+              </p>
+              <p className="text-[10.5px] text-gray-400">
+                Choose a replacement arrangement for this song in the current setlist:
+              </p>
+
+              <div className="space-y-1.5 max-h-[160px] overflow-y-auto pr-1 custom-scrollbar">
+                {arrangementReplacementModal.availablePresets.length > 0 ? (
+                  arrangementReplacementModal.availablePresets.map((preset) => (
+                    <button
+                      key={preset.name}
+                      onClick={async () => {
+                        setArrangementReplacementModal(null);
+                        const friendlyName = parsePresetDate(preset.name).baseName;
+                        
+                        // If inside a setlist context, map this replacement arrangement to the setlist permanently
+                        if (activeSetlistFolder && currentSong) {
+                          await updateSetlistArrangementDirectly(
+                            String(currentSong.SongID),
+                            preset.roadmap,
+                            preset.key,
+                            preset.name
+                          );
+                          // Reload song with the new arrangement
+                          await executeSongLoad(currentSong, false);
+                          showToast(`Setlist arrangement replaced with: ${friendlyName}`, 'success');
+                        } else {
+                          // Just load it on screen
+                          loadPresetArrangement(preset.name);
+                          setCurrentArrangementName(preset.name);
+                          showToast(`Loaded arrangement: ${friendlyName}`, 'success');
+                        }
+                      }}
+                      className="w-full flex items-center justify-between p-2 bg-indigo-950/20 hover:bg-indigo-950/40 border border-indigo-500/10 hover:border-indigo-500/30 rounded-xl text-[10px] text-indigo-300 hover:text-white text-left font-black uppercase transition-all cursor-pointer"
+                    >
+                      <span>{parsePresetDate(preset.name).baseName}</span>
+                      <span className="text-[7.5px] bg-indigo-500/10 px-1.5 py-0.5 rounded text-indigo-400 font-mono font-bold">LOAD & UPDATE</span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="text-center py-4 text-[9px] text-gray-500 italic">
+                    No other saved arrangements found for this song.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 pt-1.5">
+              <button
+                onClick={async () => {
+                  setArrangementReplacementModal(null);
+                  if (currentSong) {
+                    // Clear any setlist mapping to restore the default arrangement mapping
+                    if (activeSetlistFolder) {
+                      try {
+                        const payloadSet = {
+                          action: 'deleteArrangement',
+                          songId: String(currentSong.SongID),
+                          name: `Set: ${activeSetlistFolder}`,
+                        };
+                        await fetch(SCRIPT_URL, {
+                          method: 'POST',
+                          body: JSON.stringify(payloadSet),
+                        });
+                      } catch {}
+                    }
+                    await executeSongLoad(currentSong, true);
+                    showToast('Restored default song arrangement mapping.', 'info');
+                  }
+                }}
+                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
+              >
+                Restore Default Song Structure
+              </button>
+              
+              <button
+                onClick={() => {
+                  setArrangementReplacementModal(null);
+                  showToast('Dismissed. Temporary default arrangement loaded on screen.', 'info');
+                }}
+                className="w-full py-2 bg-transparent hover:bg-white/5 text-gray-400 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
+              >
+                Keep Empty / Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Real-time Toasts notifications */}
       <div id="toastContainer" className="fixed bottom-6 right-4 sm:right-6 z-[950] flex flex-col gap-2 pointer-events-none w-full max-w-[90vw] sm:max-w-xs">

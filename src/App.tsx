@@ -147,6 +147,33 @@ export const areBlocksChordsIdentical = (
   return true;
 };
 
+export const areBlocksLyricsAndChordsIdentical = (
+  b1: RoadmapBlock,
+  b2: RoadmapBlock,
+  sectionTemplates: { [key: string]: SongLine[] }
+) => {
+  if (!b1 || !b2) return false;
+  if (b1.keyOffset !== b2.keyOffset) return false;
+
+  const lines1 = sectionTemplates[b1.name] || [];
+  const lines2 = sectionTemplates[b2.name] || [];
+
+  const enabled1 = b1.enabledLines || [];
+  const enabled2 = b2.enabledLines || [];
+
+  const activeLines1 = lines1.filter((_, i) => enabled1.includes(i));
+  const activeLines2 = lines2.filter((_, i) => enabled2.includes(i));
+
+  if (activeLines1.length !== activeLines2.length) return false;
+  for (let i = 0; i < activeLines1.length; i++) {
+    const l1 = activeLines1[i];
+    const l2 = activeLines2[i];
+    if ((l1.Chords || '') !== (l2.Chords || '')) return false;
+    if ((l1.Lyrics || '') !== (l2.Lyrics || '')) return false;
+  }
+  return true;
+};
+
 export const getRoadmapRepetitionInfo = (roadmap: RoadmapBlock[]) => {
   const info: BlockRepetitionInfo[] = [];
   if (roadmap.length === 0) return info;
@@ -196,6 +223,8 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<'songs' | 'setlists' | 'favorites'>('songs');
   const [isNavOpen, setIsNavOpen] = useState(false);
   const [isDiagnosticModalOpen, setIsDiagnosticModalOpen] = useState(false);
+  const [isInstallModalOpen, setIsInstallModalOpen] = useState(false);
+  const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
   const [isOfflineMode, setIsOfflineMode] = useState(false);
   const [lastSynced, setLastSynced] = useState<number | null>(() => {
     try {
@@ -220,6 +249,7 @@ export default function App() {
 
   // Selected Song Sheets & Keys
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
+  const [formEditingSong, setFormEditingSong] = useState<Song | null>(null);
   const [currentKey, setCurrentKey] = useState('C');
   const [songLines, setSongLines] = useState<SongLine[]>([]);
   const [focusedLineId, setFocusedLineId] = useState<string | null>(null);
@@ -229,6 +259,10 @@ export default function App() {
   const [displayMode, setDisplayMode] = useState<'both' | 'chords' | 'numbers'>('both');
   const [showLyrics, setShowLyrics] = useState(true);
   const [sheetLayoutMode, setSheetLayoutMode] = useState<'sequence' | 'compact'>('sequence');
+  const [isPDFPreviewOpen, setIsPDFPreviewOpen] = useState(false);
+  const [pdfScope, setPdfScope] = useState<'current' | 'all' | 'custom'>('current');
+  const [pdfSelectedSongIds, setPdfSelectedSongIds] = useState<string[]>([]);
+  const [pdfSongKeys, setPdfSongKeys] = useState<{ [songId: string]: string }>({});
   const [controlsExpanded, setControlsExpanded] = useState(false);
 
   // Autoscroll Engine
@@ -304,6 +338,18 @@ export default function App() {
   const textRef = useRef<HTMLHeadingElement>(null);
   const [isTitleOverflowing, setIsTitleOverflowing] = useState(false);
 
+  // Capture PWA install prompt
+  useEffect(() => {
+    const handleBeforePrompt = (e: any) => {
+      e.preventDefault();
+      setDeferredInstallPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforePrompt);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforePrompt);
+    };
+  }, []);
+
   useEffect(() => {
     if (currentSong) {
       // Small timeout to allow React to paint the updated title before measuring scrollWidth
@@ -364,11 +410,73 @@ export default function App() {
     }
   });
 
+  const isSetlistLocked = (setName: string) => {
+    const meta = allSharedSetlists.find((sl) => sl.PresetName === setName);
+    if (!meta) return false;
+    try {
+      const parsed = JSON.parse(meta.RoadmapJSON);
+      return !!parsed.locked;
+    } catch {
+      return false;
+    }
+  };
+
+  const toggleSetlistLock = async (setName: string) => {
+    if (!appUser || !appSecret) {
+      showToast('Admin authentication required to lock/unlock setlists.', 'error');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const existingMeta = allSharedSetlists.find(
+        (sl) => sl.PresetName === setName
+      );
+      if (!existingMeta) {
+        showToast('Setlist not found.', 'error');
+        return;
+      }
+
+      let songIds: string[] = [];
+      let isLocked = false;
+      try {
+        const parsed = JSON.parse(existingMeta.RoadmapJSON);
+        songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
+        isLocked = !!parsed.locked;
+      } catch {}
+
+      const nextLockState = !isLocked;
+
+      const payloadMeta = {
+        action: 'saveSetlist',
+        name: setName,
+        roadmap: { songIds, lastUpdated: Date.now(), locked: nextLockState },
+      };
+
+      const resMeta = await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify(payloadMeta),
+      });
+      const resMetaJson = await resMeta.json();
+      if (resMetaJson.status !== 'success') {
+        throw new Error(resMetaJson.message || 'Failed to update setlist lock');
+      }
+
+      showToast(`Setlist "${setName}" is now ${nextLockState ? 'LOCKED 🔒' : 'UNLOCKED 🔓'}`, 'success');
+      await refetchArrangements();
+    } catch (err: any) {
+      console.error(err);
+      showToast('Error updating setlist lock status', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const toggleAutoscroll = () => {
     if (!currentSong) return;
     if (!isScrollingActive) {
       const container = document.querySelector('.song-scroll-container');
-      const maxScroll = container 
+      const isContainerScrollable = container && container.scrollHeight > container.clientHeight && getComputedStyle(container).overflowY !== 'visible';
+      const maxScroll = isContainerScrollable
         ? container.scrollHeight - container.clientHeight 
         : document.documentElement.scrollHeight - window.innerHeight;
 
@@ -430,6 +538,10 @@ export default function App() {
   };
 
   const saveSongToSetlist = async (setName: string) => {
+    if (isSetlistLocked(setName) && !(appUser && appSecret)) {
+      showToast(`Setlist "${setName}" is locked by an admin. Modifying is restricted.`, 'error');
+      return;
+    }
     if (!currentSong) return;
     setIsLoading(true);
     try {
@@ -473,7 +585,7 @@ export default function App() {
       const payloadMeta = {
         action: 'saveSetlist',
         name: setName,
-        roadmap: { songIds, lastUpdated: Date.now() },
+        roadmap: { songIds, lastUpdated: Date.now(), locked: isSetlistLocked(setName) },
       };
 
       const resMeta = await fetch(SCRIPT_URL, {
@@ -486,6 +598,8 @@ export default function App() {
       }
 
       showToast(`Song "${currentSong.Title}" added to "${setName}" with arrangement captured!`, 'success');
+      setIsSetlistManagerOpen(false);
+      setCurrentTab('songs');
       await refetchArrangements();
     } catch (err: any) {
       console.error(err);
@@ -496,6 +610,10 @@ export default function App() {
   };
 
   const removeSongFromSetlist = async (setName: string, songIdToRemove: string) => {
+    if (isSetlistLocked(setName) && !(appUser && appSecret)) {
+      showToast(`Setlist "${setName}" is locked by an admin. Modifying is restricted.`, 'error');
+      return;
+    }
     setIsLoading(true);
     try {
       const payloadDelete = {
@@ -523,7 +641,7 @@ export default function App() {
         const payloadMeta = {
           action: 'saveSetlist',
           name: setName,
-          roadmap: { songIds: updatedSongIds, lastUpdated: Date.now() },
+          roadmap: { songIds: updatedSongIds, lastUpdated: Date.now(), locked: isSetlistLocked(setName) },
         };
 
         await fetch(SCRIPT_URL, {
@@ -543,12 +661,16 @@ export default function App() {
   };
 
   const saveSetlistOrder = async (setName: string, updatedSongIds: string[]) => {
+    if (isSetlistLocked(setName) && !(appUser && appSecret)) {
+      showToast(`Setlist "${setName}" is locked by an admin. Modifying is restricted.`, 'error');
+      return;
+    }
     setIsLoading(true);
     try {
       const payloadMeta = {
         action: 'saveSetlist',
         name: setName,
-        roadmap: { songIds: updatedSongIds, lastUpdated: Date.now() },
+        roadmap: { songIds: updatedSongIds, lastUpdated: Date.now(), locked: isSetlistLocked(setName) },
       };
 
       const resMeta = await fetch(SCRIPT_URL, {
@@ -603,6 +725,10 @@ export default function App() {
   };
 
   const deleteSetlistFolder = async (setName: string) => {
+    if (isSetlistLocked(setName) && !(appUser && appSecret)) {
+      showToast(`Setlist "${setName}" is locked by an admin. Modifying is restricted.`, 'error');
+      return;
+    }
     setIsLoading(true);
     try {
       const payloadMeta = {
@@ -971,8 +1097,10 @@ export default function App() {
     if (!isScrollingActive) return;
 
     let lastFrameTime = performance.now();
-    const scrollContainer = document.querySelector('.song-scroll-container');
-    let exactScrollY = scrollContainer ? scrollContainer.scrollTop : window.scrollY;
+    const container = document.querySelector('.song-scroll-container');
+    const isContainerScrollable = container && container.scrollHeight > container.clientHeight && getComputedStyle(container).overflowY !== 'visible';
+    
+    let exactScrollY = isContainerScrollable ? container.scrollTop : window.scrollY;
     let expectedScrollY = exactScrollY;
     let animationId: number;
 
@@ -981,9 +1109,7 @@ export default function App() {
       const cappedDelta = Math.min(deltaTime, 50); 
       lastFrameTime = currentTime;
       
-      const container = document.querySelector('.song-scroll-container');
-      const targetEl = container || window;
-      const currentScroll = container ? container.scrollTop : window.scrollY;
+      const currentScroll = isContainerScrollable ? container.scrollTop : window.scrollY;
 
       if (Math.abs(currentScroll - expectedScrollY) > 2) {
         exactScrollY = currentScroll;
@@ -994,15 +1120,23 @@ export default function App() {
       
       exactScrollY += pixelsToScroll;
       
-      targetEl.scrollTo({
-        top: exactScrollY,
-        left: 0,
-        behavior: 'instant' as any
-      });
+      if (isContainerScrollable) {
+        container.scrollTo({
+          top: exactScrollY,
+          left: 0,
+          behavior: 'instant' as any
+        });
+      } else {
+        window.scrollTo({
+          top: exactScrollY,
+          left: 0,
+          behavior: 'instant' as any
+        });
+      }
       
-      expectedScrollY = container ? container.scrollTop : window.scrollY;
+      expectedScrollY = isContainerScrollable ? container.scrollTop : window.scrollY;
       
-      const maxScroll = container 
+      const maxScroll = isContainerScrollable 
         ? container.scrollHeight - container.clientHeight 
         : document.documentElement.scrollHeight - window.innerHeight;
 
@@ -1924,6 +2058,18 @@ export default function App() {
     targetKey: string,
     optArrangementName?: string
   ) => {
+    if (activeSetlistFolder && isSetlistLocked(activeSetlistFolder) && !(appUser && appSecret)) {
+      showToast('This setlist is locked by an admin. Key/arrangement applied locally only.', 'info');
+      try {
+        const rawSaved = localStorage.getItem('captured_song_settings') || '{}';
+        const dict = JSON.parse(rawSaved);
+        dict[songId] = { key: targetKey, roadmap: roadmap, arrangementName: optArrangementName || currentArrangementName };
+        localStorage.setItem('captured_song_settings', JSON.stringify(dict));
+      } catch (err) {
+        console.error('Error saving local fallback:', err);
+      }
+      return;
+    }
     setIsLoading(true);
     try {
       const targetArrName = optArrangementName !== undefined ? optArrangementName : currentArrangementName;
@@ -1963,7 +2109,7 @@ export default function App() {
       const payloadMeta = {
         action: 'saveSetlist',
         name: activeSetlistFolder,
-        roadmap: { songIds, lastUpdated: Date.now() },
+        roadmap: { songIds, lastUpdated: Date.now(), locked: isSetlistLocked(activeSetlistFolder) },
       };
       await fetch(SCRIPT_URL, {
         method: 'POST',
@@ -2019,47 +2165,55 @@ export default function App() {
       }
 
       if (shouldApplyToSetlist && activeSetlistFolder && currentSong) {
-        const capturedSettings = {
-          key: currentKey,
-          roadmap: roadmapToSave,
-          arrangementName: name,
-        };
-        const payloadArrangement = {
-          action: 'saveArrangement',
-          songId: String(currentSong.SongID),
-          name: `Set: ${activeSetlistFolder}`,
-          roadmap: capturedSettings,
-        };
-        await fetch(SCRIPT_URL, {
-          method: 'POST',
-          body: JSON.stringify(payloadArrangement),
-        });
+        if (isSetlistLocked(activeSetlistFolder) && !(appUser && appSecret)) {
+          const rawSaved = localStorage.getItem('captured_song_settings') || '{}';
+          const dict = JSON.parse(rawSaved);
+          dict[String(currentSong.SongID)] = { key: currentKey, roadmap: roadmapToSave, arrangementName: name };
+          localStorage.setItem('captured_song_settings', JSON.stringify(dict));
+          showToast(`This setlist is locked by an admin. Your arrangement changes are saved locally only.`, 'info');
+        } else {
+          const capturedSettings = {
+            key: currentKey,
+            roadmap: roadmapToSave,
+            arrangementName: name,
+          };
+          const payloadArrangement = {
+            action: 'saveArrangement',
+            songId: String(currentSong.SongID),
+            name: `Set: ${activeSetlistFolder}`,
+            roadmap: capturedSettings,
+          };
+          await fetch(SCRIPT_URL, {
+            method: 'POST',
+            body: JSON.stringify(payloadArrangement),
+          });
 
-        const existingMeta = allSharedSetlists.find(
-          (sl) => sl.PresetName === activeSetlistFolder
-        );
-        let songIds: string[] = [];
-        if (existingMeta) {
-          try {
-            const parsed = JSON.parse(existingMeta.RoadmapJSON);
-            songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
-          } catch {}
-        }
-        const sId = String(currentSong.SongID);
-        if (!songIds.includes(sId)) {
-          songIds.push(sId);
-        }
-        const payloadMeta = {
-          action: 'saveSetlist',
-          name: activeSetlistFolder,
-          roadmap: { songIds, lastUpdated: Date.now() },
-        };
-        await fetch(SCRIPT_URL, {
-          method: 'POST',
-          body: JSON.stringify(payloadMeta),
-        });
+          const existingMeta = allSharedSetlists.find(
+            (sl) => sl.PresetName === activeSetlistFolder
+          );
+          let songIds: string[] = [];
+          if (existingMeta) {
+            try {
+              const parsed = JSON.parse(existingMeta.RoadmapJSON);
+              songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
+            } catch {}
+          }
+          const sId = String(currentSong.SongID);
+          if (!songIds.includes(sId)) {
+            songIds.push(sId);
+          }
+          const payloadMeta = {
+            action: 'saveSetlist',
+            name: activeSetlistFolder,
+            roadmap: { songIds, lastUpdated: Date.now(), locked: isSetlistLocked(activeSetlistFolder) },
+          };
+          await fetch(SCRIPT_URL, {
+            method: 'POST',
+            body: JSON.stringify(payloadMeta),
+          });
 
-        showToast(`Successfully loaded arrangement to active setlist: ${activeSetlistFolder}`, 'success');
+          showToast(`Successfully loaded arrangement to active setlist: ${activeSetlistFolder}`, 'success');
+        }
       }
     } catch {
       // offline fallback - write only local-only presets to custom_arrangements_${currentSong?.SongID}
@@ -2456,6 +2610,1029 @@ export default function App() {
     });
   };
 
+  // Helper to dynamically compile roadmap, templates, and key for any song
+  const getSongPreviewData = (song: Song) => {
+    let filteredLines: SongLine[] = [];
+    try {
+      const rawLines = localStorage.getItem('cached_song_lines');
+      if (rawLines) {
+        const allLines = JSON.parse(rawLines);
+        if (Array.isArray(allLines)) {
+          filteredLines = allLines.filter(
+            (line: any) => line && String(line.SongID) === String(song.SongID)
+          );
+        }
+      }
+    } catch (e) {
+      console.warn("Error reading cached song lines:", e);
+    }
+
+    if (filteredLines.length === 0) {
+      filteredLines = FALLBACK_SONG_LINES.filter(
+        (line) => line && String(line.SongID) === String(song.SongID)
+      );
+    }
+
+    // Build templates
+    const templates: { [key: string]: SongLine[] } = {};
+    filteredLines.forEach((l) => {
+      const secName = l.SectionName || l.Section || l.section || 'Section';
+      if (!templates[secName]) {
+        templates[secName] = [];
+      }
+      templates[secName].push(l);
+    });
+
+    // Resolve key & roadmap
+    let activeKey = song.OriginalKey || 'C';
+    let activeRoadmapToUse: RoadmapBlock[] = [];
+
+    // Initialize standard roadmap
+    let lastSec = '';
+    let blockIdCounter = 0;
+    const standardRoadmap: RoadmapBlock[] = [];
+    filteredLines.forEach((l) => {
+      const secName = l.SectionName || l.Section || l.section || 'Section';
+      if (secName !== lastSec) {
+        const lineIndices = Array.from(
+          { length: templates[secName].length },
+          (_, idx) => idx
+        );
+        standardRoadmap.push({
+          id: `block-${blockIdCounter++}`,
+          name: secName,
+          enabledLines: lineIndices,
+          keyOffset: 0,
+        });
+        lastSec = secName;
+      }
+    });
+
+    activeRoadmapToUse = standardRoadmap;
+
+    // Read saved settings
+    const rawSaved = localStorage.getItem('captured_song_settings');
+    let savedSettings: any = null;
+    if (rawSaved) {
+      try {
+        const dict = JSON.parse(rawSaved);
+        savedSettings = dict[String(song.SongID)];
+      } catch {}
+    }
+
+    if (savedSettings) {
+      activeKey = savedSettings.key || song.OriginalKey || 'C';
+      if (savedSettings.roadmap && savedSettings.roadmap.length > 0) {
+        activeRoadmapToUse = savedSettings.roadmap;
+      }
+    }
+
+    // Active setlist arrangement override
+    if (activeSetlistFolder) {
+      const setPreset = allSharedArrangements.find(
+        (arr) => String(arr.SongID) === String(song.SongID) && arr.PresetName === `Set: ${activeSetlistFolder}`
+      );
+      if (setPreset) {
+        try {
+          const settings = JSON.parse(setPreset.RoadmapJSON);
+          if (settings) {
+            if (settings.key) {
+              activeKey = settings.key;
+            }
+            if (settings.roadmap && settings.roadmap.length > 0) {
+              activeRoadmapToUse = settings.roadmap.map((b: any) => ({
+                id: b.id,
+                name: b.name,
+                enabledLines: [...(b.enabledLines || [])],
+                keyOffset: b.keyOffset || 0,
+              }));
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // Use current interactive adjustments if it's the currently viewed song
+    if (currentSong && String(song.SongID) === String(currentSong.SongID)) {
+      activeKey = currentKey;
+      activeRoadmapToUse = activeRoadmap;
+    }
+
+    // PDF specific song-key override
+    if (pdfSongKeys[String(song.SongID)]) {
+      activeKey = pdfSongKeys[String(song.SongID)];
+    }
+
+    return {
+      key: activeKey,
+      roadmap: activeRoadmapToUse,
+      sectionTemplates: templates,
+      title: (song.Title || "Untitled").toUpperCase(),
+      artist: (song.Artist || "Unknown Artist").toUpperCase(),
+      song,
+    };
+  };
+
+  // Export selected Sheet View(s) to a perfectly formatted printable PDF layout
+  const exportToPDF = () => {
+    if (!currentSong) return;
+
+    // Resolve which songs are to be printed
+    const isInsideSetlistContext = !!activeSetlistFolder && setlists.length > 1;
+    let songsToPrint: any[] = [];
+
+    if (!isInsideSetlistContext || pdfScope === 'current') {
+      songsToPrint = [getSongPreviewData(currentSong)];
+    } else if (pdfScope === 'all') {
+      const resolvedSetSongs = setlists
+        .map((id) => songs.find((s) => String(s.SongID) === String(id)))
+        .filter((s): s is Song => !!s);
+      songsToPrint = resolvedSetSongs.map(s => getSongPreviewData(s));
+    } else if (pdfScope === 'custom') {
+      const resolvedSetSongs = setlists
+        .map((id) => songs.find((s) => String(s.SongID) === String(id)))
+        .filter((s): s is Song => !!s);
+      songsToPrint = resolvedSetSongs
+        .filter(s => pdfSelectedSongIds.includes(String(s.SongID)))
+        .map(s => getSongPreviewData(s));
+    } else {
+      songsToPrint = [getSongPreviewData(currentSong)];
+    }
+
+    if (songsToPrint.length === 0) {
+      showToast("No songs selected to export", "error");
+      return;
+    }
+
+    // Set page title as the single song title or the setlist title
+    const docTitle = songsToPrint.length === 1 
+      ? `${songsToPrint[0].title} - ${songsToPrint[0].artist}`
+      : `${activeSetlistFolder.toUpperCase()} SETLIST BOOKLET`;
+
+    let bodyHTML = "";
+
+    songsToPrint.forEach((songData, sIdx) => {
+      const { key: songKey, roadmap: songRoadmap, sectionTemplates: songTemplates, title, artist, song } = songData;
+
+      // Build Flow Roadmap (Sequenced Transposed Horizontal, CAPS LOCK ALL)
+      const roadmapFiltered = songRoadmap.filter((block: any, idx: number) => {
+        const isDuplicate = songRoadmap.findIndex((b: any, bIdx: number) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, songTemplates)) !== -1;
+        return !isDuplicate;
+      });
+      const roadmapParts = roadmapFiltered.map((block: any) => {
+        const blockOffset = block.keyOffset || 0;
+        const blockKeyName = getModulatedKeyName(songKey, blockOffset);
+        return `${block.name.toUpperCase()} (${blockKeyName.toUpperCase()})`;
+      });
+      const roadmapHorizontal = roadmapParts.join(" ➔ ");
+
+      // Assemble Sections for this song
+      let sheetHTML = "";
+      const repInfo = getRoadmapRepetitionInfo(songRoadmap);
+
+      songRoadmap.forEach((block: any, idx: number) => {
+        let blockDisplayName = block.name;
+
+        // Check if this block is an entirely identical repetition of a PREVIOUS block in the flow
+        if (sheetLayoutMode === 'sequence') {
+          const firstIdenticalIdx = songRoadmap.findIndex((b: any, bIdx: number) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, songTemplates));
+          if (firstIdenticalIdx !== -1) {
+            sheetHTML += `
+              <div class="print-section-repeat" style="padding: 6px 10px; margin-bottom: 8px; border: 1px dashed rgba(99,102,241,0.3); border-radius: 8px; background-color: rgba(99,102,241,0.03); font-size: 10px; color: #4f46e5; font-weight: bold; display: flex; align-items: center; gap: 6px; page-break-inside: avoid;">
+                <span>🔁 REPLAY: ${block.name.toUpperCase()}</span>
+                <span style="font-size: 8.5px; font-weight: normal; color: #64748b; margin-left: 4px;">(Identical chords & lyrics as Section #${firstIdenticalIdx + 1} - ${songRoadmap[firstIdenticalIdx].name})</span>
+              </div>
+            `;
+            return; // Skip rendering full chords and lyrics for this duplicate
+          }
+        }
+
+        // Match the app's exact compact mode skipping logic
+        if (sheetLayoutMode === 'compact') {
+          if (!showLyrics) {
+            const firstIdx = songRoadmap.findIndex((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
+            if (firstIdx !== idx) return;
+            const identicalBlocks = songRoadmap.filter((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
+            const uniqueNames = Array.from(new Set(identicalBlocks.map((b: any) => b.name)));
+            blockDisplayName = uniqueNames.join(' / ');
+          } else {
+            const firstIdx = songRoadmap.findIndex((b: any) => b.name === block.name);
+            if (firstIdx !== idx) return;
+          }
+        }
+
+        const blockRep = repInfo[idx];
+        const templateLines = songTemplates[block.name] || [];
+        const blockOffset = block.keyOffset || 0;
+        const blockKeyName = getModulatedKeyName(songKey, blockOffset);
+
+        const originalIdx = NOTE_TO_INDEX[song.OriginalKey || 'C'] || 0;
+        const currentIdx = NOTE_TO_INDEX[songKey] || 0;
+        const totalSemitonesOffset = currentIdx - originalIdx + blockOffset;
+
+        sheetHTML += `
+          <div class="print-section">
+            <h3 class="print-section-header" style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+              <span>${blockDisplayName.toUpperCase()} ${blockOffset !== 0 ? `(KEY: ${blockKeyName.toUpperCase()})` : ''}</span>
+              ${blockRep && blockRep.totalInRun > 1 ? `
+                <span class="print-run-badge" style="margin-left: auto;">${blockRep.totalInRun}X</span>
+              ` : ''}
+            </h3>
+            <div class="print-lines">
+        `;
+
+        if (!showLyrics) {
+          if (sheetLayoutMode === 'compact') {
+            const identicalBlocks = songRoadmap.filter((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
+            const renderedHints: any[] = [];
+            const seenNames = new Set();
+            
+            identicalBlocks.forEach((b: any) => {
+              if (seenNames.has(b.name)) return;
+              seenNames.add(b.name);
+              const lines = songTemplates[b.name] || [];
+              const firstLyric = lines.find((l: any) => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
+              if (firstLyric) {
+                renderedHints.push({ name: b.name, lyric: firstLyric });
+              }
+            });
+
+            // Group by lyric
+            const groups: { lyric: string; names: string[] }[] = [];
+            renderedHints.forEach(h => {
+              const normLyric = h.lyric.trim();
+              const existingGroup = groups.find(g => g.lyric.trim().toLowerCase() === normLyric.toLowerCase());
+              if (existingGroup) {
+                existingGroup.names.push(h.name);
+              } else {
+                groups.push({ lyric: h.lyric, names: [h.name] });
+              }
+            });
+
+            if (groups.length > 0) {
+              sheetHTML += `<div class="print-hint-container">`;
+              groups.forEach(g => {
+                const badgeText = g.names.map(n => n.toUpperCase()).join(' & ');
+                const labelSuffix = g.names.length > 1 ? ` <span style="font-size: 8px; opacity: 0.6; font-weight: normal; margin-left: 4px;">(Shared first line for ${g.names.length} sections)</span>` : '';
+                sheetHTML += `
+                  <div class="print-hint-line">
+                    <span class="print-hint-badge">${badgeText}</span>
+                    <span class="print-hint-text">“${g.lyric}”${labelSuffix}</span>
+                  </div>
+                `;
+              });
+              sheetHTML += `</div>`;
+            }
+          } else {
+            const lines = songTemplates[block.name] || [];
+            const firstLyric = lines.find((l: any) => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
+            if (firstLyric) {
+              sheetHTML += `
+                <div class="print-hint-container">
+                  <div class="print-hint-line">
+                    <span class="print-hint-badge">${block.name.toUpperCase()}</span>
+                    <span class="print-hint-text">“${firstLyric}”</span>
+                  </div>
+                </div>
+              `;
+            }
+          }
+        }
+
+        // Get only enabled lines for this block
+        const enabledLinesList = templateLines
+          .map((l: any, lIdx: number) => ({ l, lIdx }))
+          .filter(({ lIdx }: any) => (block.enabledLines || []).includes(lIdx));
+
+        const processedLines = enabledLinesList.map(({ l, lIdx }: any) => {
+          const transposed = transposeChord(l.Chords || '', totalSemitonesOffset);
+          const numbers = getNumberForChord(transposed, blockKeyName, songKey);
+          const lyrics = l.Lyrics || '';
+          return {
+            l,
+            lIdx,
+            transposed,
+            numbers,
+            lyrics,
+          };
+        });
+
+        // Find the best multi-line chord progression loop (pattern length L, repeat count K)
+        let bestL = -1;
+        let bestK = -1;
+        const N = processedLines.length;
+
+        if (!showLyrics && N >= 4) {
+          for (let L = 2; L <= Math.floor(N / 2); L++) {
+            let K = 1;
+            while ((K + 1) * L <= N) {
+              let matches = true;
+              for (let offset = 0; offset < L; offset++) {
+                const originalChord = processedLines[offset].transposed;
+                const nextChord = processedLines[K * L + offset].transposed;
+                if (originalChord !== nextChord) {
+                  matches = false;
+                  break;
+                }
+              }
+              if (matches) {
+                K++;
+              } else {
+                break;
+              }
+            }
+
+            if (K >= 2) {
+              // Make sure at least one line in the pattern has non-empty chords
+              let hasChords = false;
+              for (let offset = 0; offset < L; offset++) {
+                if (processedLines[offset].transposed && processedLines[offset].transposed.trim() !== '') {
+                  hasChords = true;
+                  break;
+                }
+              }
+
+              if (hasChords) {
+                if (bestL === -1 || (K * L > bestK * bestL) || (K * L === bestK * bestL && L < bestL)) {
+                  bestL = L;
+                  bestK = K;
+                }
+              }
+            }
+          }
+        }
+
+        // Render with Loop-Grouping if a pattern is detected
+        if (bestL >= 2 && bestK >= 2) {
+          const loopLength = bestL;
+          const repeatCount = bestK;
+          const loopedLinesCount = loopLength * repeatCount;
+
+          const lyricsAreIdenticalOrHidden = !showLyrics || (() => {
+            for (let r = 1; r < repeatCount; r++) {
+              for (let offset = 0; offset < loopLength; offset++) {
+                const lineA = processedLines[offset];
+                const lineB = processedLines[r * loopLength + offset];
+                if ((lineA.lyrics || '') !== (lineB.lyrics || '')) {
+                  return false;
+                }
+              }
+            }
+            return true;
+          })();
+
+          if (lyricsAreIdenticalOrHidden) {
+            const runLines = processedLines.slice(0, loopLength);
+            sheetHTML += `
+              <div class="print-loop-container print-loop-amber">
+                <div class="print-loop-badge-row">
+                  <span class="print-loop-badge">🔁 PLAY ${repeatCount}X</span>
+                  <span class="print-loop-subtitle">(chords progression repeats)</span>
+                </div>
+                <div class="print-loop-lines">
+            `;
+            runLines.forEach((lineData) => {
+              const { transposed, numbers, lyrics } = lineData;
+              sheetHTML += `<div class="print-line">`;
+              if (displayMode !== 'numbers' && transposed) {
+                sheetHTML += `<div class="print-chord-line">${transposed}</div>`;
+              }
+              if (displayMode !== 'chords' && numbers) {
+                sheetHTML += `<div class="print-num-line">${numbers}</div>`;
+              }
+              if (showLyrics && lyrics) {
+                sheetHTML += `<div class="print-lyric-line">${lyrics}</div>`;
+              }
+              sheetHTML += `</div>`;
+            });
+            sheetHTML += `
+                </div>
+              </div>
+            `;
+          } else {
+            for (let r = 0; r < repeatCount; r++) {
+              const runLines = processedLines.slice(r * loopLength, (r + 1) * loopLength);
+              const isFirst = (r === 0);
+              sheetHTML += `
+                <div class="print-loop-container print-loop-indigo">
+                  <div class="print-loop-badge-row">
+                    ${isFirst ? `
+                      <span class="print-loop-badge" style="background-color: #fef3c7; color: #b45309; border: 1px solid #fde68a;">🔁 CHORD LOOP (${repeatCount}X) — ROUND 1</span>
+                      <span class="print-loop-subtitle">(chords progression pattern repeats)</span>
+                    ` : `
+                      <span class="print-loop-badge" style="background-color: #e0e7ff; color: #4338ca; border: 1px solid #c7d2fe;">🔁 ROUND ${r + 1}</span>
+                      <span class="print-loop-subtitle">(identical chords as Round 1)</span>
+                    `}
+                  </div>
+                  <div class="print-loop-lines">
+              `;
+              runLines.forEach((lineData) => {
+                const { transposed, numbers, lyrics } = lineData;
+                sheetHTML += `<div class="print-line">`;
+                if (displayMode !== 'numbers' && transposed) {
+                  sheetHTML += `<div class="print-chord-line">${transposed}</div>`;
+                }
+                if (displayMode !== 'chords' && numbers) {
+                  sheetHTML += `<div class="print-num-line">${numbers}</div>`;
+                }
+                if (showLyrics && lyrics) {
+                  sheetHTML += `<div class="print-lyric-line">${lyrics}</div>`;
+                }
+                sheetHTML += `</div>`;
+              });
+              sheetHTML += `
+                  </div>
+                </div>
+              `;
+            }
+          }
+
+          const remainingLines = processedLines.slice(loopedLinesCount);
+          if (remainingLines.length > 0) {
+            sheetHTML += `<div class="print-remaining-lines">`;
+            remainingLines.forEach((lineData) => {
+              const { transposed, numbers, lyrics } = lineData;
+              sheetHTML += `<div class="print-line">`;
+              if (displayMode !== 'numbers' && transposed) {
+                sheetHTML += `<div class="print-chord-line">${transposed}</div>`;
+              }
+              if (displayMode !== 'chords' && numbers) {
+                sheetHTML += `<div class="print-num-line">${numbers}</div>`;
+              }
+              if (showLyrics && lyrics) {
+                sheetHTML += `<div class="print-lyric-line">${lyrics}</div>`;
+              }
+              sheetHTML += `</div>`;
+            });
+            sheetHTML += `</div>`;
+          }
+        } else {
+          // Fallback: Compute consecutive runs of identical lines
+          const lineRuns: { startIndex: number; endIndex: number; count: number }[] = [];
+          let i = 0;
+          while (i < processedLines.length) {
+            let j = i + 1;
+            while (j < processedLines.length) {
+              const lineA = processedLines[i];
+              const lineB = processedLines[j];
+
+              const chordsIdentical = lineA.transposed === lineB.transposed;
+              const lyricsIdentical = !showLyrics || lineA.lyrics === lineB.lyrics;
+
+              if (chordsIdentical && lyricsIdentical) {
+                j++;
+              } else {
+                break;
+              }
+            }
+
+            lineRuns.push({
+              startIndex: i,
+              endIndex: j - 1,
+              count: j - i,
+            });
+
+            i = j;
+          }
+
+          lineRuns.forEach((run) => {
+            const firstLine = processedLines[run.startIndex];
+            const { transposed, numbers, lyrics } = firstLine;
+
+            sheetHTML += `<div class="print-line">`;
+            if (displayMode !== 'numbers' && transposed) {
+              sheetHTML += `
+                <div class="print-chord-line" style="display: flex; align-items: center; gap: 8px;">
+                  <span>${transposed}</span>
+                  ${run.count > 1 ? `
+                    <span class="print-run-badge">${run.count}x</span>
+                  ` : ''}
+                </div>
+              `;
+            }
+            if (displayMode !== 'chords' && numbers) {
+              sheetHTML += `
+                <div class="print-num-line">${numbers}</div>
+              `;
+            }
+            if (showLyrics && lyrics) {
+              sheetHTML += `
+                <div class="print-lyric-line">${lyrics}</div>
+              `;
+            }
+            sheetHTML += `</div>`;
+          });
+        }
+
+        sheetHTML += `
+            </div>
+          </div>
+        `;
+      });
+
+      bodyHTML += `
+        <div class="print-song-page">
+          <div class="header-container">
+            <div class="title-row">
+              <div>
+                <h1 class="song-title">
+                  ${isInsideSetlistContext && pdfScope !== 'current' ? `<span class="song-index-badge">#${setlists.indexOf(String(song.SongID)) + 1}</span> ` : ''}
+                  ${title}
+                </h1>
+                <h2 class="song-artist">BY ${artist}</h2>
+              </div>
+              <div class="song-key">${`KEY: ${songKey}`.toUpperCase()}</div>
+            </div>
+          </div>
+
+          <div class="roadmap-container">
+            <div class="roadmap-title">FLOW ROADMAP (TRANSPOSED SEQUENCE)</div>
+            <div class="roadmap-sequence">${roadmapHorizontal}</div>
+          </div>
+
+          <div class="sheet-body">
+            ${sheetHTML}
+          </div>
+        </div>
+      `;
+    });
+
+    // Mount Hidden Print IFrame
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.bottom = '0';
+    iframe.style.right = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = 'none';
+    document.body.appendChild(iframe);
+
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!iframeDoc) return;
+
+    iframeDoc.open();
+    iframeDoc.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>${docTitle}</title>
+          <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
+          <style>
+            @page {
+              size: A4;
+              margin: 15mm 15mm 15mm 15mm;
+            }
+            body {
+              font-family: 'Inter', sans-serif;
+              color: #0f172a;
+              background-color: #ffffff;
+              margin: 0;
+              padding: 0;
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+            }
+            .print-song-page {
+              page-break-after: always;
+              break-after: page;
+            }
+            .print-song-page:last-child {
+              page-break-after: avoid;
+              break-after: avoid;
+            }
+            .header-container {
+              border-bottom: 2px solid #0f172a;
+              padding-bottom: 8px;
+              margin-bottom: 16px;
+            }
+            .title-row {
+              display: flex;
+              justify-content: space-between;
+              align-items: flex-end;
+            }
+            .song-title {
+              font-size: 20px;
+              font-weight: 900;
+              color: #0f172a;
+              margin: 0;
+              letter-spacing: -0.5px;
+              display: flex;
+              align-items: center;
+              gap: 8px;
+            }
+            .song-index-badge {
+              font-size: 13px;
+              background-color: #0f172a;
+              color: #ffffff;
+              padding: 2px 6px;
+              border-radius: 4px;
+              font-weight: 900;
+            }
+            .song-artist {
+              font-size: 11px;
+              font-weight: 700;
+              color: #475569;
+              margin: 2px 0 0 0;
+            }
+            .song-key {
+              font-size: 12px;
+              font-weight: 900;
+              color: #4f46e5;
+              border: 1.5px solid #4f46e5;
+              padding: 4px 10px;
+              border-radius: 6px;
+              font-family: monospace;
+              letter-spacing: 0.5px;
+            }
+            .roadmap-container {
+              background-color: #f8fafc;
+              border: 1px solid #e2e8f0;
+              border-radius: 6px;
+              padding: 10px 12px;
+              margin-bottom: 20px;
+            }
+            .roadmap-title {
+              font-size: 9px;
+              font-weight: 900;
+              color: #64748b;
+              text-transform: uppercase;
+              letter-spacing: 0.8px;
+              margin-bottom: 4px;
+            }
+            .roadmap-sequence {
+              font-size: 10px;
+              font-weight: 700;
+              color: #1e293b;
+              line-height: 1.4;
+            }
+            .print-section {
+              margin-bottom: 18px;
+              break-inside: avoid;
+            }
+            .print-section-header {
+              font-size: 12px;
+              font-weight: 900;
+              color: #1e1b4b;
+              border-bottom: 1px solid #cbd5e1;
+              padding-bottom: 3px;
+              margin-top: 0;
+              margin-bottom: 10px;
+              letter-spacing: 0.5px;
+            }
+            .print-lines {
+              padding-left: 8px;
+            }
+            .print-line {
+              margin-bottom: 10px;
+              break-inside: avoid;
+            }
+            .print-chord-line {
+              font-family: 'Courier New', Courier, monospace;
+              font-size: 12px;
+              font-weight: bold;
+              color: #4f46e5;
+              white-space: pre;
+              line-height: 1.1;
+              margin-bottom: 1.5px;
+            }
+            .print-num-line {
+              font-family: 'Courier New', Courier, monospace;
+              font-size: 10px;
+              font-weight: bold;
+              color: #64748b;
+              white-space: pre;
+              line-height: 1.1;
+              margin-bottom: 1.5px;
+            }
+            .print-lyric-line {
+              font-size: 11px;
+              color: #334155;
+              line-height: 1.35;
+            }
+            .print-hint-container {
+              margin-bottom: 8px;
+              padding: 4px 6px;
+              background-color: #f1f5f9;
+              border-left: 2px solid #6366f1;
+              border-radius: 0 4px 4px 0;
+            }
+            .print-hint-line {
+              display: flex;
+              align-items: center;
+              gap: 6px;
+              font-size: 10px;
+              font-style: italic;
+              color: #475569;
+              line-height: 1.3;
+            }
+            .print-hint-badge {
+              font-size: 8px;
+              font-weight: 900;
+              font-style: normal;
+              color: #4f46e5;
+              background-color: #e0e7ff;
+              padding: 1px 4px;
+              border-radius: 3px;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+            }
+            .print-hint-text {
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+            .print-loop-container {
+              border-left: 3px solid #cbd5e1;
+              padding: 6px 10px;
+              border-radius: 0 6px 6px 0;
+              margin: 10px 0;
+              break-inside: avoid;
+            }
+            .print-loop-amber {
+              border-left-color: #f59e0b;
+              background-color: #fffbeb;
+            }
+            .print-loop-indigo {
+              border-left-color: #6366f1;
+              background-color: #f5f3ff;
+            }
+            .print-loop-badge-row {
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              margin-bottom: 6px;
+            }
+            .print-loop-badge {
+              font-size: 8px;
+              font-weight: 900;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+              padding: 2px 6px;
+              border-radius: 4px;
+            }
+            .print-loop-amber .print-loop-badge {
+              background-color: #fef3c7;
+              color: #b45309;
+              border: 1px solid #fde68a;
+            }
+            .print-loop-indigo .print-loop-badge {
+              background-color: #e0e7ff;
+              color: #4338ca;
+              border: 1px solid #c7d2fe;
+            }
+            .print-loop-subtitle {
+              font-size: 8px;
+              color: #64748b;
+              font-family: monospace;
+            }
+            .print-loop-lines {
+              display: flex;
+              flex-direction: column;
+              gap: 6px;
+            }
+            .print-run-badge {
+              font-size: 8px;
+              font-weight: 900;
+              color: #b45309;
+              background-color: #fef3c7;
+              border: 1px solid #fde68a;
+              padding: 1px 4px;
+              border-radius: 3px;
+              font-family: monospace;
+            }
+            .print-remaining-lines {
+              margin-top: 10px;
+              border-top: 1px dashed #cbd5e1;
+              padding-top: 10px;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="sheet-body-container">
+            ${bodyHTML}
+          </div>
+
+          <script>
+            window.onload = function() {
+              window.focus();
+              window.print();
+              setTimeout(function() {
+                window.frameElement.parentNode.removeChild(window.frameElement);
+              }, 1000);
+            };
+          </script>
+        </body>
+      </html>
+    `);
+    iframeDoc.close();
+  };
+
+  // Export Complete User Manual to PDF Layout
+  const exportManualToPDF = () => {
+    const docTitle = "ChordSheet Live Flow - Complete User Guide & Stage Manual";
+
+    const bodyHTML = `
+      <div class="print-song-page">
+        <div class="header-container" style="border-bottom: 3px solid #4f46e5; padding-bottom: 12px; margin-bottom: 24px;">
+          <div class="title-row" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+            <div>
+              <h1 class="song-title" style="font-size: 24px; font-weight: 900; color: #1e1b4b; margin: 0; letter-spacing: -1.5px; display: flex; align-items: center; gap: 8px;">
+                🎸 CHORDSHEET LIVE FLOW
+              </h1>
+              <h2 class="song-artist" style="font-size: 11px; font-weight: 700; color: #4f46e5; margin-top: 4px; text-transform: uppercase; letter-spacing: 1px;">
+                Complete Stage Manual & Technical Guide
+              </h2>
+            </div>
+            <div class="song-key" style="font-size: 10px; font-weight: 900; color: #4f46e5; border: 1.5px solid #4f46e5; padding: 4px 10px; border-radius: 6px; font-family: monospace; letter-spacing: 0.5px;">
+              VERSION 2.1
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-bottom: 24px; font-size: 12px; line-height: 1.6; color: #334155;">
+          <p style="font-size: 13px; font-weight: bold; color: #0f172a; margin-bottom: 6px;">Welcome to Worship Chordbook - ChordSheet Live Flow!</p>
+          <p>This manual provides complete documentation on operating, configuring, and installing this interactive digital music stand. ChordSheet Live Flow is designed for live stage musicians, worship leaders, and music directors seeking dynamic transposing, automatic scrolling, setlist mapping, and robust offline capability.</p>
+        </div>
+
+        <div class="print-section" style="margin-bottom: 18px; break-inside: avoid;">
+          <h3 class="print-section-header" style="font-size: 13px; font-weight: 900; color: #1e1b4b; border-bottom: 1px solid #cbd5e1; padding-bottom: 3px; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase;">
+            1. Core Functional Component Manual
+          </h3>
+          <div style="font-size: 11px; line-height: 1.6; color: #334155; padding-left: 8px;">
+            <div style="margin-bottom: 10px;">
+              <strong style="color: #0f172a; font-size: 11.5px; display: block;">🔄 Dynamic Transposition & Musical Keys</strong>
+              <span>Our transposition engine supports full 12-key modulation. Change the key of any song on the fly using the transposition buttons in the control bar. The chords will re-transpose instantly across all sections of your active arrangement, including inline repeats.</span>
+            </div>
+            <div style="margin-bottom: 10px;">
+              <strong style="color: #0f172a; font-size: 11.5px; display: block;">⏱️ Advanced Metronome & Speed Controllers</strong>
+              <span>Includes an interactive metronome with speed tap tempo. Adjust target BPM via manual step or by clicking the TAP button to sync immediately. The visual flash indicator stays aligned with your active beat, supporting dual-channel tempo monitoring on stage.</span>
+            </div>
+            <div style="margin-bottom: 10px;">
+              <strong style="color: #0f172a; font-size: 11.5px; display: block;">📜 Smart Auto-Scroll with Speed Tracking</strong>
+              <span>Activate hands-free autoscrolling during live sets. Speed parameters adapt dynamically based on your screen height and scrolling speed. Seamlessly start, pause, or reset with standard foot pedals or touchscreen taps.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="print-section" style="margin-bottom: 18px; break-inside: avoid; page-break-before: always; break-before: page;">
+          <h3 class="print-section-header" style="font-size: 13px; font-weight: 900; color: #1e1b4b; border-bottom: 1px solid #cbd5e1; padding-bottom: 3px; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase;">
+            2. Interactive Visual Helpers & Diagnostics
+          </h3>
+          <div style="font-size: 11px; line-height: 1.6; color: #334155; padding-left: 8px;">
+            <div style="margin-bottom: 10px;">
+              <strong style="color: #0f172a; font-size: 11.5px; display: block;">🎹 Interactive Piano Keyboards & Guitar Fretboards</strong>
+              <span>Tap on any chord name inside a sheet section to display its direct finger-placements on our live virtual instrument helper. Interactive diagrams show exact fingering on the keyboard and fretboard.</span>
+            </div>
+            <div style="margin-bottom: 10px;">
+              <strong style="color: #0f172a; font-size: 11.5px; display: block;">⚡ Live Setlist Organizers & Custom Preset Drafting</strong>
+              <span>Create setlists, sequence songs in your performance order, and map customized structures. You can drag and drop to re-sequence songs inside any folder, modify chord arrangements, and save presets permanently to local cache and synchronized database registers.</span>
+            </div>
+            <div style="margin-bottom: 10px;">
+              <strong style="color: #0f172a; font-size: 11.5px; display: block;">🩺 Local Real-Time Database Diagnostics</strong>
+              <span>Review network latency, sync status, and storage performance directly. The Diagnostic panel provides detailed readouts of the sync payload, active Google Sheets cells, and offline cache integrity.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="print-section" style="margin-bottom: 18px; break-inside: avoid; page-break-before: always; break-before: page;">
+          <h3 class="print-section-header" style="font-size: 13px; font-weight: 900; color: #1e1b4b; border-bottom: 1px solid #cbd5e1; padding-bottom: 3px; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase;">
+            3. Mobile PWA Installation & Offline Pre-Caching
+          </h3>
+          <div style="font-size: 11px; line-height: 1.6; color: #334155; padding-left: 8px;">
+            <p style="margin-bottom: 12px;">This web application is configured as an installable Progressive Web App (PWA), turning the website into a standalone native-feeling application with full offline capabilities on your mobile device.</p>
+            
+            <div style="margin-bottom: 12px;">
+              <strong style="color: #0f172a; font-size: 11.5px; display: block;">🍏 iOS Installation (Safari Browser)</strong>
+              <ol style="margin-top: 4px; padding-left: 18px;">
+                <li style="margin-bottom: 3px;">Open the application URL in your native <strong>Safari</strong> browser.</li>
+                <li style="margin-bottom: 3px;">Tap the <strong>Share</strong> button (box with an upward arrow) in the browser navigation bar.</li>
+                <li style="margin-bottom: 3px;">Scroll down and tap <strong>Add to Home Screen</strong>.</li>
+                <li style="margin-bottom: 3px;">Tap <strong>Add</strong> in the upper right. The app will launch as a distraction-free, fullscreen application!</li>
+              </ol>
+            </div>
+
+            <div style="margin-bottom: 12px;">
+              <strong style="color: #0f172a; font-size: 11.5px; display: block;">🤖 Android Installation (Google Chrome / Samsung Internet)</strong>
+              <ol style="margin-top: 4px; padding-left: 18px;">
+                <li style="margin-bottom: 3px;">Open the application URL in <strong>Chrome</strong>.</li>
+                <li style="margin-bottom: 3px;">A prompt "Add ChordSheet to Home Screen" or an <strong>Install App</strong> button will appear dynamically in the sidebar. Click it!</li>
+                <li style="margin-bottom: 3px;">Alternatively, tap the <strong>Menu</strong> (three dots in upper right) and choose <strong>Install App</strong>.</li>
+              </ol>
+            </div>
+
+            <div style="margin-bottom: 12px;">
+              <strong style="color: #0f172a; font-size: 11.5px; display: block;">📶 Seamless Offline Mode</strong>
+              <span>Once installed, the PWA Service Worker caches the interface, fonts, and assets automatically. In the absence of network connection, the app switches to offline cache mode, enabling full access to your setlists, transposition features, local arrangements, metronomes, and visuals. All edits are saved to LocalStorage and synced automatically when network service is restored!</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="print-section" style="margin-bottom: 18px; break-inside: avoid; page-break-before: always; break-before: page;">
+          <h3 class="print-section-header" style="font-size: 13px; font-weight: 900; color: #1e1b4b; border-bottom: 1px solid #cbd5e1; padding-bottom: 3px; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase;">
+            4. Performance Keyboard Shortcuts Reference
+          </h3>
+          <table style="width: 100%; border-collapse: collapse; font-size: 11px; color: #334155; text-align: left; margin-top: 8px;">
+            <thead>
+              <tr style="border-bottom: 2px solid #0f172a;">
+                <th style="padding: 6px 4px; font-weight: bold; color: #0f172a; width: 30%;">KEYSTROKE</th>
+                <th style="padding: 6px 4px; font-weight: bold; color: #0f172a;">STAGE ACTION / COMMAND RESPONSE</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">Spacebar</td>
+                <td style="padding: 6px 4px;">Pause or Resume auto-scroller scrolling action</td>
+              </tr>
+              <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">Arrow Up / Down</td>
+                <td style="padding: 6px 4px;">Increase / Decrease auto-scrolling speed on active sheet</td>
+              </tr>
+              <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">M</td>
+                <td style="padding: 6px 4px;">Toggle Metronome audio beat and visual pulse indicator</td>
+              </tr>
+              <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">T</td>
+                <td style="padding: 6px 4px;">Tap Tempo (tap multiple times to set BPM speed)</td>
+              </tr>
+              <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">F</td>
+                <td style="padding: 6px 4px;">Toggle Stage Fullscreen view for distraction-free performance</td>
+              </tr>
+              <tr style="border-bottom: 1px solid #e2e8f0;">
+                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">Esc</td>
+                <td style="padding: 6px 4px;">Close any open modal panels or exit fullscreen view</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    // Mount Hidden Print IFrame
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.bottom = '0';
+    iframe.style.right = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = 'none';
+    document.body.appendChild(iframe);
+
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!iframeDoc) return;
+
+    iframeDoc.open();
+    iframeDoc.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>${docTitle}</title>
+          <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
+          <style>
+            @page {
+              size: A4;
+              margin: 15mm 15mm 15mm 15mm;
+            }
+            body {
+              font-family: 'Inter', sans-serif;
+              color: #0f172a;
+              background-color: #ffffff;
+              margin: 0;
+              padding: 0;
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+            }
+            .print-song-page {
+              page-break-after: always;
+              break-after: page;
+            }
+            .print-song-page:last-child {
+              page-break-after: avoid;
+              break-after: avoid;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="sheet-body-container">
+            ${bodyHTML}
+          </div>
+
+          <script>
+            window.onload = function() {
+              window.focus();
+              window.print();
+              setTimeout(function() {
+                window.frameElement.parentNode.removeChild(window.frameElement);
+              }, 1000);
+            };
+          </script>
+        </body>
+      </html>
+    `);
+    iframeDoc.close();
+    showToast("Opening system print dialog for ChordSheet Live Flow Manual...", "success");
+  };
+
   return (
     <div className="text-gray-100 min-h-screen selection:bg-indigo-500/30 selection:text-white bg-fixed">
       {/* Header Sticky Ingress */}
@@ -2767,18 +3944,41 @@ export default function App() {
                   <span className="text-[9px] sm:text-[10px] text-indigo-300/70 font-semibold select-none truncate">
                     by {currentSong.Artist || 'Unknown Artist'}
                   </span>
+                  
+                  {/* Play Context Mode Indicator Badge */}
+                  <div className="flex items-center gap-1.5 mt-1 sm:mt-0 shrink-0">
+                    {activeSetlistFolder ? (
+                      <div className="flex items-center gap-1 bg-violet-500/15 border border-violet-500/30 text-violet-300 px-2.5 py-0.5 rounded-lg text-[9px] font-black tracking-wider uppercase select-none shadow-[0_0_10px_rgba(139,92,246,0.15)] animate-fadeIn">
+                        <span>📂 Setlist: {activeSetlistFolder}</span>
+                        <button
+                          onClick={() => {
+                            setActiveSetlistFolder('');
+                            showToast(`Switched "${currentSong.Title}" to Standalone mode`, 'info');
+                          }}
+                          className="ml-1 hover:text-rose-400 text-violet-400 transition-colors cursor-pointer font-extrabold text-[10px] px-0.5"
+                          title="Switch to Standalone Song"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="bg-slate-500/15 border border-slate-500/25 text-slate-300 px-2.5 py-0.5 rounded-lg text-[9px] font-black tracking-wider uppercase select-none flex items-center gap-1 shadow-inner animate-fadeIn">
+                        <span>👤 Standalone Song</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
-                {/* Squeezed beautifully aligned controls row with ENLARGED Fav & Set buttons */}
-                <div className="flex items-center gap-1.5 shrink-0 select-none">
+                {/* Squeezed beautifully aligned controls row - Resized smaller for both web and mobile viewing */}
+                <div className="flex flex-wrap items-center gap-1.5 shrink-0 select-none">
                   <button
                     onClick={() => toggleFav(String(currentSong.SongID))}
-                    className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-[11px] font-black uppercase tracking-wider btn-5d transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                    className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-wider btn-5d transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
                       favorites.includes(String(currentSong.SongID))
                         ? 'text-amber-400 border-amber-500/40 shadow-[0_0_12px_rgba(251,191,36,0.2)] bg-amber-500/10'
                         : 'text-gray-400 hover:text-white bg-white/5 border border-white/5'
                     }`}
-                    title="Enlarge Fav"
+                    title="Toggle Favorite"
                   >
                     <span className="text-xs">{favorites.includes(String(currentSong.SongID)) ? '★' : '☆'}</span>
                     <span>Fav</span>
@@ -2802,7 +4002,7 @@ export default function App() {
                     return (
                       <button
                         onClick={() => setIsSetlistManagerOpen(true)}
-                        className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-[11px] font-black uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                        className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
                           isInAnySet
                             ? 'bg-violet-600/20 text-violet-300 border border-violet-500/40 shadow-[0_0_12px_rgba(139,92,246,0.2)]'
                             : 'text-gray-400 hover:text-white bg-white/5 border border-white/5'
@@ -2816,7 +4016,7 @@ export default function App() {
                   })()}
                   <button
                     onClick={() => setArrangerOpen((prev) => !prev)}
-                    className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[9px] sm:text-[10px] font-black uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
+                    className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
                       arrangerOpen
                         ? 'bg-indigo-600 text-white shadow-inner border border-indigo-400/30'
                         : 'btn-5d-primary text-white border border-indigo-500/30'
@@ -2824,10 +4024,25 @@ export default function App() {
                   >
                     <span>🗺️ Arrangement</span>
                   </button>
+                  <button
+                    onClick={() => {
+                      setIsPDFPreviewOpen(true);
+                      setPdfScope('current');
+                      setPdfSelectedSongIds(setlists.length > 0 ? setlists.map(String) : (currentSong ? [String(currentSong.SongID)] : []));
+                    }}
+                    className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer text-indigo-400 bg-white/5 border border-indigo-500/20 hover:bg-indigo-500/10 hover:text-white"
+                    title="Open PDF Preview Modal"
+                  >
+                    <span>📄</span>
+                    <span>PDF</span>
+                  </button>
                   {appUser && appSecret && (
                     <button
-                      onClick={() => setIsFormModalOpen(true)}
-                      className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[9px] sm:text-[10px] font-black btn-5d-primary text-white flex items-center gap-1 transition-all active:scale-95 cursor-pointer uppercase tracking-wider border border-indigo-500/30"
+                      onClick={() => {
+                        setFormEditingSong(currentSong);
+                        setIsFormModalOpen(true);
+                      }}
+                      className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black btn-5d-primary text-white flex items-center gap-1 transition-all active:scale-95 cursor-pointer uppercase tracking-wider border border-indigo-500/30"
                     >
                       <span>✏️ Edit</span>
                     </button>
@@ -3449,58 +4664,65 @@ export default function App() {
                   <div className="panel-inner pt-1.5 px-1">
                     {activeRoadmap.length > 0 ? (
                       <div className="flex flex-wrap items-center gap-1.5 w-full py-0.5">
-                        {activeRoadmap.map((block, idx) => {
-                          const blockRep = repInfo[idx];
-                          if (blockRep?.isRepeat) {
-                            return null; // Skip rendering identical consecutive repeats
-                          }
+                        {(() => {
+                          const renderedBlocks: any[] = [];
+                          activeRoadmap.forEach((block, idx) => {
+                            const isDuplicate = activeRoadmap.findIndex((b, bIdx) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, sectionTemplates)) !== -1;
+                            if (isDuplicate) {
+                              return;
+                            }
+                            renderedBlocks.push({ block, originalIdx: idx });
+                          });
 
-                          let badgeStyle = 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20 hover:bg-indigo-500/20';
-                          const nameLower = block.name.toLowerCase();
-                          if (nameLower.includes('chorus')) {
-                            badgeStyle = 'bg-amber-500/10 text-amber-300 border-amber-500/20 hover:bg-amber-500/20';
-                          } else if (nameLower.includes('verse')) {
-                            badgeStyle = 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20 hover:bg-emerald-500/20';
-                          } else if (nameLower.includes('bridge')) {
-                            badgeStyle = 'bg-purple-500/10 text-purple-300 border-purple-500/20 hover:bg-purple-500/20';
-                          } else if (nameLower.includes('intro') || nameLower.includes('outro')) {
-                            badgeStyle = 'bg-sky-500/10 text-sky-300 border-sky-500/20 hover:bg-sky-500/20';
-                          }
+                          return renderedBlocks.map(({ block, originalIdx: idx }, rIdx) => {
+                            const blockRep = repInfo[idx];
+                            let badgeStyle = 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20 hover:bg-indigo-500/20';
+                            const nameLower = block.name.toLowerCase();
+                            if (nameLower.includes('chorus')) {
+                              badgeStyle = 'bg-amber-500/10 text-amber-300 border-amber-500/20 hover:bg-amber-500/20';
+                            } else if (nameLower.includes('verse')) {
+                              badgeStyle = 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20 hover:bg-emerald-500/20';
+                            } else if (nameLower.includes('bridge')) {
+                              badgeStyle = 'bg-purple-500/10 text-purple-300 border-purple-500/20 hover:bg-purple-500/20';
+                            } else if (nameLower.includes('intro') || nameLower.includes('outro')) {
+                              badgeStyle = 'bg-sky-500/10 text-sky-300 border-sky-500/20 hover:bg-sky-500/20';
+                            }
 
-                          return (
-                            <div key={block.id} className="flex items-center gap-1 shrink-0">
-                              {idx > 0 && (
-                                <span className="text-gray-600 text-[9px] font-bold font-mono px-0.5 select-none">➔</span>
-                              )}
-                              <button
-                                onClick={() => {
-                                  const element = document.getElementById(`sec-wrapper-${idx}`);
-                                  if (element) {
-                                    element.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                    element.classList.add('ring-2', 'ring-indigo-500/50', 'rounded-xl');
-                                    setTimeout(() => {
-                                      element.classList.remove('ring-2', 'ring-indigo-500/50');
-                                    }, 1500);
-                                  }
-                                }}
-                                className={`px-2 py-0.5 text-[9px] font-semibold rounded-md border transition-all active:scale-95 cursor-pointer flex items-center gap-1 ${badgeStyle} shadow-sm`}
-                                title={`Click to jump to ${block.name}`}
-                              >
-                                <span>{block.name.toUpperCase()}</span>
-                                {block.keyOffset && block.keyOffset !== 0 ? (
-                                  <span className="text-[7px] bg-red-500/20 text-red-300 px-0.5 rounded">
-                                    {block.keyOffset > 0 ? `+${block.keyOffset}` : block.keyOffset}
-                                  </span>
-                                ) : null}
-                                {blockRep && blockRep.totalInRun > 1 && (
-                                  <span className="text-[7.5px] bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded px-1 font-mono font-black select-none ml-0.5">
-                                    {blockRep.totalInRun}x
-                                  </span>
+                            return (
+                              <div key={block.id} className="flex items-center gap-1 shrink-0">
+                                {rIdx > 0 && (
+                                  <span className="text-gray-600 text-[9px] font-bold font-mono px-0.5 select-none">➔</span>
                                 )}
-                              </button>
-                            </div>
-                          );
-                        })}
+                                <button
+                                  onClick={() => {
+                                    const element = document.getElementById(`sec-wrapper-${idx}`);
+                                    if (element) {
+                                      element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                      element.classList.add('ring-2', 'ring-indigo-500/50', 'rounded-xl');
+                                      setTimeout(() => {
+                                        element.classList.remove('ring-2', 'ring-indigo-500/50');
+                                      }, 1500);
+                                    }
+                                  }}
+                                  className={`px-2 py-0.5 text-[9px] font-semibold rounded-md border transition-all active:scale-95 cursor-pointer flex items-center gap-1 ${badgeStyle} shadow-sm`}
+                                  title={`Click to jump to ${block.name}`}
+                                >
+                                  <span>{block.name.toUpperCase()}</span>
+                                  {block.keyOffset && block.keyOffset !== 0 ? (
+                                    <span className="text-[7px] bg-red-500/20 text-red-300 px-0.5 rounded">
+                                      {block.keyOffset > 0 ? `+${block.keyOffset}` : block.keyOffset}
+                                    </span>
+                                  ) : null}
+                                  {blockRep && blockRep.totalInRun > 1 && (
+                                    <span className="text-[7.5px] bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded px-1 font-mono font-black select-none ml-0.5">
+                                      {blockRep.totalInRun}x
+                                    </span>
+                                  )}
+                                </button>
+                              </div>
+                            );
+                          });
+                        })()}
                       </div>
                     ) : (
                       <div className="text-[9px] text-gray-500 italic">No roadmap defined for this song.</div>
@@ -3575,7 +4797,7 @@ export default function App() {
                           <select
                             value={displayMode}
                             onChange={(e) => setDisplayMode(e.target.value as any)}
-                            className="col-span-1 bg-white/5 hover:bg-white/10 text-[8px] py-1 px-1 rounded text-gray-200 outline-none border border-white/5 transition-all cursor-pointer font-bold text-center appearance-none"
+                            className="col-span-1 bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-1 px-1 rounded-lg text-[8px] outline-none border border-indigo-500/30 hover:border-indigo-400/50 transition-all cursor-pointer font-bold text-center appearance-none"
                           >
                             <option value="chords" className="bg-[#0a0b16]">Chords</option>
                             <option value="numbers" className="bg-[#0a0b16]">Numbers</option>
@@ -3770,26 +4992,26 @@ export default function App() {
                     lineColor = 'bg-sky-500/20';
                   }
 
-                  // Non-consecutive duplicates: Check if this block is an identical repetition of a PREVIOUS block in the flow (Fully revealed as requested)
-                  if (false) {
-                    const firstIdenticalIdx = activeRoadmap.findIndex((b, bIdx) => bIdx < idx && areBlocksIdentical(b, block));
+                  // Non-consecutive duplicates: Check if this block is an identical repetition of a PREVIOUS block in the flow
+                  if (sheetLayoutMode === 'sequence') {
+                    const firstIdenticalIdx = activeRoadmap.findIndex((b, bIdx) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, sectionTemplates));
                     if (firstIdenticalIdx !== -1) {
                       // Skip rendering full chords/lyrics, instead render a beautiful compact repeat card!
                       return (
                         <div
                           key={block.id}
                           id={`sec-wrapper-${idx}`}
-                          className="group mb-2 bg-white/[0.02] border border-dashed border-white/10 hover:border-white/20 rounded-xl px-2.5 py-1.5 flex items-center justify-between transition-all select-none"
+                          className="group mb-2 bg-white/[0.02] border border-dashed border-indigo-500/20 hover:border-indigo-400/40 rounded-xl px-2.5 py-1.5 flex items-center justify-between transition-all select-none shadow-[0_2px_8px_rgba(0,0,0,0.2)] animate-fadeIn"
                         >
                           <div className="flex items-center gap-2 overflow-hidden">
-                            <span className="text-[8px] font-mono font-black uppercase tracking-wider text-amber-400 bg-amber-500/15 border border-amber-500/25 rounded px-1.5 py-0.5 shadow-sm animate-pulse flex items-center gap-1 shrink-0">
+                            <span className="text-[8px] font-mono font-black uppercase tracking-wider text-indigo-300 bg-indigo-500/15 border border-indigo-500/25 rounded px-1.5 py-0.5 shadow-sm animate-pulse flex items-center gap-1 shrink-0">
                               <span>🔁</span> REPLAY
                             </span>
                             <span className={`text-[11px] font-bold ${textColor} truncate`}>
                               {block.name}
                             </span>
                             <span className="text-[8px] text-gray-400 font-mono hidden sm:inline truncate">
-                              (Identical chords & structure as Section #{firstIdenticalIdx + 1})
+                              (Identical chords & lyrics as Section #{firstIdenticalIdx + 1} - {activeRoadmap[firstIdenticalIdx].name})
                             </span>
                           </div>
                           <button
@@ -3855,6 +5077,69 @@ export default function App() {
                           ▼
                         </span>
                       </div>
+
+                      {/* Embedded Lyric Hint when lyrics are hidden */}
+                      {!showLyrics && !isSectionCollapsed && (
+                        <div className="mt-1 mb-2.5 flex flex-col gap-1 text-[11px] text-gray-400 italic font-medium pl-3 sm:pl-4 select-none animate-fadeIn">
+                          {(() => {
+                            if (sheetLayoutMode === 'compact') {
+                              const identicalBlocks = activeRoadmap.filter(b => areBlocksChordsIdentical(b, block, sectionTemplates));
+                              const renderedHints: any[] = [];
+                              const seenNames = new Set();
+                              
+                              identicalBlocks.forEach(b => {
+                                if (seenNames.has(b.name)) return;
+                                seenNames.add(b.name);
+                                const lines = sectionTemplates[b.name] || [];
+                                const firstLyric = lines.find(l => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
+                                if (firstLyric) {
+                                  renderedHints.push({ name: b.name, lyric: firstLyric });
+                                }
+                              });
+
+                              if (renderedHints.length > 0) {
+                                // Group by lyric
+                                const groups: { lyric: string; names: string[] }[] = [];
+                                renderedHints.forEach(h => {
+                                  const normLyric = h.lyric.trim();
+                                  const existingGroup = groups.find(g => g.lyric.trim().toLowerCase() === normLyric.toLowerCase());
+                                  if (existingGroup) {
+                                    existingGroup.names.push(h.name);
+                                  } else {
+                                    groups.push({ lyric: h.lyric, names: [h.name] });
+                                  }
+                                });
+
+                                return groups.map((g, gIdx) => (
+                                  <div key={gIdx} className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-[8px] font-black uppercase tracking-wider text-indigo-400/80 not-italic bg-indigo-500/10 px-1.5 py-0.5 border border-indigo-500/20 rounded-md shrink-0">
+                                      {g.names.map(n => n.toUpperCase()).join(' & ')}
+                                    </span>
+                                    <span className="truncate text-gray-300">“{g.lyric}”</span>
+                                    {g.names.length > 1 && (
+                                      <span className="text-[7.5px] font-bold text-emerald-400 uppercase tracking-widest bg-emerald-500/10 border border-emerald-500/20 px-1 py-0.5 rounded">
+                                        Shared 1st line
+                                      </span>
+                                    )}
+                                  </div>
+                                ));
+                              }
+                            } else {
+                              const lines = sectionTemplates[block.name] || [];
+                              const firstLyric = lines.find(l => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
+                              if (firstLyric) {
+                                return (
+                                  <div className="flex items-center gap-1.5 text-gray-300">
+                                    <span className="text-indigo-400/60 not-italic font-bold text-[9px] uppercase tracking-wider bg-indigo-500/10 px-1.5 py-0.5 border border-indigo-500/20 rounded-md shrink-0">HINT</span>
+                                    <span className="truncate">“{firstLyric}”</span>
+                                  </div>
+                                );
+                              }
+                            }
+                            return null;
+                          })()}
+                        </div>
+                      )}
 
                       {/* Lines view body */}
                       <div className={`panel-wrap ${!isSectionCollapsed ? 'is-open' : ''}`}>
@@ -4310,7 +5595,10 @@ export default function App() {
         onSetTab={setCurrentTab}
         currentSong={currentSong}
         onChangeSong={changeSong}
-        onOpenAddSongForm={() => setIsFormModalOpen(true)}
+        onOpenAddSongForm={() => {
+          setFormEditingSong(null);
+          setIsFormModalOpen(true);
+        }}
         isAdmin={!!(appUser && appSecret)}
         onToggleAdmin={handleAdminLockToggle}
         onOpenShortcuts={() => setIsShortcutsOpen(true)}
@@ -4323,7 +5611,10 @@ export default function App() {
         onRemoveSongFromSetlist={removeSongFromSetlist}
         onSelectSongFromSetlist={selectSongFromSetlist}
         onCreateSetlist={createNewSetlistFolder}
+        onToggleSetlistLock={toggleSetlistLock}
         activeSetlistFolder={activeSetlistFolder}
+        onDownloadManual={exportManualToPDF}
+        onOpenInstallGuide={() => setIsInstallModalOpen(true)}
       />
 
       {/* Shortcuts Modal dialog */}
@@ -4427,8 +5718,8 @@ export default function App() {
       <SongEditModal
         isOpen={isFormModalOpen}
         onClose={() => setIsFormModalOpen(false)}
-        editingSong={currentSong}
-        songLines={songLines}
+        editingSong={formEditingSong}
+        songLines={formEditingSong ? songLines : []}
         appUser={appUser}
         appSecret={appSecret}
         scriptUrl={SCRIPT_URL}
@@ -4623,6 +5914,124 @@ export default function App() {
         onClose={() => setIsDiagnosticModalOpen(false)}
         scriptUrl={SCRIPT_URL}
       />
+
+      {/* PWA Installation Guide & Quick Setup Modal */}
+      {isInstallModalOpen && (
+        <div className="fixed inset-0 bg-[#020205]/90 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn select-none">
+          <div className="w-full max-w-md bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.6)] p-5 sm:p-6 flex flex-col space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
+            
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-white/5 pb-3">
+              <div className="flex items-center gap-2.5">
+                <span className="text-xl">📱</span>
+                <div>
+                  <h3 className="text-white font-black text-xs uppercase tracking-wider">Install Mobile App</h3>
+                  <p className="text-[9px] text-indigo-400 font-semibold uppercase tracking-widest mt-0.5">ChordSheet Live Flow</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsInstallModalOpen(false)}
+                className="text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 p-1.5 rounded-lg active:scale-95 transition-all cursor-pointer"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Direct PWA Install Trigger if Supported by Browser */}
+            {deferredInstallPrompt ? (
+              <div className="p-4 bg-indigo-500/10 border border-indigo-500/30 rounded-xl flex flex-col items-center text-center space-y-3">
+                <div className="text-2xl animate-bounce">⚡</div>
+                <div className="space-y-1">
+                  <h4 className="text-xs font-bold text-white uppercase tracking-wide">Direct Install Available!</h4>
+                  <p className="text-[10px] text-gray-300">Click the button below to install directly to your device home screen.</p>
+                </div>
+                <button
+                  onClick={async () => {
+                    if (deferredInstallPrompt) {
+                      deferredInstallPrompt.prompt();
+                      const { outcome } = await deferredInstallPrompt.userChoice;
+                      if (outcome === 'accepted') {
+                        setDeferredInstallPrompt(null);
+                        setIsInstallModalOpen(false);
+                        showToast('Thank you for installing ChordSheet Live Flow!', 'success');
+                      }
+                    }
+                  }}
+                  className="w-full py-2.5 bg-indigo-500 hover:bg-indigo-400 text-white font-black uppercase text-[10px] tracking-wider rounded-xl transition-all active:scale-[0.98] cursor-pointer shadow-lg shadow-indigo-500/20"
+                >
+                  Install Now
+                </button>
+              </div>
+            ) : (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-center">
+                <p className="text-[10.5px] text-emerald-400 font-medium">
+                  📶 <strong>Fully offline pre-cached</strong>. Once added to home screen, you can run the app offline on stage with zero load delay!
+                </p>
+              </div>
+            )}
+
+            {/* Detailed Mobile OS Installation Instructions */}
+            <div className="space-y-4">
+              
+              {/* iOS Safari Guide */}
+              <div className="p-3.5 bg-white/[0.02] border border-white/5 rounded-xl space-y-2.5">
+                <div className="flex items-center gap-2 text-white font-bold text-[11px] uppercase tracking-wide">
+                  <span>🍏</span>
+                  <span>iOS Safari Installation</span>
+                </div>
+                <ol className="text-[10px] text-gray-300 space-y-2 list-decimal pl-4 leading-relaxed">
+                  <li>Open this website inside the native <strong>Safari browser</strong>.</li>
+                  <li>Tap the <strong>Share</strong> icon <span className="inline-block bg-white/10 px-1 py-0.5 rounded text-[9px] font-semibold text-white">⎋</span> (rectangle with an arrow pointing up).</li>
+                  <li>Scroll down the menu and choose <strong>Add to Home Screen</strong>.</li>
+                  <li>Tap <strong>Add</strong> in the top-right corner to complete.</li>
+                </ol>
+              </div>
+
+              {/* Android Chrome Guide */}
+              <div className="p-3.5 bg-white/[0.02] border border-white/5 rounded-xl space-y-2.5">
+                <div className="flex items-center gap-2 text-white font-bold text-[11px] uppercase tracking-wide">
+                  <span>🤖</span>
+                  <span>Android Chrome / Edge</span>
+                </div>
+                <ol className="text-[10px] text-gray-300 space-y-2 list-decimal pl-4 leading-relaxed">
+                  <li>Open this website inside <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong>.</li>
+                  <li>Tap the menu button <span className="inline-block bg-white/10 px-1 py-0.5 rounded text-[9px] font-semibold text-white">⋮</span> (three vertical dots) in the top right.</li>
+                  <li>Select <strong>Install App</strong> or <strong>Add to Home screen</strong>.</li>
+                  <li>Confirm by tapping <strong>Install</strong>.</li>
+                </ol>
+              </div>
+
+              {/* Benefits Badge */}
+              <div className="grid grid-cols-2 gap-2 text-center text-[9px] font-bold text-gray-400 uppercase tracking-wider">
+                <div className="p-2 bg-white/5 rounded-lg border border-white/5 flex flex-col items-center gap-1">
+                  <span>📴 Offline Ready</span>
+                </div>
+                <div className="p-2 bg-white/5 rounded-lg border border-white/5 flex flex-col items-center gap-1">
+                  <span>🚀 Fast Performance</span>
+                </div>
+                <div className="p-2 bg-white/5 rounded-lg border border-white/5 flex flex-col items-center gap-1">
+                  <span>🎨 Fullscreen Stage</span>
+                </div>
+                <div className="p-2 bg-white/5 rounded-lg border border-white/5 flex flex-col items-center gap-1">
+                  <span>🔋 Battery Optimized</span>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Footer */}
+            <button
+              onClick={() => setIsInstallModalOpen(false)}
+              className="w-full py-2.5 bg-white/5 hover:bg-white/10 text-gray-300 text-[10px] font-bold uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
+            >
+              Done / Close
+            </button>
+
+          </div>
+        </div>
+      )}
 
       {/* Setlist Arrangement Change Confirmation Modal */}
       {pendingArrangementToLoad && (
@@ -4943,6 +6352,770 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Interactive A4 PDF Print Preview Modal */}
+      {isPDFPreviewOpen && currentSong && (() => {
+        // Compute preview songs data dynamically inside a scoped render block to stay robust and responsive
+        const isInsideSetlistContext = !!activeSetlistFolder && setlists.length > 1;
+        
+        let previewSongsData: any[] = [];
+        if (!isInsideSetlistContext || pdfScope === 'current') {
+          previewSongsData = [getSongPreviewData(currentSong)];
+        } else if (pdfScope === 'all') {
+          const resolvedSetSongs = setlists
+            .map((id) => songs.find((s) => String(s.SongID) === String(id)))
+            .filter((s): s is Song => !!s);
+          previewSongsData = resolvedSetSongs.map(s => getSongPreviewData(s));
+        } else if (pdfScope === 'custom') {
+          const resolvedSetSongs = setlists
+            .map((id) => songs.find((s) => String(s.SongID) === String(id)))
+            .filter((s): s is Song => !!s);
+          previewSongsData = resolvedSetSongs
+            .filter(s => pdfSelectedSongIds.includes(String(s.SongID)))
+            .map(s => getSongPreviewData(s));
+        } else {
+          previewSongsData = [getSongPreviewData(currentSong)];
+        }
+
+        return (
+          <div className="fixed inset-0 bg-[#020205]/90 backdrop-blur-md z-[800] flex items-center justify-center p-4 md:p-6 select-none animate-fadeIn">
+            <div className="w-full max-w-5xl h-[90vh] bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] flex flex-col overflow-hidden animate-scaleIn">
+              
+              {/* Modal Header */}
+              <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-3">
+                  <span className="text-xl sm:text-2xl">📄</span>
+                  <div>
+                    <h2 className="text-sm sm:text-base font-black uppercase tracking-wider text-indigo-300">
+                      PDF Print Preview
+                    </h2>
+                    <p className="text-[10px] text-gray-400 font-medium">
+                      Inspect your layout, customize options in real-time, and download/print the A4 song sheet.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setIsPDFPreviewOpen(false)}
+                  className="text-gray-400 hover:text-white hover:bg-white/10 p-2 rounded-lg transition-all active:scale-95 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Modal Main Body - Sidebar + Live Paper Preview Container */}
+              <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
+                
+                {/* Left/Top Column: Real-time Controls */}
+                <div className="w-full md:w-80 border-b md:border-b-0 md:border-r border-white/5 p-5 shrink-0 bg-indigo-950/15 overflow-y-auto">
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-indigo-400 mb-4">
+                    Print Customization
+                  </h3>
+
+                  <div className="space-y-4">
+                    
+                    {/* Include in Export - Only shown if activeSetlistFolder is active and has multiple songs */}
+                    {isInsideSetlistContext && (
+                      <div className="space-y-2 select-none border-b border-white/5 pb-4">
+                        <label className="text-[10px] font-bold text-gray-300 uppercase tracking-wider block">
+                          Include in Export
+                        </label>
+                        <select
+                          value={pdfScope}
+                          onChange={(e) => setPdfScope(e.target.value as any)}
+                          className="w-full bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-2 px-3 rounded-xl text-[10px] uppercase font-bold outline-none focus:ring-2 focus:ring-indigo-400/60 border border-indigo-500/30 hover:border-indigo-400/50 transition-all cursor-pointer shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)]"
+                        >
+                          <option value="current" className="bg-[#0c0d1b]">Viewed Song Only</option>
+                          <option value="all" className="bg-[#0c0d1b]">All Songs in Setlist</option>
+                          <option value="custom" className="bg-[#0c0d1b]">Select Songs...</option>
+                        </select>
+
+                        {/* Custom Checkbox Selection List - active only when custom is selected */}
+                        {pdfScope === 'custom' && (
+                          <div className="mt-3 bg-[#020205]/60 border border-white/5 rounded-xl p-2.5 max-h-[160px] overflow-y-auto custom-scrollbar space-y-2">
+                            <span className="text-[8px] font-black uppercase text-indigo-400 tracking-wider block">
+                              CHECK SONGS TO INCLUDE
+                            </span>
+                            {setlists
+                              .map((id) => songs.find((s) => String(s.SongID) === String(id)))
+                              .filter((s): s is Song => !!s)
+                              .map((song, sIdx) => {
+                                const sIdStr = String(song.SongID);
+                                const isChecked = pdfSelectedSongIds.includes(sIdStr);
+                                return (
+                                  <label
+                                    key={song.SongID}
+                                    className="flex items-center gap-2 text-[10px] font-semibold text-gray-300 hover:text-white cursor-pointer select-none leading-tight"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() => {
+                                        if (isChecked) {
+                                          setPdfSelectedSongIds(prev => prev.filter(id => id !== sIdStr));
+                                        } else {
+                                          setPdfSelectedSongIds(prev => [...prev, sIdStr]);
+                                        }
+                                      }}
+                                      className="accent-indigo-500 rounded border-white/10"
+                                    />
+                                    <span className="truncate">
+                                      <span className="text-gray-500 font-bold mr-1">#{sIdx + 1}</span>
+                                      {song.Title}
+                                    </span>
+                                  </label>
+                                );
+                              })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Chords Display Mode */}
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-gray-300 uppercase tracking-wider block">
+                        Display Mode
+                      </label>
+                      <select
+                        value={displayMode}
+                        onChange={(e) => setDisplayMode(e.target.value as any)}
+                        className="w-full bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-2 px-3 rounded-xl text-[10px] uppercase font-bold outline-none focus:ring-2 focus:ring-indigo-400/60 border border-indigo-500/30 hover:border-indigo-400/50 transition-all cursor-pointer shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)]"
+                      >
+                        <option value="both" className="bg-[#0c0d1b]">Show Chords & Numbers</option>
+                        <option value="chords" className="bg-[#0c0d1b]">Chords Only</option>
+                        <option value="numbers" className="bg-[#0c0d1b]">Numbers Only</option>
+                      </select>
+                    </div>
+
+                    {/* Lyrics Visibility */}
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-gray-300 uppercase tracking-wider block">
+                        Lyrics Visibility
+                      </label>
+                      <select
+                        value={showLyrics ? 'true' : 'false'}
+                        onChange={(e) => setShowLyrics(e.target.value === 'true')}
+                        className="w-full bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-2 px-3 rounded-xl text-[10px] uppercase font-bold outline-none focus:ring-2 focus:ring-indigo-400/60 border border-indigo-500/30 hover:border-indigo-400/50 transition-all cursor-pointer shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)]"
+                      >
+                        <option value="true" className="bg-[#0c0d1b]">Show Lyrics</option>
+                        <option value="false" className="bg-[#0c0d1b]">Hide Lyrics</option>
+                      </select>
+                    </div>
+
+                    {/* Sheet Layout Mode */}
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-gray-300 uppercase tracking-wider block">
+                        Sheet Layout Mode
+                      </label>
+                      <select
+                        value={sheetLayoutMode}
+                        onChange={(e) => setSheetLayoutMode(e.target.value as any)}
+                        className="w-full bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-2 px-3 rounded-xl text-[10px] uppercase font-bold outline-none focus:ring-2 focus:ring-indigo-400/60 border border-indigo-500/30 hover:border-indigo-400/50 transition-all cursor-pointer shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)]"
+                      >
+                        <option value="sequence" className="bg-[#0c0d1b]">Flow Sequence</option>
+                        <option value="compact" className="bg-[#0c0d1b]">Compact</option>
+                      </select>
+                    </div>
+
+                    {/* Active Key Quick Selector */}
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-bold text-gray-300 uppercase tracking-wider block">
+                        Transposed Key (Viewed Song)
+                      </label>
+                      <div className="flex items-center justify-between gap-1 bg-[#020205]/40 p-1.5 rounded-xl border border-white/5">
+                        <button
+                          onClick={() => {
+                            const keys = Object.keys(NOTE_TO_INDEX);
+                            const currIdx = keys.indexOf(currentKey);
+                            const prevIdx = (currIdx - 1 + keys.length) % keys.length;
+                            setCurrentKey(keys[prevIdx]);
+                          }}
+                          className="p-1 rounded-lg bg-white/5 hover:bg-white/10 active:scale-90 text-[10px] font-bold text-indigo-300 cursor-pointer animate-press"
+                        >
+                          ◀
+                        </button>
+                        <span className="text-xs font-mono font-black text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-3 py-1 rounded-lg shadow-inner min-w-[50px] text-center select-none">
+                          {currentKey}
+                        </span>
+                        <button
+                          onClick={() => {
+                            const keys = Object.keys(NOTE_TO_INDEX);
+                            const currIdx = keys.indexOf(currentKey);
+                            const nextIdx = (currIdx + 1) % keys.length;
+                            setCurrentKey(keys[nextIdx]);
+                          }}
+                          className="p-1 rounded-lg bg-white/5 hover:bg-white/10 active:scale-90 text-[10px] font-bold text-indigo-300 cursor-pointer animate-press"
+                        >
+                          ▶
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Song Transposition Customizer (Only shown if exporting multiple songs) */}
+                    {previewSongsData.length > 1 && (
+                      <div className="space-y-2 border-t border-white/5 pt-4 animate-fadeIn">
+                        <label className="text-[10px] font-bold text-amber-400 uppercase tracking-wider block flex items-center gap-1">
+                          <span>🎹</span> Transpose Individual Songs
+                        </label>
+                        <div className="space-y-2 bg-[#020205]/40 p-2.5 rounded-xl border border-indigo-500/10 max-h-[220px] overflow-y-auto custom-scrollbar">
+                          {previewSongsData.map((songData, sIdx) => {
+                            const songIdStr = String(songData.song.SongID);
+                            const resolvedKey = pdfSongKeys[songIdStr] || songData.key;
+                            return (
+                              <div key={songIdStr} className="flex items-center justify-between gap-2 border-b border-white/5 pb-2 last:border-0 last:pb-0">
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-[9.5px] font-extrabold text-white truncate uppercase">
+                                    {sIdx + 1}. {songData.song.Title}
+                                  </div>
+                                  <div className="text-[8.5px] text-indigo-300 font-mono">
+                                    Orig: {songData.song.OriginalKey || 'C'}
+                                  </div>
+                                </div>
+                                <select
+                                  value={resolvedKey}
+                                  onChange={(e) => {
+                                    const newKey = e.target.value;
+                                    setPdfSongKeys(prev => ({
+                                      ...prev,
+                                      [songIdStr]: newKey
+                                    }));
+                                    showToast(`Transposed "${songData.song.Title}" to ${newKey}`, 'success');
+                                  }}
+                                  className="bg-indigo-950/50 text-indigo-200 border border-indigo-500/30 rounded-lg px-2 py-1 text-[9px] font-black uppercase tracking-wider outline-none focus:ring-1 focus:ring-indigo-400 cursor-pointer hover:bg-indigo-900/60 transition-all shadow-sm"
+                                >
+                                  {NOTES.map((k) => (
+                                    <option key={k} value={k} className="bg-[#0c0d1b] text-indigo-100 font-bold">
+                                      Key of {k}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Context Note block */}
+                    <div className="p-3.5 bg-indigo-500/10 border border-indigo-500/20 rounded-xl space-y-1.5 select-none">
+                      <span className="text-[9px] font-black uppercase tracking-wider text-indigo-300 flex items-center gap-1">
+                        <span>💡</span> Live Adjustments
+                      </span>
+                      <p className="text-[9.5px] text-gray-400 leading-normal font-medium">
+                        Changing settings on the left will immediately re-render your preview on the right and update the final printed file.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right Column: Interactive paper canvas */}
+                <div className="flex-1 bg-black/45 p-4 sm:p-6 overflow-y-auto flex items-start justify-center custom-scrollbar select-text">
+                  
+                  {/* Physical A4 Sheet Container */}
+                  <div className="w-full max-w-[210mm] bg-white text-slate-900 shadow-2xl rounded-lg p-6 sm:p-10 font-sans border border-slate-200 space-y-12">
+                    
+                    {previewSongsData.map((songData, sIdx) => {
+                      const { key: songKey, roadmap: songRoadmap, sectionTemplates: songTemplates, title, artist, song } = songData;
+                      const repInfo = getRoadmapRepetitionInfo(songRoadmap);
+                      return (
+                        <div key={song.SongID} className={`print-song-page-preview ${sIdx > 0 ? 'border-t-2 border-slate-200 pt-10 mt-10' : ''}`}>
+                          {/* Header Container */}
+                          <div className="border-b-2 border-slate-900 pb-2 mb-4 flex justify-between items-end">
+                            <div>
+                              <h1 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight leading-none uppercase flex items-center gap-2">
+                                {setlists.length > 1 && pdfScope !== 'current' && (
+                                  <span className="text-[11px] bg-slate-900 text-white font-extrabold px-1.5 py-0.5 rounded">
+                                    #{setlists.indexOf(String(song.SongID)) + 1}
+                                  </span>
+                                )}
+                                <span>{title}</span>
+                              </h1>
+                              <h2 className="text-[10px] font-bold text-slate-500 mt-1 uppercase">
+                                BY {artist}
+                              </h2>
+                            </div>
+                            <div className="text-xs font-black text-indigo-600 border border-indigo-600 px-2 py-0.5 rounded-md font-mono select-none">
+                              KEY: {songKey.toUpperCase()}
+                            </div>
+                          </div>
+
+                          {/* Flow Roadmap Box */}
+                          <div className="bg-slate-50 border border-slate-200 rounded-md p-2.5 mb-5 select-none">
+                            <div className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">
+                              FLOW ROADMAP (TRANSPOSED SEQUENCE)
+                            </div>
+                            <div className="text-[9.5px] font-bold text-slate-800 leading-normal">
+                              {(() => {
+                                const renderedRoadmap: any[] = [];
+                                songRoadmap.forEach((block: any, idx: number) => {
+                                  const isDuplicate = songRoadmap.findIndex((b: any, bIdx: number) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, songTemplates)) !== -1;
+                                  if (isDuplicate) return;
+                                  renderedRoadmap.push({ block, originalIdx: idx });
+                                });
+
+                                return renderedRoadmap.map(({ block, originalIdx: idx }, rIdx) => {
+                                  const blockOffset = block.keyOffset || 0;
+                                  const blockKeyName = getModulatedKeyName(songKey, blockOffset);
+                                  return (
+                                    <span key={block.id}>
+                                      {rIdx > 0 && <span className="text-slate-400 mx-1">➔</span>}
+                                      <span className="uppercase text-indigo-900 font-bold">
+                                        {block.name} <span className="text-[8.5px] text-indigo-600 font-extrabold">({blockKeyName})</span>
+                                      </span>
+                                    </span>
+                                  );
+                                });
+                              })()}
+                            </div>
+                          </div>
+ 
+                           {/* Live Sheet Render */}
+                           <div className="space-y-4">
+                             {songRoadmap.map((block: any, idx: number) => {
+                               let blockDisplayName = block.name;
+ 
+                               if (sheetLayoutMode === 'sequence') {
+                                 const firstIdenticalIdx = songRoadmap.findIndex((b: any, bIdx: number) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, songTemplates));
+                                 if (firstIdenticalIdx !== -1) {
+                                   return (
+                                     <div
+                                       key={block.id}
+                                       className="p-2 mb-2 bg-slate-50 border border-dashed border-indigo-200 rounded text-[10px] font-bold text-indigo-600 flex items-center justify-between select-none"
+                                     >
+                                       <span>🔁 REPLAY: {block.name.toUpperCase()} (Same chords & lyrics as section #{firstIdenticalIdx + 1} - {songRoadmap[firstIdenticalIdx].name})</span>
+                                     </div>
+                                   );
+                                 }
+                               }
+
+                               if (sheetLayoutMode === 'compact') {
+                                if (!showLyrics) {
+                                  const firstIdx = songRoadmap.findIndex((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
+                                  if (firstIdx !== idx) return null;
+                                  const identicalBlocks = songRoadmap.filter((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
+                                  const uniqueNames = Array.from(new Set(identicalBlocks.map((b: any) => b.name)));
+                                  blockDisplayName = uniqueNames.join(' / ');
+                                } else {
+                                  const firstIdx = songRoadmap.findIndex((b: any) => b.name === block.name);
+                                  if (firstIdx !== idx) return null;
+                                }
+                              }
+
+                              const blockRep = repInfo[idx];
+                              const templateLines = songTemplates[block.name] || [];
+                              const blockOffset = block.keyOffset || 0;
+                              const blockKeyName = getModulatedKeyName(songKey, blockOffset);
+
+                              const originalIdx = NOTE_TO_INDEX[song.OriginalKey || 'C'] || 0;
+                              const currentIdx = NOTE_TO_INDEX[songKey] || 0;
+                              const totalSemitonesOffset = currentIdx - originalIdx + blockOffset;
+
+                              return (
+                                <div key={block.id} className="break-inside-avoid">
+                                  {/* Section Header */}
+                                  <h3 className="text-[11px] font-black text-indigo-950 uppercase tracking-wide border-b border-slate-200 pb-0.5 mb-1.5 select-none flex items-center justify-between">
+                                    <span>
+                                      {blockDisplayName} {blockOffset !== 0 ? `(KEY: ${blockKeyName})` : ''}
+                                    </span>
+                                    {blockRep && blockRep.totalInRun > 1 && (
+                                      <span className="text-[8px] bg-amber-100 text-amber-800 border border-amber-300 rounded px-1.5 py-0.5 font-mono font-black select-none">
+                                        {blockRep.totalInRun}x
+                                      </span>
+                                    )}
+                                  </h3>
+
+                                  {/* Embedded Lyrics Hints if hidden */}
+                                  {!showLyrics && (
+                                    <div className="mb-2 p-1.5 bg-slate-100 border-l-2 border-indigo-500 rounded-r text-[10px] font-medium text-slate-600 italic select-none">
+                                      {(() => {
+                                        if (sheetLayoutMode === 'compact') {
+                                          const identicalBlocks = songRoadmap.filter((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
+                                          const renderedHints: any[] = [];
+                                          const seenNames = new Set();
+                                          
+                                          identicalBlocks.forEach((b: any) => {
+                                            if (seenNames.has(b.name)) return;
+                                            seenNames.add(b.name);
+                                            const lines = songTemplates[b.name] || [];
+                                            const firstLyric = lines.find((l: any) => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
+                                            if (firstLyric) {
+                                              renderedHints.push({ name: b.name, lyric: firstLyric });
+                                            }
+                                          });
+
+                                          if (renderedHints.length > 0) {
+                                            // Group by lyric
+                                            const groups: { lyric: string; names: string[] }[] = [];
+                                            renderedHints.forEach(h => {
+                                              const normLyric = h.lyric.trim();
+                                              const existingGroup = groups.find(g => g.lyric.trim().toLowerCase() === normLyric.toLowerCase());
+                                              if (existingGroup) {
+                                                existingGroup.names.push(h.name);
+                                              } else {
+                                                groups.push({ lyric: h.lyric, names: [h.name] });
+                                              }
+                                            });
+
+                                            return groups.map((g, gIdx) => (
+                                              <div key={gIdx} className="flex items-center gap-1.5 flex-wrap">
+                                                <span className="text-[8px] font-black uppercase bg-indigo-50 text-indigo-600 px-1 rounded border border-indigo-100 not-italic">
+                                                  {g.names.map(n => n.toUpperCase()).join(' & ')}
+                                                </span>
+                                                <span className="truncate">“{g.lyric}”</span>
+                                                {g.names.length > 1 && (
+                                                  <span className="text-[7px] font-bold text-emerald-600 uppercase bg-emerald-50 px-1 rounded border border-emerald-100">
+                                                    Shared 1st line
+                                                  </span>
+                                                )}
+                                              </div>
+                                            ));
+                                          }
+                                        } else {
+                                          const lines = songTemplates[block.name] || [];
+                                          const firstLyric = lines.find((l: any) => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
+                                          if (firstLyric) {
+                                            return (
+                                              <div className="flex items-center gap-1.5">
+                                                <span className="font-bold text-indigo-600 not-italic">Hint:</span>
+                                                <span className="truncate">“{firstLyric}”</span>
+                                              </div>
+                                            );
+                                          }
+                                        }
+                                        return null;
+                                      })()}
+                                    </div>
+                                  )}
+
+                                  {/* Section Lines */}
+                                  <div className="pl-1.5 space-y-1">
+                                    {(() => {
+                                      const enabledLinesList = templateLines
+                                        .map((l: any, lIdx: number) => ({ l, lIdx }))
+                                        .filter(({ lIdx }: any) => (block.enabledLines || []).includes(lIdx));
+
+                                      const processedLines = enabledLinesList.map(({ l, lIdx }: any) => {
+                                        const transposed = transposeChord(l.Chords || '', totalSemitonesOffset);
+                                        const numbers = getNumberForChord(transposed, blockKeyName, songKey);
+                                        const lyrics = l.Lyrics || '';
+                                        return {
+                                          l,
+                                          lIdx,
+                                          transposed,
+                                          numbers,
+                                          lyrics,
+                                        };
+                                      });
+
+                                      // 3. Find the best multi-line chord progression loop (pattern length L, repeat count K)
+                                      let bestL = -1;
+                                      let bestK = -1;
+                                      const N = processedLines.length;
+
+                                      if (!showLyrics && N >= 4) {
+                                        for (let L = 2; L <= Math.floor(N / 2); L++) {
+                                          let K = 1;
+                                          while ((K + 1) * L <= N) {
+                                            let matches = true;
+                                            for (let offset = 0; offset < L; offset++) {
+                                              const originalChord = processedLines[offset].transposed;
+                                              const nextChord = processedLines[K * L + offset].transposed;
+                                              if (originalChord !== nextChord) {
+                                                matches = false;
+                                                break;
+                                              }
+                                            }
+                                            if (matches) {
+                                              K++;
+                                            } else {
+                                              break;
+                                            }
+                                          }
+
+                                          if (K >= 2) {
+                                            // Make sure at least one line in the pattern has non-empty chords
+                                            let hasChords = false;
+                                            for (let offset = 0; offset < L; offset++) {
+                                              if (processedLines[offset].transposed && processedLines[offset].transposed.trim() !== '') {
+                                                hasChords = true;
+                                                break;
+                                              }
+                                            }
+
+                                            if (hasChords) {
+                                              if (bestL === -1 || (K * L > bestK * bestL) || (K * L === bestK * bestL && L < bestL)) {
+                                                bestL = L;
+                                                bestK = K;
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+
+                                      // 4. Render with Loop-Grouping if a pattern is detected
+                                      if (bestL >= 2 && bestK >= 2) {
+                                        const loopLength = bestL;
+                                        const repeatCount = bestK;
+                                        const loopedLinesCount = loopLength * repeatCount;
+
+                                        const lyricsAreIdenticalOrHidden = !showLyrics || (() => {
+                                          for (let r = 1; r < repeatCount; r++) {
+                                            for (let offset = 0; offset < loopLength; offset++) {
+                                              const lineA = processedLines[offset];
+                                              const lineB = processedLines[r * loopLength + offset];
+                                              if ((lineA.lyrics || '') !== (lineB.lyrics || '')) {
+                                                return false;
+                                              }
+                                            }
+                                          }
+                                          return true;
+                                        })();
+
+                                        const loopContainers = [];
+
+                                        if (lyricsAreIdenticalOrHidden) {
+                                          const runLines = processedLines.slice(0, loopLength);
+                                          loopContainers.push(
+                                            <div
+                                              key="loop-run-single"
+                                              className="border-l-3 border-amber-500 bg-amber-50 rounded-r-lg px-2.5 py-2 my-2 space-y-1"
+                                            >
+                                              <div className="flex items-center gap-2 mb-1 select-none">
+                                                <span className="text-[8px] font-mono font-black uppercase tracking-wider text-amber-800 bg-amber-100 border border-amber-200 rounded px-1.5 py-0.5 flex items-center gap-1 shadow-sm">
+                                                  <span>🔁</span> PLAY {repeatCount}X
+                                                </span>
+                                                <span className="text-[8px] text-amber-600 font-mono tracking-wide">
+                                                  (chords progression repeats)
+                                                </span>
+                                              </div>
+
+                                              <div className="space-y-1">
+                                                {runLines.map((lineData) => {
+                                                  const { lIdx, transposed, numbers, lyrics } = lineData;
+                                                  return (
+                                                    <div key={lIdx} className="break-inside-avoid">
+                                                      {displayMode !== 'numbers' && transposed && (
+                                                        <div className="font-mono font-bold text-[11px] text-indigo-700 whitespace-pre leading-none mb-0.5">
+                                                          {transposed}
+                                                        </div>
+                                                      )}
+                                                      {displayMode !== 'chords' && numbers && (
+                                                        <div className="font-mono font-bold text-[10px] text-slate-500 whitespace-pre leading-none mb-0.5">
+                                                          {numbers}
+                                                        </div>
+                                                      )}
+                                                      {showLyrics && lyrics && (
+                                                        <div className="text-[11px] text-slate-800 leading-tight">
+                                                          {lyrics}
+                                                        </div>
+                                                      )}
+                                                    </div>
+                                                  );
+                                                })}
+                                              </div>
+                                            </div>
+                                          );
+                                        } else {
+                                          // Lyrics are shown and are different: render all rounds so the user can read the lyrics
+                                          for (let r = 0; r < repeatCount; r++) {
+                                            const runLines = processedLines.slice(r * loopLength, (r + 1) * loopLength);
+                                            loopContainers.push(
+                                              <div
+                                                key={`loop-run-${r}`}
+                                                className="border-l-3 border-indigo-500 bg-indigo-50 rounded-r-lg px-2.5 py-2 my-2 space-y-1"
+                                              >
+                                                <div className="flex items-center gap-2 mb-1 select-none">
+                                                  {r === 0 ? (
+                                                    <>
+                                                      <span className="text-[8px] font-mono font-black uppercase tracking-wider text-amber-800 bg-amber-100 border border-amber-200 rounded px-1.5 py-0.5 flex items-center gap-1 shadow-sm">
+                                                        <span>🔁</span> CHORD LOOP ({repeatCount}X) — ROUND 1
+                                                      </span>
+                                                      <span className="text-[8px] text-indigo-600 font-mono tracking-wide">
+                                                        (chords progression pattern repeats)
+                                                      </span>
+                                                    </>
+                                                  ) : (
+                                                    <>
+                                                      <span className="text-[8px] font-mono font-black uppercase tracking-wider text-indigo-800 bg-indigo-100 border border-indigo-200 rounded px-1.5 py-0.5 flex items-center gap-1 shadow-sm">
+                                                        <span>🔁</span> ROUND {r + 1}
+                                                      </span>
+                                                      <span className="text-[8px] text-gray-500 font-mono tracking-wide">
+                                                        (identical chords as Round 1)
+                                                      </span>
+                                                    </>
+                                                  )}
+                                                </div>
+
+                                                <div className="space-y-1">
+                                                  {runLines.map((lineData) => {
+                                                    const { lIdx, transposed, numbers, lyrics } = lineData;
+                                                    return (
+                                                      <div key={lIdx} className="break-inside-avoid">
+                                                        {displayMode !== 'numbers' && transposed && (
+                                                          <div className="font-mono font-bold text-[11px] text-indigo-700 whitespace-pre leading-none mb-0.5">
+                                                            {transposed}
+                                                          </div>
+                                                        )}
+                                                        {displayMode !== 'chords' && numbers && (
+                                                          <div className="font-mono font-bold text-[10px] text-slate-500 whitespace-pre leading-none mb-0.5">
+                                                            {numbers}
+                                                          </div>
+                                                        )}
+                                                        {showLyrics && lyrics && (
+                                                          <div className="text-[11px] text-slate-800 leading-tight">
+                                                            {lyrics}
+                                                          </div>
+                                                        )}
+                                                      </div>
+                                                    );
+                                                  })}
+                                                </div>
+                                              </div>
+                                            );
+                                          }
+                                        }
+
+                                        const remainingLines = processedLines.slice(loopedLinesCount);
+
+                                        return (
+                                          <div className="space-y-1">
+                                            {loopContainers}
+                                            {remainingLines.length > 0 && (
+                                              <div className="pt-2 space-y-1 border-t border-dashed border-slate-200">
+                                                {remainingLines.map((lineData) => {
+                                                  const { lIdx, transposed, numbers, lyrics } = lineData;
+                                                  return (
+                                                    <div key={lIdx} className="break-inside-avoid">
+                                                      {displayMode !== 'numbers' && transposed && (
+                                                        <div className="font-mono font-bold text-[11px] text-indigo-700 whitespace-pre leading-none mb-0.5">
+                                                          {transposed}
+                                                        </div>
+                                                      )}
+                                                      {displayMode !== 'chords' && numbers && (
+                                                        <div className="font-mono font-bold text-[10px] text-slate-500 whitespace-pre leading-none mb-0.5">
+                                                          {numbers}
+                                                        </div>
+                                                      )}
+                                                      {showLyrics && lyrics && (
+                                                        <div className="text-[11px] text-slate-800 leading-tight">
+                                                          {lyrics}
+                                                        </div>
+                                                      )}
+                                                    </div>
+                                                  );
+                                                })}
+                                              </div>
+                                            )}
+                                          </div>
+                                        );
+                                      }
+
+                                      // 5. Compute consecutive runs of identical lines (Fallback)
+                                      interface LineRun {
+                                        startIndex: number;
+                                        endIndex: number;
+                                        count: number;
+                                      }
+
+                                      const lineRuns: LineRun[] = [];
+                                      let i = 0;
+                                      while (i < processedLines.length) {
+                                        let j = i + 1;
+                                        while (j < processedLines.length) {
+                                          const lineA = processedLines[i];
+                                          const lineB = processedLines[j];
+
+                                          const chordsIdentical = lineA.transposed === lineB.transposed;
+                                          const lyricsIdentical = !showLyrics || lineA.lyrics === lineB.lyrics;
+
+                                          if (chordsIdentical && lyricsIdentical) {
+                                            j++;
+                                          } else {
+                                            break;
+                                          }
+                                        }
+
+                                        lineRuns.push({
+                                          startIndex: i,
+                                          endIndex: j - 1,
+                                          count: j - i,
+                                        });
+
+                                        i = j;
+                                      }
+
+                                      // 6. Render grouped lines (Fallback)
+                                      return lineRuns.map((run) => {
+                                        const firstLine = processedLines[run.startIndex];
+                                        const { lIdx, transposed, numbers, lyrics } = firstLine;
+
+                                        return (
+                                          <div key={lIdx} className="break-inside-avoid">
+                                            {displayMode !== 'numbers' && transposed && (
+                                              <div className="font-mono font-bold text-[11px] text-indigo-700 whitespace-pre leading-none mb-0.5 flex items-center gap-2 flex-wrap">
+                                                <span>{transposed}</span>
+                                                {run.count > 1 && (
+                                                  <span className="text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded px-1.5 py-0.5 font-mono font-black select-none tracking-wide">
+                                                    {run.count}x
+                                                  </span>
+                                                )}
+                                              </div>
+                                            )}
+                                            {displayMode !== 'chords' && numbers && (
+                                              <div className="font-mono font-bold text-[10px] text-slate-500 whitespace-pre leading-none mb-0.5 flex items-center gap-2 flex-wrap">
+                                                <span>{numbers}</span>
+                                                {run.count > 1 && displayMode === 'numbers' && (
+                                                  <span className="text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded px-1.5 py-0.5 font-mono font-black select-none tracking-wide">
+                                                    {run.count}x
+                                                  </span>
+                                                )}
+                                              </div>
+                                            )}
+                                            {showLyrics && lyrics && (
+                                              <div className="text-[11px] text-slate-800 leading-tight">
+                                                {lyrics}
+                                              </div>
+                                            )}
+                                          </div>
+                                        );
+                                      });
+                                    })()}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Modal Footer Controls */}
+              <div className="px-5 py-4 border-t border-white/5 bg-[#080812] flex items-center justify-between shrink-0 gap-3">
+                <button
+                  onClick={() => setIsPDFPreviewOpen(false)}
+                  className="px-4 py-2 bg-white/5 hover:bg-white/10 text-gray-300 font-bold rounded-xl text-xs uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    exportToPDF();
+                    setIsPDFPreviewOpen(false);
+                  }}
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-xl text-xs uppercase tracking-wider transition-all active:scale-95 shadow-md shadow-indigo-500/10 cursor-pointer flex items-center gap-1.5"
+                >
+                  <span>🖨️</span>
+                  <span>Print / Save as PDF</span>
+                </button>
+              </div>
+
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Real-time Toasts notifications */}
       <div id="toastContainer" className="fixed bottom-6 right-4 sm:right-6 z-[950] flex flex-col gap-2 pointer-events-none w-full max-w-[90vw] sm:max-w-xs">

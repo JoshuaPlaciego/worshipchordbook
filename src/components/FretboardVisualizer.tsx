@@ -119,7 +119,7 @@ export const FretboardVisualizer: React.FC<FretboardVisualizerProps> = ({
             e.stopPropagation();
             onHelpClick();
           }}
-          className="absolute top-3 left-3 animate-bulb text-amber-400 hover:text-amber-300 transition-all p-1 z-10 scale-105 active:scale-95"
+          className="absolute top-2 left-2 animate-bulb text-amber-400 hover:text-amber-300 transition-all p-2 sm:p-2.5 z-10 scale-105 active:scale-95 bg-black/40 hover:bg-black/60 rounded-full"
           title="💡 Learn Chord/Scale Secrets"
         >
           <svg className="w-4 h-4 sm:w-5 sm:h-5 drop-shadow-md" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -139,7 +139,7 @@ export const FretboardVisualizer: React.FC<FretboardVisualizerProps> = ({
             e.stopPropagation();
             onPlayClick();
           }}
-          className="absolute top-3 right-3 text-indigo-400 hover:text-emerald-400 transition-all p-1 z-10 hover:scale-110 active:scale-90"
+          className="absolute top-2 right-2 text-indigo-400 hover:text-emerald-400 transition-all p-2 sm:p-2.5 z-10 hover:scale-110 active:scale-90 bg-black/40 hover:bg-black/60 rounded-full"
           title="🔊 Listen to this Shape"
         >
           <svg className="w-4 h-4 sm:w-5 sm:h-5 drop-shadow-md" fill="none" stroke="currentColor" viewBox="0 0 24 24">

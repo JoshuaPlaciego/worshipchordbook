@@ -24,7 +24,10 @@ interface SidebarCatalogProps {
   onRemoveSongFromSetlist?: (setName: string, songId: string) => Promise<void>;
   onSelectSongFromSetlist?: (song: Song, setName: string) => void;
   onCreateSetlist?: (setName: string) => Promise<void>;
+  onToggleSetlistLock?: (setName: string) => void;
   activeSetlistFolder?: string;
+  onDownloadManual?: () => void;
+  onOpenInstallGuide?: () => void;
 }
 
 export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
@@ -50,7 +53,10 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
   onRemoveSongFromSetlist,
   onSelectSongFromSetlist,
   onCreateSetlist,
+  onToggleSetlistLock,
   activeSetlistFolder,
+  onDownloadManual,
+  onOpenInstallGuide,
 }) => {
   const [search, setSearch] = useState('');
   const [expandedSets, setExpandedSets] = useState<{ [setName: string]: boolean }>({});
@@ -284,9 +290,11 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                   return filteredMetaRecords.map((meta) => {
                     const setName = meta.PresetName;
                     let songIds: string[] = [];
+                    let isLocked = false;
                     try {
                       const parsed = JSON.parse(meta.RoadmapJSON);
                       songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
+                      isLocked = !!parsed.locked;
                     } catch {}
 
                     const isExpanded = !!expandedSets[setName];
@@ -310,7 +318,7 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                             </span>
                             <div className="marquee-container relative overflow-hidden flex-1 min-w-0 select-none">
                               <span className="inline-block text-xs font-black tracking-wide text-gray-200 uppercase whitespace-nowrap truncate w-full group-hover:w-max group-hover:overflow-visible group-hover:text-clip group-hover:animate-hover-marquee">
-                                {setName}
+                                {setName} {isLocked && <span className="ml-1 text-[11px]" title="Setlist Locked by Admin">🔒</span>}
                               </span>
                             </div>
                             <span className="text-[9px] font-mono font-extrabold text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded-full shrink-0">
@@ -372,18 +380,38 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                     )}
                                   </button>
                                 )}
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setDeleteConfirmSet(setName);
-                                  }}
-                                  className="p-1 hover:bg-rose-500/10 text-gray-500 hover:text-rose-400 rounded-md transition-colors cursor-pointer"
-                                  title="Delete Setlist Folder"
-                                >
-                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                  </svg>
-                                </button>
+                                {isLocked && !isAdmin ? (
+                                  <span className="text-[9px] bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded text-amber-400 font-extrabold select-none flex items-center gap-1">🔒 LOCKED</span>
+                                ) : (
+                                  <>
+                                    {isAdmin && (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (onToggleSetlistLock) {
+                                            onToggleSetlistLock(setName);
+                                          }
+                                        }}
+                                        className={`p-1 hover:bg-amber-500/10 border border-transparent rounded-md transition-all cursor-pointer mr-1 text-[11px] hover:border-amber-500/20`}
+                                        title={isLocked ? "Click to Unlock setlist" : "Click to Lock setlist"}
+                                      >
+                                        {isLocked ? '🔒' : '🔓'}
+                                      </button>
+                                    )}
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setDeleteConfirmSet(setName);
+                                      }}
+                                      className="p-1 hover:bg-rose-500/10 text-gray-500 hover:text-rose-400 rounded-md transition-colors cursor-pointer"
+                                      title="Delete Setlist Folder"
+                                    >
+                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                      </svg>
+                                    </button>
+                                  </>
+                                )}
                               </>
                             )}
                             <span className={`text-[10px] text-gray-400 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}>
@@ -402,24 +430,29 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                             ) : (
                               folderSongs.map((s, idx) => {
                                 const isCurrent = currentSong && String(s.SongID) === String(currentSong.SongID);
+                                const dragDisabled = isLocked && !isAdmin;
                                 return (
                                   <div
                                     key={s.SongID}
-                                    draggable
+                                    draggable={!dragDisabled}
                                     onDragStart={(e) => {
+                                      if (dragDisabled) return;
                                       e.dataTransfer.setData('text/plain', String(s.SongID));
                                       setDraggedItem({ setName, index: idx });
                                     }}
                                     onDragOver={(e) => {
+                                      if (dragDisabled) return;
                                       e.preventDefault();
                                       if (draggedItem && draggedItem.setName === setName && draggedItem.index !== idx) {
                                         setDragOverIndex(idx);
                                       }
                                     }}
                                     onDragLeave={() => {
+                                      if (dragDisabled) return;
                                       setDragOverIndex(null);
                                     }}
                                     onDrop={(e) => {
+                                      if (dragDisabled) return;
                                       e.preventDefault();
                                       if (draggedItem && draggedItem.setName === setName) {
                                         const dragIndex = draggedItem.index;
@@ -436,6 +469,7 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                       setDragOverIndex(null);
                                     }}
                                     onDragEnd={() => {
+                                      if (dragDisabled) return;
                                       setDraggedItem(null);
                                       setDragOverIndex(null);
                                     }}
@@ -461,23 +495,29 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                   >
                                     {/* Left section: drag handle and clickable info */}
                                     <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                                      {/* Drag Handle Grip */}
-                                      <div
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                        }}
-                                        className="cursor-grab active:cursor-grabbing p-1 text-indigo-400/30 hover:text-indigo-300 transition-colors shrink-0"
-                                        title="Drag to reorder"
-                                      >
-                                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                          <circle cx="9" cy="5" r="1.5" fill="currentColor"/>
-                                          <circle cx="15" cy="5" r="1.5" fill="currentColor"/>
-                                          <circle cx="9" cy="12" r="1.5" fill="currentColor"/>
-                                          <circle cx="15" cy="12" r="1.5" fill="currentColor"/>
-                                          <circle cx="9" cy="19" r="1.5" fill="currentColor"/>
-                                          <circle cx="15" cy="19" r="1.5" fill="currentColor"/>
-                                        </svg>
-                                      </div>
+                                      {/* Drag Handle Grip or Index Badge */}
+                                      {dragDisabled ? (
+                                        <div className="w-5 h-5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 font-extrabold flex items-center justify-center text-[9px] shrink-0 font-mono select-none">
+                                          {idx + 1}
+                                        </div>
+                                      ) : (
+                                        <div
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                          }}
+                                          className="cursor-grab active:cursor-grabbing p-1 text-indigo-400/30 hover:text-indigo-300 transition-colors shrink-0"
+                                          title="Drag to reorder"
+                                        >
+                                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <circle cx="9" cy="5" r="1.5" fill="currentColor"/>
+                                            <circle cx="15" cy="5" r="1.5" fill="currentColor"/>
+                                            <circle cx="9" cy="12" r="1.5" fill="currentColor"/>
+                                            <circle cx="15" cy="12" r="1.5" fill="currentColor"/>
+                                            <circle cx="9" cy="19" r="1.5" fill="currentColor"/>
+                                            <circle cx="15" cy="19" r="1.5" fill="currentColor"/>
+                                          </svg>
+                                        </div>
+                                      )}
 
                                       <div className="min-w-0 flex-1 pr-2">
                                         <div className="text-[11px] font-bold text-gray-200 truncate group-hover:text-white">
@@ -491,42 +531,44 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
 
                                     {/* Right section: move controls & remove */}
                                     <div className="flex items-center gap-1 select-none shrink-0">
-                                      <div className="flex items-center gap-0.5 opacity-40 group-hover:opacity-100 transition-opacity">
-                                        <button
-                                          disabled={idx === 0}
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            moveSong(setName, songIds, idx, -1);
-                                          }}
-                                          className="p-1 text-[9px] text-indigo-400 hover:text-indigo-200 disabled:opacity-25 rounded transition-all active:scale-125 cursor-pointer"
-                                          title="Move Up"
-                                        >
-                                          ▲
-                                        </button>
-                                        <button
-                                          disabled={idx === folderSongs.length - 1}
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            moveSong(setName, songIds, idx, 1);
-                                          }}
-                                          className="p-1 text-[9px] text-indigo-400 hover:text-indigo-200 disabled:opacity-25 rounded transition-all active:scale-125 cursor-pointer"
-                                          title="Move Down"
-                                        >
-                                          ▼
-                                        </button>
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            if (onRemoveSongFromSetlist) {
-                                              onRemoveSongFromSetlist(setName, String(s.SongID));
-                                            }
-                                          }}
-                                          className="p-1 text-[10px] text-gray-400 hover:text-rose-400 rounded transition-all active:scale-125 cursor-pointer"
-                                          title="Remove from Setlist"
-                                        >
-                                          ✕
-                                        </button>
-                                      </div>
+                                      {!dragDisabled && (
+                                        <div className="flex items-center gap-0.5 opacity-40 group-hover:opacity-100 transition-opacity">
+                                          <button
+                                            disabled={idx === 0}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              moveSong(setName, songIds, idx, -1);
+                                            }}
+                                            className="p-1 text-[9px] text-indigo-400 hover:text-indigo-200 disabled:opacity-25 rounded transition-all active:scale-125 cursor-pointer"
+                                            title="Move Up"
+                                          >
+                                            ▲
+                                          </button>
+                                          <button
+                                            disabled={idx === folderSongs.length - 1}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              moveSong(setName, songIds, idx, 1);
+                                            }}
+                                            className="p-1 text-[9px] text-indigo-400 hover:text-indigo-200 disabled:opacity-25 rounded transition-all active:scale-125 cursor-pointer"
+                                            title="Move Down"
+                                          >
+                                            ▼
+                                          </button>
+                                          <button
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              if (onRemoveSongFromSetlist) {
+                                                onRemoveSongFromSetlist(setName, String(s.SongID));
+                                              }
+                                            }}
+                                            className="p-1 text-[10px] text-gray-400 hover:text-rose-400 rounded transition-all active:scale-125 cursor-pointer"
+                                            title="Remove from Setlist"
+                                          >
+                                            ✕
+                                          </button>
+                                        </div>
+                                      )}
                                       {isCurrent && (
                                         <span className="text-[10px] text-violet-400 ml-1">⚡</span>
                                       )}
@@ -646,16 +688,38 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
           <div className="select-none flex flex-col space-y-2">
             <button
               onClick={() => {
+                if (onOpenInstallGuide) onOpenInstallGuide();
+                onClose();
+              }}
+              className="w-full flex items-center justify-center gap-2 bg-indigo-500/10 text-indigo-300 py-2.5 px-4 rounded-xl border border-indigo-500/20 hover:bg-indigo-500/20 active:scale-95 transition-all cursor-pointer font-bold"
+            >
+              <span className="text-sm">📱</span>
+              <span className="text-[10px] uppercase tracking-widest font-black">Install Mobile App</span>
+            </button>
+
+            <button
+              onClick={() => {
+                if (onDownloadManual) onDownloadManual();
+                onClose();
+              }}
+              className="w-full flex items-center justify-center gap-2 bg-emerald-500/10 text-emerald-300 py-2.5 px-4 rounded-xl border border-emerald-500/20 hover:bg-emerald-500/20 active:scale-95 transition-all cursor-pointer font-bold"
+            >
+              <span className="text-sm">📖</span>
+              <span className="text-[10px] uppercase tracking-widest font-black">Download PDF Manual</span>
+            </button>
+
+            <button
+              onClick={() => {
                 if (onRunDiagnostics) onRunDiagnostics();
                 onClose();
               }}
-              className="w-full flex items-center justify-center gap-2 bg-rose-500/10 text-rose-300 py-3 px-4 rounded-xl border border-rose-500/20 hover:bg-rose-500/20 active:scale-95 transition-all cursor-pointer font-bold"
+              className="w-full flex items-center justify-center gap-2 bg-rose-500/10 text-rose-300 py-2.5 px-4 rounded-xl border border-rose-500/20 hover:bg-rose-500/20 active:scale-95 transition-all cursor-pointer font-bold"
             >
               <span className="text-sm">🩺</span>
               <span className="text-[10px] uppercase tracking-widest font-black">Database Diagnostics</span>
             </button>
-            <p className="text-[8.5px] text-gray-500 text-center italic leading-tight">
-              Review current sheets row records, connection limits, and latency diagnosis.
+            <p className="text-[8.5px] text-gray-500 text-center italic leading-tight pt-1">
+              Organize your setlists, install to phone for offline gig use, and run database diagnoses.
             </p>
           </div>
         </div>

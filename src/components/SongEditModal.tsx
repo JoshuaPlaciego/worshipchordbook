@@ -405,7 +405,7 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
               className="p-1 hover:bg-white/10 rounded-lg text-indigo-400/60 hover:text-white transition-colors"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>
           </div>
@@ -437,7 +437,7 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
                 setKey(e.target.value);
                 validateForm(sections);
               }}
-              className="col-span-2 bg-indigo-900/30 text-indigo-100 py-1.5 px-2.5 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-400/60 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] border border-indigo-500/30 appearance-none cursor-pointer"
+              className="col-span-2 bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-1.5 px-2.5 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-400/60 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] border border-indigo-500/30 hover:border-indigo-400/50 transition-all appearance-none cursor-pointer"
             >
               {NOTES.map((k) => (
                 <option key={k} value={k} className="bg-[#0a0b16]">
@@ -545,7 +545,7 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
                           title="Remove line"
                         >
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12" />
                           </svg>
                         </button>
                       </div>

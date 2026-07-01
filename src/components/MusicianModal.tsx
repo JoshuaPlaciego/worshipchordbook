@@ -22,7 +22,7 @@ class WebAudioSynth {
     }
   }
 
-  private initCtx() {
+  public initCtx() {
     if (!this.ctx) {
       this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
@@ -201,6 +201,17 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
       setSelectedSubChord(null);
       setSelectedLeadScale(null);
       setActiveHelpDetail(null);
+      
+      // Global click/touchstart audio resumption trigger for mobile web browser compliance (iOS/Android Safari/Chrome)
+      const resumeAudio = () => {
+        audioSynth.initCtx();
+      };
+      window.addEventListener('click', resumeAudio, { once: true });
+      window.addEventListener('touchstart', resumeAudio, { once: true });
+      return () => {
+        window.removeEventListener('click', resumeAudio);
+        window.removeEventListener('touchstart', resumeAudio);
+      };
     }
   }, [isOpen]);
 
@@ -1344,7 +1355,7 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                                 .filter(m => m !== -1);
                               audioSynth.playMidiNotes(midiNotes, 'chord', 'guitar');
                             }}
-                            className="absolute top-3 right-3 text-indigo-400 hover:text-emerald-400 transition-all p-1 z-10 hover:scale-110 active:scale-90"
+                            className="absolute top-2 right-2 text-indigo-400 hover:text-emerald-400 transition-all p-2.5 z-10 hover:scale-110 active:scale-90 bg-black/40 hover:bg-black/60 rounded-full"
                             title="🔊 Listen to this Shape"
                           >
                             <svg className="w-4.5 h-4.5 drop-shadow-md" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1360,7 +1371,7 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                                 .filter((d): d is any => d !== null);
                               handleOpenHelpDetail("Standard Open Shape", 'guitar', 'chord', mappedDots);
                             }}
-                            className="absolute top-3 left-3 animate-bulb text-amber-400 hover:text-amber-300 transition-all p-1 z-10 scale-105 active:scale-95"
+                            className="absolute top-2 left-2 animate-bulb text-amber-400 hover:text-amber-300 transition-all p-2.5 z-10 scale-105 active:scale-95 bg-black/40 hover:bg-black/60 rounded-full"
                             title="💡 Learn Chord/Scale Secrets"
                           >
                             <svg className="w-4.5 h-4.5 drop-shadow-md" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1798,6 +1809,185 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                   </div>
                 </div>
               )}
+              
+              {/* Shared Circle of Fifths Visualizer & Harmonic Context Panel */}
+              {(() => {
+                const CIRCLE = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F'];
+                
+                const normalizeForCircle = (noteName: string) => {
+                  const norm: { [key: string]: string } = {
+                    'C#': 'Db', 'D#': 'Eb', 'G#': 'Ab', 'A#': 'Bb', 'Gb': 'F#', 'E#': 'F', 'B#': 'C', 'Cb': 'B'
+                  };
+                  return norm[noteName] || noteName;
+                };
+
+                const normRoot = normalizeForCircle(root);
+                const activeIdx = CIRCLE.indexOf(normRoot);
+                const clockwiseIdx = activeIdx !== -1 ? (activeIdx + 1) % 12 : -1;
+                const counterclockwiseIdx = activeIdx !== -1 ? (activeIdx - 1 + 12) % 12 : -1;
+                
+                const clockwiseNeighbor = clockwiseIdx !== -1 ? CIRCLE[clockwiseIdx] : 'G';
+                const counterClockwiseNeighbor = counterclockwiseIdx !== -1 ? CIRCLE[counterclockwiseIdx] : 'F';
+                
+                const RELATIVES: { [key: string]: string } = {
+                  'C': 'Am', 'G': 'Em', 'D': 'Bm', 'A': 'F#m', 'E': 'C#m', 'B': 'G#m',
+                  'F#': 'D#m', 'Db': 'Bbm', 'Ab': 'Fm', 'Eb': 'Cm', 'Bb': 'Gm', 'F': 'Dm',
+                  'Am': 'C', 'Em': 'G', 'Bm': 'D', 'F#m': 'A', 'C#m': 'E', 'G#m': 'B',
+                  'D#m': 'F#', 'Bbm': 'Db', 'Fm': 'Ab', 'Cm': 'Eb', 'Gm': 'Bb', 'Dm': 'F'
+                };
+                const relMinor = RELATIVES[normRoot] || '';
+
+                return (
+                  <div className="mt-8 pt-6 border-t border-indigo-500/20 select-none animate-fadeIn">
+                    <div className="flex items-center gap-2 mb-3.5">
+                      <span className="text-sm">🧭</span>
+                      <h4 className="text-xs sm:text-sm font-extrabold text-amber-300 uppercase tracking-widest font-sans">
+                        Circle of Fifths Harmonic Compass
+                      </h4>
+                    </div>
+                    
+                    <div className="flex flex-col md:flex-row gap-6 items-center bg-indigo-950/20 border border-indigo-500/10 p-5 rounded-2xl">
+                      {/* Visual SVG Circle */}
+                      <div className="shrink-0 flex items-center justify-center p-2 bg-black/30 border border-white/5 rounded-2xl">
+                        <svg viewBox="0 0 200 200" className="w-40 h-40 sm:w-44 sm:h-44 select-none drop-shadow-[0_0_15px_rgba(99,102,241,0.2)]">
+                          <circle cx="100" cy="100" r="75" fill="none" stroke="rgba(99,102,241,0.15)" strokeWidth="1.5" strokeDasharray="3 3" />
+                          
+                          {activeIdx !== -1 && (
+                            <>
+                              {/* Line to Clockwise */}
+                              {(() => {
+                                const thetaA = (activeIdx * 30 - 90) * Math.PI / 180;
+                                const thetaB = (clockwiseIdx * 30 - 90) * Math.PI / 180;
+                                return (
+                                  <line
+                                    x1={100 + 75 * Math.cos(thetaA)}
+                                    y1={100 + 75 * Math.sin(thetaA)}
+                                    x2={100 + 75 * Math.cos(thetaB)}
+                                    y2={100 + 75 * Math.sin(thetaB)}
+                                    stroke="#38bdf8"
+                                    strokeWidth="1.5"
+                                    strokeDasharray="2 2"
+                                  />
+                                );
+                              })()}
+                              {/* Line to Counterclockwise */}
+                              {(() => {
+                                const thetaA = (activeIdx * 30 - 90) * Math.PI / 180;
+                                const thetaB = (counterclockwiseIdx * 30 - 90) * Math.PI / 180;
+                                return (
+                                  <line
+                                    x1={100 + 75 * Math.cos(thetaA)}
+                                    y1={100 + 75 * Math.sin(thetaA)}
+                                    x2={100 + 75 * Math.cos(thetaB)}
+                                    y2={100 + 75 * Math.sin(thetaB)}
+                                    stroke="#34d399"
+                                    strokeWidth="1.5"
+                                    strokeDasharray="2 2"
+                                  />
+                                );
+                              })()}
+                            </>
+                          )}
+
+                          {CIRCLE.map((note, i) => {
+                            const theta = (i * 30 - 90) * Math.PI / 180;
+                            const x = 100 + 75 * Math.cos(theta);
+                            const y = 100 + 75 * Math.sin(theta);
+                            
+                            const isActive = i === activeIdx;
+                            const isClockwise = i === clockwiseIdx;
+                            const isCounter = i === counterclockwiseIdx;
+                            
+                            let nodeFill = "#0c0d1b";
+                            let nodeStroke = "rgba(255, 255, 255, 0.1)";
+                            let textFill = "#94a3b8";
+                            let strokeWidth = "1";
+                            
+                            if (isActive) {
+                              nodeFill = "#fbbf24";
+                              nodeStroke = "#fbbf24";
+                              textFill = "#0c0d1b";
+                              strokeWidth = "2";
+                            } else if (isClockwise) {
+                              nodeFill = "#0f172a";
+                              nodeStroke = "#38bdf8";
+                              textFill = "#38bdf8";
+                              strokeWidth = "1.5";
+                            } else if (isCounter) {
+                              nodeFill = "#0f172a";
+                              nodeStroke = "#34d399";
+                              textFill = "#34d399";
+                              strokeWidth = "1.5";
+                            }
+                            
+                            return (
+                              <g key={note} className="transition-all">
+                                <circle cx={x} cy={y} r="13" fill={nodeFill} stroke={nodeStroke} strokeWidth={strokeWidth} />
+                                <text
+                                  x={x}
+                                  y={y + 3.5}
+                                  fill={textFill}
+                                  fontSize="8.5"
+                                  fontFamily="monospace"
+                                  fontWeight="bold"
+                                  textAnchor="middle"
+                                >
+                                  {note}
+                                </text>
+                              </g>
+                            );
+                          })}
+                          
+                          {/* Center Label */}
+                          <circle cx="100" cy="100" r="22" fill="#090a15" stroke="rgba(99,102,241,0.2)" />
+                          <text x="100" y="96" fill="#818cf8" fontSize="6.5" fontWeight="black" textAnchor="middle" className="uppercase tracking-widest font-mono animate-pulse">ROOT</text>
+                          <text x="100" y="109" fill="#ffffff" fontSize="10" fontWeight="black" fontFamily="monospace" textAnchor="middle">{root}</text>
+                        </svg>
+                      </div>
+
+                      {/* Educational Explanation Box */}
+                      <div className="flex-1 space-y-3.5 text-[11px] leading-relaxed text-gray-300">
+                        <div>
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-[10px] font-bold text-amber-400 bg-amber-400/10 border border-amber-400/20 px-1.5 py-0.5 rounded uppercase font-mono">How It Applies</span>
+                            {relMinor && (
+                              <span className="text-[10px] font-bold text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded uppercase font-mono">
+                                Relative: {relMinor}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-indigo-200/90 italic font-medium leading-snug">
+                            The Circle of Fifths maps how keys and chords resolve. For the active root chord <span className="font-mono font-bold text-white bg-indigo-500/20 border border-indigo-500/30 px-1.5 py-0.2 rounded">{root}</span>, its neighboring pillars represent the ultimate harmonic resolution pathways.
+                          </p>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 pt-1">
+                          <div className="space-y-1">
+                            <span className="text-[9px] font-black uppercase text-amber-400 tracking-wider block">🎹 Chords & Resolution</span>
+                            <p className="text-gray-400 text-[10px] leading-normal">
+                              Chords resolve perfectly clockwise. Moving from <span className="font-mono text-white">{root}</span> to its clockwise neighbor <span className="font-bold text-sky-400 font-mono">{clockwiseNeighbor}</span> (Perfect 5th/V) creates natural forward pull, while moving to <span className="font-bold text-emerald-400 font-mono">{counterClockwiseNeighbor}</span> (Perfect 4th/IV) builds an ambient, floaty "subdominant lift".
+                            </p>
+                          </div>
+                          
+                          <div className="space-y-1">
+                            <span className="text-[9px] font-black uppercase text-amber-400 tracking-wider block">🎵 Scales & Soloing</span>
+                            <p className="text-gray-400 text-[10px] leading-normal">
+                              Keys next to each other on the circle differ by exactly one accidental. Since <span className="font-mono text-white">{root}</span> shares 6 of its 7 scale notes with <span className="font-mono text-sky-400">{clockwiseNeighbor}</span> and <span className="font-mono text-emerald-400">{counterClockwiseNeighbor}</span>, melody lines and lead licks flow seamlessly over these scale changes.
+                            </p>
+                          </div>
+
+                          <div className="space-y-1">
+                            <span className="text-[9px] font-black uppercase text-amber-400 tracking-wider block">🎸 Melodic Figures</span>
+                            <p className="text-gray-400 text-[10px] leading-normal">
+                              Most memorable hooks are built on fifth/fourth intervals. Leveraging these neighbor notes creates powerful melodic anchors that align perfectly with natural string resonance on your instrument, preventing chaotic or muddy sound.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
             </>
           )}
         </div>
@@ -1852,7 +2042,7 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                             .filter(m => m !== -1);
                           audioSynth.playMidiNotes(midiNotes, 'chord', 'guitar');
                         }}
-                        className="absolute top-3 right-3 text-indigo-400 hover:text-emerald-400 transition-all p-1 z-10 hover:scale-110 active:scale-90"
+                        className="absolute top-2 right-2 text-indigo-400 hover:text-emerald-400 transition-all p-2.5 z-10 hover:scale-110 active:scale-90 bg-black/40 hover:bg-black/60 rounded-full"
                         title="🔊 Listen to this Shape"
                       >
                         <svg className="w-4.5 h-4.5 drop-shadow-md" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1868,7 +2058,7 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                             .filter((d): d is any => d !== null);
                           handleOpenHelpDetail(`${selectedSubChord} Guitar Shape`, 'guitar', 'chord', mappedDots);
                         }}
-                        className="absolute top-3 left-3 animate-bulb text-amber-400 hover:text-amber-300 transition-all p-1 z-10 scale-105 active:scale-95"
+                        className="absolute top-2 left-2 animate-bulb text-amber-400 hover:text-amber-300 transition-all p-2.5 z-10 scale-105 active:scale-95 bg-black/40 hover:bg-black/60 rounded-full"
                         title="💡 Learn Chord/Scale Secrets"
                       >
                         <svg className="w-4.5 h-4.5 drop-shadow-md" fill="none" stroke="currentColor" viewBox="0 0 24 24">

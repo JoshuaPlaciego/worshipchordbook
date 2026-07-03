@@ -9,6 +9,7 @@ interface SetlistSelectorDialogProps {
   onAddSongToSet: (setName: string) => Promise<void>;
   onRemoveSongFromSet: (setName: string, songId: string) => Promise<void>;
   onCreateNewSetlist: (setName: string) => Promise<void>;
+  isAdmin: boolean;
 }
 
 export default function SetlistSelectorDialog({
@@ -19,6 +20,7 @@ export default function SetlistSelectorDialog({
   onAddSongToSet,
   onRemoveSongFromSet,
   onCreateNewSetlist,
+  isAdmin,
 }: SetlistSelectorDialogProps) {
   const [newSetName, setNewSetName] = useState('');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -36,6 +38,15 @@ export default function SetlistSelectorDialog({
       const parsed = JSON.parse(folder.RoadmapJSON);
       const songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
       return songIds.some((id: string) => String(id) === String(currentSong.SongID));
+    } catch {
+      return false;
+    }
+  };
+
+  const getIsSetlistLocked = (folder: any) => {
+    try {
+      const parsed = JSON.parse(folder.RoadmapJSON);
+      return !!parsed.locked;
     } catch {
       return false;
     }
@@ -137,6 +148,8 @@ export default function SetlistSelectorDialog({
           ) : (
             folders.map((folder) => {
               const hasSong = getIsSongInSet(folder);
+              const isLocked = getIsSetlistLocked(folder);
+              const isLockedForUser = isLocked && !isAdmin;
               const isLoading = actionLoading === `add_${folder.PresetName}` || actionLoading === `remove_${folder.PresetName}`;
 
               return (
@@ -152,14 +165,26 @@ export default function SetlistSelectorDialog({
                     <div className="text-xs font-bold text-white truncate flex items-center gap-1.5">
                       <span className={hasSong ? 'text-violet-400' : 'text-indigo-400'}>📁</span>
                       <span className="truncate">{folder.PresetName}</span>
+                      {isLocked && (
+                        <span className="text-[10px]" title="Setlist Locked by Admin">🔒</span>
+                      )}
                     </div>
                     <div className="text-[9px] text-gray-500 mt-0.5">
-                      {hasSong ? 'Captured Arrangement Saved' : 'Not in this setlist'}
+                      {isLockedForUser
+                        ? 'Locked by Admin'
+                        : hasSong
+                          ? 'Captured Arrangement Saved'
+                          : 'Not in this setlist'
+                      }
                     </div>
                   </div>
 
                   <div className="flex items-center gap-1 flex-shrink-0">
-                    {removeConfirmSet === folder.PresetName ? (
+                    {isLockedForUser ? (
+                      <span className="text-[9px] bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded-lg text-amber-400 font-extrabold select-none flex items-center gap-1">
+                        🔒 LOCKED
+                      </span>
+                    ) : removeConfirmSet === folder.PresetName ? (
                       <div className="flex items-center gap-1.5 bg-rose-500/10 border border-rose-500/30 px-1.5 py-0.5 rounded-lg animate-fadeIn">
                         <span className="text-[9px] text-rose-300 font-bold select-none">Remove?</span>
                         <button

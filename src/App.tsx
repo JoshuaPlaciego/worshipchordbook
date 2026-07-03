@@ -284,7 +284,7 @@ export default function App() {
   const [roadmapBackup, setRoadmapBackup] = useState<RoadmapBlock[] | null>(null);
   const [nameBackup, setNameBackup] = useState<string>('');
   const [currentArrangementName, setCurrentArrangementName] = useState<string>('');
-  const [expandedArrangementDates, setExpandedArrangementDates] = useState<{ [dateStr: string]: boolean }>({});
+  const [expandedArrangementSetlists, setExpandedArrangementSetlists] = useState<{ [setName: string]: boolean }>({});
   const [syncedSheetArrangements, setSyncedSheetArrangements] = useState<any[]>([]);
   const [cloudArrangementUpdateNotice, setCloudArrangementUpdateNotice] = useState<{
     name: string;
@@ -795,6 +795,104 @@ export default function App() {
     }, 3800);
   };
 
+  const applyLocalSongsAndOverrides = (baseSongs: Song[]): Song[] => {
+    const list = [...baseSongs];
+    
+    // 1. Blend in local custom songs
+    try {
+      const localSongsRaw = localStorage.getItem('local_custom_songs');
+      if (localSongsRaw) {
+        const localSongs = JSON.parse(localSongsRaw);
+        if (Array.isArray(localSongs)) {
+          localSongs.forEach((ls) => {
+            if (!list.some((s) => String(s.SongID) === String(ls.SongID))) {
+              list.push(ls);
+            }
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Error applying local custom songs:', e);
+    }
+
+    // 2. Apply metadata overrides to each song in list
+    list.forEach((s, idx) => {
+      try {
+        const overrideRaw = localStorage.getItem(`local_song_override_${s.SongID}`);
+        if (overrideRaw) {
+          const override = JSON.parse(overrideRaw);
+          list[idx] = {
+            ...s,
+            Title: override.Title || override.title || s.Title,
+            Artist: override.Artist || override.artist || s.Artist,
+            OriginalKey: override.OriginalKey || override.key || s.OriginalKey,
+            Version: override.Version || override.version || s.Version,
+          };
+        }
+      } catch (e) {
+        console.warn('Error applying local song override:', e);
+      }
+    });
+
+    return list;
+  };
+
+  const getUsedSectionNames = (): string[] => {
+    const names = new Set<string>();
+
+    // 1. From active roadmap
+    if (activeRoadmap) {
+      activeRoadmap.forEach((block) => {
+        if (block.name) {
+          names.add(block.name.trim().toLowerCase());
+        }
+      });
+    }
+
+    // 2. From syncedSheetArrangements
+    if (syncedSheetArrangements) {
+      syncedSheetArrangements.forEach((arr) => {
+        try {
+          const parsed = JSON.parse(arr.RoadmapJSON);
+          if (parsed) {
+            const blocks = parsed.roadmap || parsed;
+            if (Array.isArray(blocks)) {
+              blocks.forEach((block: any) => {
+                if (block && block.name) {
+                  names.add(block.name.trim().toLowerCase());
+                }
+              });
+            }
+          }
+        } catch {}
+      });
+    }
+
+    // 3. From local arrangements
+    if (currentSong) {
+      try {
+        const local = localStorage.getItem(`custom_arrangements_${currentSong.SongID}`);
+        if (local) {
+          const localObj = JSON.parse(local);
+          Object.values(localObj).forEach((parsed: any) => {
+            if (parsed) {
+              const blocks = parsed.roadmap || parsed;
+              if (Array.isArray(blocks)) {
+                blocks.forEach((block: any) => {
+                  if (block && block.name) {
+                    names.add(block.name.trim().toLowerCase());
+                  }
+                });
+              }
+            }
+          });
+        }
+      } catch {}
+    }
+
+    return Array.from(names);
+  };
+
   // Fetch initial catalog
   const fetchCatalog = async () => {
     // Initialize arrangements and setlists from cache immediately on fetch start
@@ -936,7 +1034,7 @@ export default function App() {
           combinedSongs.push(fs);
         }
       });
-      setSongs(combinedSongs);
+      setSongs(applyLocalSongsAndOverrides(combinedSongs));
     } catch (e: any) {
       console.warn('Failed connecting to database catalog, using cached / offline fallback', e);
       setIsOfflineMode(true);
@@ -954,7 +1052,7 @@ export default function App() {
           combinedSongs.push(fs);
         }
       });
-      setSongs(combinedSongs);
+      setSongs(applyLocalSongsAndOverrides(combinedSongs));
       showToast('Loaded offline cached catalog', 'success');
     } finally {
       setIsLoading(false);
@@ -1336,6 +1434,16 @@ export default function App() {
     return () => clearInterval(syncInterval);
   }, [currentSong, currentArrangementName, activeRoadmap, currentKey]);
 
+  // Automatically expand active setlist folder when arranger/arrangement panel is opened
+  useEffect(() => {
+    if (arrangerOpen && activeSetlistFolder) {
+      setExpandedArrangementSetlists((prev) => ({
+        ...prev,
+        [activeSetlistFolder]: true,
+      }));
+    }
+  }, [arrangerOpen, activeSetlistFolder]);
+
   // Change active selected song (actual loading execution)
   const executeSongLoad = async (
     song: Song,
@@ -1491,11 +1599,49 @@ export default function App() {
         }
       }
 
-      setSongLines(filteredLines);
+      const localSongLinesKey = `local_song_lines_${song.SongID}`;
+      const localLinesRaw = localStorage.getItem(localSongLinesKey);
+      if (localLinesRaw) {
+        try {
+          const parsedLocal = JSON.parse(localLinesRaw);
+          if (Array.isArray(parsedLocal) && parsedLocal.length > 0) {
+            filteredLines = parsedLocal;
+          }
+        } catch (e) {
+          console.warn('Error reading local song lines override:', e);
+        }
+      }
+
+      // Normalize and sort song lines (both from sheet and fallback)
+      const normalizedLines = filteredLines.map((l, index) => {
+        const chordsVal = l.Chords !== undefined ? l.Chords : ((l as any).chords !== undefined ? (l as any).chords : '');
+        const lyricsVal = l.Lyrics !== undefined ? l.Lyrics : ((l as any).lyrics !== undefined ? (l as any).lyrics : '');
+        const sectionVal = l.SectionName || l.Section || (l as any).section || 'Section';
+        const orderVal = l.Order !== undefined && (l.Order as any) !== '' ? Number(l.Order) : ((l as any).order !== undefined && (l as any).order !== '' ? Number((l as any).order) : index + 1);
+        
+        return {
+          ...l,
+          SongID: String(l.SongID),
+          SectionName: sectionVal,
+          Section: sectionVal,
+          section: sectionVal,
+          Order: orderVal,
+          order: orderVal,
+          Chords: chordsVal,
+          chords: chordsVal,
+          Lyrics: lyricsVal,
+          lyrics: lyricsVal
+        };
+      });
+
+      // Sort normalized lines by order
+      normalizedLines.sort((a, b) => a.Order - b.Order);
+
+      setSongLines(normalizedLines);
 
       // Initialize Performance Arrangement Roadmap
       const templates: { [key: string]: SongLine[] } = {};
-      filteredLines.forEach((l) => {
+      normalizedLines.forEach((l) => {
         const secName = l.SectionName || l.Section || l.section || 'Section';
         if (!templates[secName]) {
           templates[secName] = [];
@@ -1509,7 +1655,7 @@ export default function App() {
       let lastSec = '';
       let blockIdCounter = 0;
 
-      filteredLines.forEach((l) => {
+      normalizedLines.forEach((l) => {
         const secName = l.SectionName || l.Section || l.section || 'Section';
         if (secName !== lastSec) {
           const lineIndices = Array.from(
@@ -1527,7 +1673,6 @@ export default function App() {
           lastSec = secName;
         }
       });
-
       // Restore captured arrangement/roadmap if present in active setlist or captured settings
       let loadedCustomRoadmap = false;
       const activeFolder = activeFolderOverride !== undefined ? activeFolderOverride : activeSetlistFolder;
@@ -2021,9 +2166,28 @@ export default function App() {
   };
 
   const loadPresetArrangement = (name: string) => {
-    const presets = getPresets();
-    if (presets[name]) {
-      const presetData = presets[name];
+    let presetData: any = null;
+    let found = false;
+
+    if (name.startsWith('Set: ')) {
+      const match = syncedSheetArrangements.find((p) => p.PresetName === name);
+      if (match) {
+        try {
+          presetData = JSON.parse(match.RoadmapJSON);
+          found = true;
+        } catch {}
+      }
+    }
+
+    if (!found) {
+      const presets = getPresets();
+      if (presets[name]) {
+        presetData = presets[name];
+        found = true;
+      }
+    }
+
+    if (found && presetData) {
       const isObject = presetData && typeof presetData === 'object' && !Array.isArray(presetData);
       const blocksArray = isObject ? (presetData.roadmap || []) : presetData;
 
@@ -2033,22 +2197,31 @@ export default function App() {
       }
 
       setActiveRoadmap(
-        blocksArray.map((b: any) => ({
-          id: b.id,
-          name: b.name,
-          enabledLines: [...(b.enabledLines || [])],
+        blocksArray.map((b: any, idx: number) => ({
+          id: b.id || `block-${idx}`,
+          name: b.name || 'Section',
+          enabledLines: b.enabledLines ? [...b.enabledLines] : [],
           keyOffset: b.keyOffset || 0,
         }))
       );
       
       if (isObject && presetData.key) {
         setCurrentKey(presetData.key);
+      } else {
+        setCurrentKey(currentSong?.OriginalKey || 'C');
       }
 
       setEditingBlockId(null);
       setIsArrangementLocked(true);
-      setCurrentArrangementName(name);
-      showToast(`Loaded arrangement: ${name}. It is locked.`, 'success');
+
+      let friendlyName = name;
+      if (name.startsWith('Set: ')) {
+        friendlyName = (isObject && presetData.arrangementName) ? presetData.arrangementName : 'Custom Arrangement';
+      }
+      setCurrentArrangementName(friendlyName);
+      showToast(`Loaded arrangement: ${friendlyName}. It is locked.`, 'success');
+    } else {
+      showToast(`Could not find arrangement preset: ${name}`, 'error');
     }
   };
 
@@ -2272,6 +2445,9 @@ export default function App() {
   };
 
   const savePresetArrangement = async () => {
+    const isLockedSetlist = activeSetlistFolder && isSetlistLocked(activeSetlistFolder);
+    const isLockedSetlistViewer = isLockedSetlist && !(appUser && appSecret);
+    
     let name = currentArrangementName.trim().toUpperCase();
     if (!name) {
       showToast('Please enter an arrangement preset name first', 'error');
@@ -2286,21 +2462,11 @@ export default function App() {
       name = name.slice(5);
     }
     
-    // Clean up any existing date suffix from the name before appending the new one
+    // Clean up any existing date suffix from the name
     const { baseName } = parsePresetDate(name);
     const enteredBaseName = baseName.toUpperCase();
 
-    const months = [
-      'JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
-      'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'
-    ];
-    const d = new Date();
-    const monthName = months[d.getMonth()];
-    const day = String(d.getDate()).padStart(2, '0');
-    const year = String(d.getFullYear()).slice(-2);
-    const dateStr = `${monthName}-${day}-${year}`;
-
-    const newFullName = `${enteredBaseName} (${dateStr})`;
+    const newFullName = enteredBaseName;
 
     const presets = getPresets();
     
@@ -2352,6 +2518,10 @@ export default function App() {
   };
 
   const deletePresetArrangement = async (name: string, isCurrentlyActive: boolean) => {
+    if (activeSetlistFolder && isSetlistLocked(activeSetlistFolder) && !(appUser && appSecret)) {
+      showToast('This setlist is locked by an admin. Deleting arrangements is disabled.', 'error');
+      return;
+    }
     setIsLoading(true);
     const { baseName } = parsePresetDate(name);
     try {
@@ -3449,7 +3619,7 @@ export default function App() {
         </div>
 
         <div style="margin-bottom: 24px; font-size: 12px; line-height: 1.6; color: #334155;">
-          <p style="font-size: 13px; font-weight: bold; color: #0f172a; margin-bottom: 6px;">Welcome to Worship Chordbook - ChordSheet Live Flow!</p>
+          <p style="font-size: 13px; font-weight: bold; color: #0f172a; margin-bottom: 6px;">Welcome to worshipchordbook - ChordSheet Live Flow!</p>
           <p>This manual provides complete documentation on operating, configuring, and installing this interactive digital music stand. ChordSheet Live Flow is designed for live stage musicians, worship leaders, and music directors seeking dynamic transposing, automatic scrolling, setlist mapping, and robust offline capability.</p>
         </div>
 
@@ -3638,7 +3808,8 @@ export default function App() {
       {/* Header Sticky Ingress */}
       <header
         id="stageHeader"
-        className="sticky top-0 bg-[#0f111a]/80 backdrop-blur-xl py-2 px-3 sm:px-4 z-[80] flex items-center justify-between shadow-[0_4px_30px_rgba(0,0,0,0.5)] border-b border-white/5 transition-all duration-150"
+        className="sticky top-0 bg-[#0f111a]/80 backdrop-blur-xl pb-2 px-3 sm:px-4 z-[80] flex items-center justify-between shadow-[0_4px_30px_rgba(0,0,0,0.5)] border-b border-white/5 transition-all duration-150"
+        style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 8px)' }}
       >
         <div className="flex items-center gap-2 sm:gap-3">
           <button
@@ -3668,9 +3839,35 @@ export default function App() {
               />
             </svg>
           </button>
-          <h1 className="text-sm sm:text-base font-bold tracking-wide text-transparent bg-clip-text bg-gradient-to-r from-indigo-300 to-white select-none truncate max-w-[160px] sm:max-w-none drop-shadow-sm">
-            Worship Chordbook
-          </h1>
+          <div className="flex items-center gap-1.5 select-none">
+            <svg
+              className="w-5 h-5 drop-shadow-[0_2px_4px_rgba(99,102,241,0.5)] flex-shrink-0 animate-pulse"
+              viewBox="0 0 120 120"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <defs>
+                <linearGradient id="header-music-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#818cf8" />
+                  <stop offset="100%" stopColor="#312e81" />
+                </linearGradient>
+              </defs>
+              <rect x="10" y="10" width="100" height="100" rx="30" fill="url(#header-music-grad)" />
+              <path
+                d="M45 80 v-40 l35 -10 v40"
+                fill="none"
+                stroke="#ffffff"
+                strokeWidth="8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <circle cx="35" cy="80" r="12" fill="#ffffff" />
+              <circle cx="70" cy="70" r="12" fill="#ffffff" />
+            </svg>
+            <h1 className="text-sm sm:text-base font-bold tracking-wide text-transparent bg-clip-text bg-gradient-to-r from-indigo-300 to-white select-none truncate max-w-[140px] sm:max-w-none drop-shadow-sm lowercase">
+              worshipchordbook
+            </h1>
+          </div>
         </div>
 
         <div className="flex items-center gap-1.5">
@@ -3761,7 +3958,7 @@ export default function App() {
               <h2 className="text-3xl sm:text-5xl font-extrabold tracking-tight text-white select-none leading-tight">
                 Welcome to <br className="hidden sm:block" />
                 <span className="text-shimmer drop-shadow-[0_2px_10px_rgba(139,92,246,0.3)]">
-                  Worship Chordbook
+                  worshipchordbook
                 </span>
               </h2>
             </div>
@@ -3950,6 +4147,12 @@ export default function App() {
                     {activeSetlistFolder ? (
                       <div className="flex items-center gap-1 bg-violet-500/15 border border-violet-500/30 text-violet-300 px-2.5 py-0.5 rounded-lg text-[9px] font-black tracking-wider uppercase select-none shadow-[0_0_10px_rgba(139,92,246,0.15)] animate-fadeIn">
                         <span>📂 Setlist: {activeSetlistFolder}</span>
+                        {isSetlistLocked(activeSetlistFolder) && (
+                          <span className="text-amber-400 font-extrabold ml-1.5 flex items-center gap-0.5" title="Setlist Locked by Admin">
+                            <span>🔒</span>
+                            <span className="text-[8px] tracking-normal font-bold">LOCKED</span>
+                          </span>
+                        )}
                         <button
                           onClick={() => {
                             setActiveSetlistFolder('');
@@ -4036,17 +4239,16 @@ export default function App() {
                     <span>📄</span>
                     <span>PDF</span>
                   </button>
-                  {appUser && appSecret && (
-                    <button
-                      onClick={() => {
-                        setFormEditingSong(currentSong);
-                        setIsFormModalOpen(true);
-                      }}
-                      className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black btn-5d-primary text-white flex items-center gap-1 transition-all active:scale-95 cursor-pointer uppercase tracking-wider border border-indigo-500/30"
-                    >
-                      <span>✏️ Edit</span>
-                    </button>
-                  )}
+                  <button
+                    onClick={() => {
+                      setFormEditingSong(currentSong);
+                      setIsFormModalOpen(true);
+                    }}
+                    className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black btn-5d text-indigo-300 hover:text-white flex items-center gap-1 transition-all active:scale-95 cursor-pointer uppercase tracking-wider border border-indigo-500/30 bg-indigo-500/5 hover:bg-indigo-500/10"
+                    title={appUser && appSecret ? "Edit Song (Admin Mode - Synced with Spreadsheet)" : "Edit Song (Viewer Mode - Changes saved to your browser)"}
+                  >
+                    <span>✏️ Edit</span>
+                  </button>
 
                   {/* Setlist Navigation (Prev / Next transition) */}
                   {(() => {
@@ -4122,20 +4324,109 @@ export default function App() {
                                 <span>☁️</span> Cloud Sync
                               </button>
                             </div>
-                            <div className="space-y-2 overflow-y-auto max-h-[160px] pr-1 custom-scrollbar">
+                            <div className="space-y-2 overflow-y-auto max-h-[280px] pr-1 custom-scrollbar">
                               {(() => {
-                                const presets = getPresets();
-                                const groupedPresets: { [dateStr: string]: { originalName: string; baseName: string }[] } = {};
-                                
-                                Object.keys(presets).forEach((originalName) => {
-                                  const { baseName, dateStr } = parsePresetDate(originalName);
-                                  if (!groupedPresets[dateStr]) {
-                                    groupedPresets[dateStr] = [];
+                                // Grouping helper
+                                const groups: { [folderName: string]: { originalName: string; displayName: string; roadmap: any; isSetlist: boolean; isDefault?: boolean }[] } = {};
+
+                                // Initialize all folders from allSharedSetlists to guarantee they appear
+                                allSharedSetlists.forEach((sl) => {
+                                  const folderName = sl.PresetName;
+                                  if (folderName) {
+                                    groups[folderName] = [];
                                   }
-                                  groupedPresets[dateStr].push({ originalName, baseName });
                                 });
 
-                                if (Object.keys(presets).length === 0) {
+                                // Process synced sheet arrangements
+                                syncedSheetArrangements.forEach((p) => {
+                                  if (!p.PresetName) return;
+
+                                  if (p.PresetName.startsWith('Set: ')) {
+                                    const folderName = p.PresetName.slice(5);
+                                    if (!groups[folderName]) {
+                                      groups[folderName] = [];
+                                    }
+                                    let displayName = 'Custom Arrangement';
+                                    let roadmapData = null;
+                                    try {
+                                      const parsed = JSON.parse(p.RoadmapJSON);
+                                      if (parsed) {
+                                        roadmapData = parsed.roadmap || parsed;
+                                        if (parsed.arrangementName) {
+                                          displayName = parsed.arrangementName;
+                                        }
+                                      }
+                                    } catch {}
+                                    groups[folderName].push({
+                                      originalName: p.PresetName,
+                                      displayName: displayName,
+                                      roadmap: roadmapData,
+                                      isSetlist: true,
+                                    });
+                                  } else {
+                                    const folderName = 'General Presets';
+                                    if (!groups[folderName]) {
+                                      groups[folderName] = [];
+                                    }
+                                    let roadmapData = null;
+                                    try {
+                                      roadmapData = JSON.parse(p.RoadmapJSON);
+                                    } catch {}
+                                    groups[folderName].push({
+                                      originalName: p.PresetName,
+                                      displayName: p.PresetName,
+                                      roadmap: roadmapData,
+                                      isSetlist: false,
+                                    });
+                                  }
+                                });
+
+                                // Add local generic arrangements
+                                try {
+                                  const local = localStorage.getItem(`custom_arrangements_${currentSong?.SongID}`);
+                                  if (local) {
+                                    const localObj = JSON.parse(local);
+                                    Object.keys(localObj).forEach((k) => {
+                                      if (k.startsWith('Set: ')) return;
+                                      const folderName = 'General Presets';
+                                      if (!groups[folderName]) {
+                                        groups[folderName] = [];
+                                      }
+                                      const alreadyExists = groups[folderName].some(
+                                        (item) => item.originalName.toLowerCase().trim() === k.toLowerCase().trim()
+                                      );
+                                      if (!alreadyExists) {
+                                        groups[folderName].push({
+                                          originalName: k,
+                                          displayName: k,
+                                          roadmap: localObj[k],
+                                          isSetlist: false,
+                                        });
+                                      }
+                                    });
+                                  }
+                                } catch {}
+
+                                // Ensure Default Flow for empty setlist folders
+                                Object.keys(groups).forEach((folderName) => {
+                                  if (folderName !== 'General Presets' && groups[folderName].length === 0) {
+                                    groups[folderName].push({
+                                      originalName: `Set: ${folderName}`,
+                                      displayName: 'Default Flow',
+                                      roadmap: null,
+                                      isSetlist: true,
+                                      isDefault: true,
+                                    });
+                                  }
+                                });
+
+                                const folderNames = Object.keys(groups).sort((a, b) => {
+                                  if (a === 'General Presets') return -1;
+                                  if (b === 'General Presets') return 1;
+                                  return a.localeCompare(b);
+                                });
+
+                                if (folderNames.length === 0) {
                                   return (
                                     <div className="text-[9px] text-gray-500 italic py-2 text-center">
                                       No arrangements saved yet...
@@ -4143,41 +4434,74 @@ export default function App() {
                                   );
                                 }
 
-                                return Object.keys(groupedPresets).map((dateStr) => {
-                                  const items = groupedPresets[dateStr];
-                                  const isExpanded = expandedArrangementDates[dateStr] !== false;
+                                return folderNames.map((folderName) => {
+                                  const items = groups[folderName];
+                                  const isExpanded = expandedArrangementSetlists[folderName] !== undefined
+                                    ? expandedArrangementSetlists[folderName]
+                                    : (folderName === 'General Presets' || folderName === activeSetlistFolder);
+
                                   return (
-                                    <div key={dateStr} className="space-y-1">
-                                      {/* Collapsible Date Header */}
+                                    <div key={folderName} className="space-y-1 border-b border-white/5 pb-1 last:border-0 last:pb-0">
+                                      {/* Collapsible Folder Header */}
                                       <button
                                         onClick={() => {
-                                          setExpandedArrangementDates(prev => ({
+                                          setExpandedArrangementSetlists(prev => ({
                                             ...prev,
-                                            [dateStr]: !isExpanded
+                                            [folderName]: !isExpanded
                                           }));
                                         }}
-                                        className="w-full flex items-center justify-between py-1 px-2 bg-indigo-500/10 hover:bg-indigo-500/20 rounded-lg text-[8px] font-black uppercase tracking-wider text-indigo-300 border border-indigo-500/10 transition-all cursor-pointer"
+                                        className={`w-full flex items-center justify-between py-1 px-2 rounded-lg text-[8px] font-black uppercase tracking-wider border transition-all cursor-pointer ${
+                                          folderName === activeSetlistFolder 
+                                            ? 'bg-indigo-500/20 text-indigo-200 border-indigo-500/30' 
+                                            : 'bg-white/5 text-gray-400 border-white/5 hover:bg-white/10'
+                                        }`}
                                       >
                                         <div className="flex items-center gap-1 min-w-0">
-                                          <span className="shrink-0 text-[10px]">📅</span>
-                                          <span className="truncate">{dateStr}</span>
-                                          <span className="text-[7.5px] text-indigo-400/80 font-mono">({items.length})</span>
+                                          <span className="shrink-0 text-[10px]">
+                                            {folderName === 'General Presets' ? '📂' : '📁'}
+                                          </span>
+                                          <span className="truncate">{folderName}</span>
+                                          {isSetlistLocked(folderName) && (
+                                            <span className="shrink-0 text-amber-400 text-[8px]" title="Locked by Admin">🔒</span>
+                                          )}
+                                          <span className="text-[7px] opacity-60 font-mono">({items.length})</span>
                                         </div>
-                                        <span className="text-[7px] text-indigo-400 font-bold">
+                                        <span className="text-[7px] font-bold">
                                           {isExpanded ? '▼' : '▶'}
                                         </span>
                                       </button>
 
-                                      {/* List of arrangements under this date */}
+                                      {/* List of arrangements under this folder */}
                                       {isExpanded && (
-                                        <div className="pl-1 space-y-1 animate-fadeIn">
-                                          {items.map(({ originalName, baseName }) => {
-                                            const isActive = currentArrangementName === originalName || 
-                                                             currentArrangementName === baseName ||
-                                                             getPresetInputDisplayName(currentArrangementName) === baseName;
+                                        <div className="pl-1.5 space-y-1 animate-fadeIn pt-0.5">
+                                          {items.map((item) => {
+                                            // Determine active status
+                                            let isActive = false;
+                                            if (item.isDefault) {
+                                              isActive = !currentArrangementName || currentArrangementName === '';
+                                            } else if (activeSetlistFolder && folderName === activeSetlistFolder) {
+                                              if (item.isSetlist) {
+                                                const nameMatches = currentArrangementName === item.displayName || 
+                                                                    currentArrangementName === item.originalName ||
+                                                                    getPresetInputDisplayName(currentArrangementName) === item.displayName;
+                                                const roadmapMatches = item.roadmap && areRoadmapsIdentical(item.roadmap, activeRoadmap);
+                                                isActive = nameMatches || roadmapMatches;
+                                              }
+                                            } else if (!activeSetlistFolder && folderName === 'General Presets') {
+                                              isActive = currentArrangementName === item.originalName ||
+                                                         currentArrangementName === item.displayName ||
+                                                         getPresetInputDisplayName(currentArrangementName) === item.displayName ||
+                                                         (item.roadmap && areRoadmapsIdentical(item.roadmap, activeRoadmap));
+                                            } else {
+                                              isActive = !!item.roadmap && areRoadmapsIdentical(item.roadmap, activeRoadmap);
+                                            }
+
+                                            const isLocked = isSetlistLocked(folderName);
+                                            const isLockedForUser = isLocked && !(appUser && appSecret);
+
                                             return (
                                               <div
-                                                key={originalName}
+                                                key={item.originalName}
                                                 className={`flex items-center justify-between p-1.5 rounded-xl border transition-all text-[10px] ${
                                                   isActive
                                                     ? 'bg-emerald-500/10 border-emerald-500/30 shadow-[0_0_10px_rgba(16,185,129,0.1)]'
@@ -4186,6 +4510,14 @@ export default function App() {
                                               >
                                                 <button
                                                   onClick={() => {
+                                                    if (item.isDefault) {
+                                                      if (currentSong) {
+                                                        executeSongLoad(currentSong, true);
+                                                        showToast('Restored default song flow.', 'info');
+                                                      }
+                                                      return;
+                                                    }
+
                                                     if (isActive) {
                                                       if (currentSong) {
                                                         executeSongLoad(currentSong, true);
@@ -4193,39 +4525,61 @@ export default function App() {
                                                       }
                                                     } else {
                                                       if (activeSetlistFolder && currentSong) {
-                                                        const presets = getPresets();
-                                                        const clickedPresetData = presets[originalName];
-                                                        if (clickedPresetData && areRoadmapsIdentical(clickedPresetData, activeRoadmap)) {
-                                                          setCurrentArrangementName(originalName);
-                                                          showToast(`"${baseName}" arrangement is already active for this song.`, 'info');
+                                                        if (item.isSetlist) {
+                                                          loadPresetArrangement(item.originalName);
                                                         } else {
-                                                          setPendingArrangementToLoad(originalName);
+                                                          const presets = getPresets();
+                                                          const clickedPresetData = presets[item.originalName];
+                                                          if (clickedPresetData && areRoadmapsIdentical(clickedPresetData, activeRoadmap)) {
+                                                            setCurrentArrangementName(item.originalName);
+                                                            showToast(`"${item.displayName}" arrangement is already active for this song.`, 'info');
+                                                          } else {
+                                                            setPendingArrangementToLoad(item.originalName);
+                                                          }
                                                         }
                                                       } else {
-                                                        loadPresetArrangement(originalName);
-                                                        setCurrentArrangementName(originalName);
+                                                        loadPresetArrangement(item.originalName);
                                                       }
                                                     }
                                                   }}
-                                                  className={`flex-1 text-left font-bold truncate pr-1.5 cursor-pointer text-[9px] uppercase ${
-                                                    isActive ? 'text-emerald-400' : 'text-gray-300 hover:text-white'
-                                                  }`}
-                                                  title={isActive ? 'Click to deselect / restore default flow' : `Load preset: ${originalName}`}
+                                                  className={`flex-1 text-left cursor-pointer flex items-center gap-1.5 min-w-0`}
+                                                  title={isActive ? 'Click to deselect / restore default flow' : `Load arrangement: ${item.displayName}`}
                                                 >
-                                                  {isActive ? `✓ ${baseName}` : baseName}
+                                                  {isActive ? (
+                                                    <span className="text-emerald-400 shrink-0 text-[10px]">👉</span>
+                                                  ) : (
+                                                    <span className="text-gray-500 shrink-0 text-[9px]">
+                                                      {item.isDefault ? '⚙️' : '📄'}
+                                                    </span>
+                                                  )}
+                                                  <span className={`truncate text-[9.5px] uppercase ${
+                                                    isActive 
+                                                      ? 'text-emerald-300 font-extrabold' 
+                                                      : item.isDefault 
+                                                        ? 'text-gray-400 italic font-medium' 
+                                                        : 'text-gray-300 hover:text-white font-bold'
+                                                  }`}>
+                                                    {item.displayName}
+                                                  </span>
                                                 </button>
-                                                <button
-                                                  onClick={() => {
-                                                    setDeleteArrangementConfirmation({
-                                                      name: originalName,
-                                                      isActive: isActive
-                                                    });
-                                                  }}
-                                                  className="text-rose-400/60 hover:text-rose-400 px-1.5 py-0.5 font-bold text-[10px] cursor-pointer"
-                                                  title="Delete arrangement"
-                                                >
-                                                  ✕
-                                                </button>
+
+                                                {!item.isDefault && !isLockedForUser && (
+                                                  <button
+                                                    onClick={() => {
+                                                      setDeleteArrangementConfirmation({
+                                                        name: item.originalName,
+                                                        isActive: isActive
+                                                      });
+                                                    }}
+                                                    className="text-rose-400/60 hover:text-rose-400 px-1.5 py-0.5 font-bold text-[10px] cursor-pointer shrink-0 transition-colors"
+                                                    title="Delete arrangement"
+                                                  >
+                                                    ✕
+                                                  </button>
+                                                )}
+                                                {isLockedForUser && !item.isDefault && (
+                                                  <span className="text-amber-500/60 px-1.5 py-0.5 text-[9px] shrink-0" title="Locked by Admin">🔒</span>
+                                                )}
                                               </div>
                                             );
                                           })}
@@ -4286,22 +4640,42 @@ export default function App() {
                               >
                                 Default Flow
                               </button>
-                              <button
-                                onClick={() => {
-                                  setRoadmapBackup(activeRoadmap.map(b => ({
-                                    id: b.id,
-                                    name: b.name,
-                                    enabledLines: b.enabledLines ? [...b.enabledLines] : [],
-                                    keyOffset: b.keyOffset || 0
-                                  })));
-                                  setNameBackup(currentArrangementName);
-                                  setIsArrangementLocked(false);
-                                  showToast('Arrangement is now in editing mode. Changes will be saved.', 'info');
-                                }}
-                                className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
-                              >
-                                Modify
-                              </button>
+                              {activeSetlistFolder && isSetlistLocked(activeSetlistFolder) && !(appUser && appSecret) ? (
+                                <button
+                                  onClick={() => {
+                                    setRoadmapBackup(activeRoadmap.map(b => ({
+                                      id: b.id,
+                                      name: b.name,
+                                      enabledLines: b.enabledLines ? [...b.enabledLines] : [],
+                                      keyOffset: b.keyOffset || 0
+                                    })));
+                                    setNameBackup(currentArrangementName);
+                                    setIsArrangementLocked(false);
+                                    showToast('Locked Setlist arrangement mode. Editing locally only.', 'info');
+                                  }}
+                                  className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer flex items-center gap-1"
+                                  title="Edit the active arrangement structure for your local device only"
+                                >
+                                  <span>🔒 Modify (Local Only)</span>
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    setRoadmapBackup(activeRoadmap.map(b => ({
+                                      id: b.id,
+                                      name: b.name,
+                                      enabledLines: b.enabledLines ? [...b.enabledLines] : [],
+                                      keyOffset: b.keyOffset || 0
+                                    })));
+                                    setNameBackup(currentArrangementName);
+                                    setIsArrangementLocked(false);
+                                    showToast('Arrangement is now in editing mode. Changes will be saved.', 'info');
+                                  }}
+                                  className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
+                                >
+                                  Modify
+                                </button>
+                              )}
                             </div>
                           </div>
                         ) : (
@@ -5630,6 +6004,7 @@ export default function App() {
           onAddSongToSet={saveSongToSetlist}
           onRemoveSongFromSet={removeSongFromSetlist}
           onCreateNewSetlist={createNewSetlistFolder}
+          isAdmin={!!(appUser && appSecret)}
         />
       )}
 
@@ -6131,6 +6506,11 @@ export default function App() {
                   <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-300 font-black tracking-wide rounded-xl text-center uppercase text-[11px]">
                     {getPresetInputDisplayName(saveArrangementConfirmation.name)}
                   </div>
+                  {!(appUser && appSecret) && (
+                    <div className="p-2 bg-indigo-500/15 border border-indigo-500/20 text-indigo-300 rounded-lg text-[9px] leading-relaxed select-none">
+                      💡 <strong>Tip for Viewers:</strong> To keep the default shared arrangement intact, you can cancel and enter a custom name to save as a new arrangement preset instead.
+                    </div>
+                  )}
                   <p className="text-[10.5px] text-gray-400 mt-2 font-bold">
                     Do you want to confirm?
                   </p>
@@ -6403,10 +6783,10 @@ export default function App() {
               </div>
 
               {/* Modal Main Body - Sidebar + Live Paper Preview Container */}
-              <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
+              <div className="flex-1 overflow-y-auto md:overflow-hidden flex flex-col md:flex-row">
                 
                 {/* Left/Top Column: Real-time Controls */}
-                <div className="w-full md:w-80 border-b md:border-b-0 md:border-r border-white/5 p-5 shrink-0 bg-indigo-950/15 overflow-y-auto">
+                <div className="w-full md:w-80 border-b md:border-b-0 md:border-r border-white/5 p-5 shrink-0 bg-indigo-950/15 overflow-visible md:overflow-y-auto">
                   <h3 className="text-[10px] font-black uppercase tracking-widest text-indigo-400 mb-4">
                     Print Customization
                   </h3>
@@ -6608,7 +6988,7 @@ export default function App() {
                 </div>
 
                 {/* Right Column: Interactive paper canvas */}
-                <div className="flex-1 bg-black/45 p-4 sm:p-6 overflow-y-auto flex items-start justify-center custom-scrollbar select-text">
+                <div className="flex-1 bg-black/45 p-4 sm:p-6 overflow-visible md:overflow-y-auto flex items-start justify-center custom-scrollbar select-text">
                   
                   {/* Physical A4 Sheet Container */}
                   <div className="w-full max-w-[210mm] bg-white text-slate-900 shadow-2xl rounded-lg p-6 sm:p-10 font-sans border border-slate-200 space-y-12">

@@ -13,6 +13,7 @@ interface SongEditModalProps {
   onSubmitSuccess: () => void;
   showToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
   setLoading: (loading: boolean) => void;
+  usedSectionNames?: string[];
 }
 
 export const SongEditModal: React.FC<SongEditModalProps> = ({
@@ -26,6 +27,7 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
   onSubmitSuccess,
   showToast,
   setLoading,
+  usedSectionNames = [],
 }) => {
   const [title, setTitle] = useState('');
   const [artist, setArtist] = useState('');
@@ -85,6 +87,11 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
   };
 
   const removeSection = (sIdx: number) => {
+    const sec = sections[sIdx];
+    if (sec && usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong) {
+      showToast(`Cannot delete section "${sec.name}" because it is currently used in active arrangements or setlists.`, 'error');
+      return;
+    }
     if (sections.length <= 1) return;
     const next = [...sections];
     next.splice(sIdx, 1);
@@ -306,6 +313,68 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
     }
 
     setLoading(true);
+
+    if (!appUser || !appSecret) {
+      try {
+        const songId = editingSong?.SongID || `local-song-${Date.now()}`;
+        
+        // 1. Prepare song lines format
+        const linesPayload = sections.flatMap((sec, sIdx) =>
+          sec.lines.map((l, lIdx) => ({
+            SongID: songId,
+            SectionName: sec.name,
+            Section: sec.name,
+            section: sec.name,
+            Order: lIdx + 1,
+            order: lIdx + 1,
+            Chords: l.chords,
+            chords: l.chords,
+            Lyrics: l.lyrics,
+            lyrics: l.lyrics,
+          }))
+        );
+
+        // 2. Save song lines to localStorage
+        localStorage.setItem(`local_song_lines_${songId}`, JSON.stringify(linesPayload));
+
+        // 3. Save song metadata/override to localStorage
+        const songPayload = {
+          SongID: songId,
+          Title: title.trim(),
+          Artist: artist.trim(),
+          OriginalKey: key,
+          Version: version || '1.0',
+        };
+        localStorage.setItem(`local_song_override_${songId}`, JSON.stringify(songPayload));
+
+        // 4. If creating a new song, add it to local custom songs list
+        if (!editingSong) {
+          let localCustomSongs: Song[] = [];
+          try {
+            const raw = localStorage.getItem('local_custom_songs');
+            if (raw) localCustomSongs = JSON.parse(raw);
+          } catch {}
+          
+          localCustomSongs.push(songPayload);
+          localStorage.setItem('local_custom_songs', JSON.stringify(localCustomSongs));
+        }
+
+        showToast(
+          editingSong 
+            ? 'Standalone changes saved locally to your browser!' 
+            : 'New song created locally in your browser!',
+          'success'
+        );
+        onSubmitSuccess();
+        onClose();
+      } catch (e) {
+        showToast('Error saving changes locally.', 'error');
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
     const payload = {
       user: appUser,
       secret: appSecret,
@@ -473,6 +542,15 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
         </div>
 
         <div className="overflow-y-auto flex-1 pr-1 pb-2 custom-scrollbar">
+          {!!editingSong && sections.some(sec => usedSectionNames.includes(sec.name.trim().toLowerCase())) && (
+            <div className="mb-3 p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[9.5px] rounded-lg leading-relaxed flex items-start gap-1.5 animate-fadeIn">
+              <span className="text-[11px] select-none shrink-0 mt-0.5">🔒</span>
+              <div>
+                <strong className="block uppercase tracking-wider text-[8.5px] font-black">Arrangement Safeguards Active</strong>
+                Some sections are locked because they are used in active setlists or arrangements. You can freely edit their chords and lyrics, but you cannot rename or delete them to prevent breaking roadmap sequences.
+              </div>
+            </div>
+          )}
           <div className="space-y-3 mb-2">
             {sections.map((sec, sIdx) => (
               <div
@@ -480,18 +558,37 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
                 className="bg-indigo-900/10 p-2 sm:p-3 rounded-xl shadow-[inset_0_0_20px_rgba(99,102,241,0.05)] border border-indigo-500/25 mb-2 transition-all"
               >
                 <div className="flex items-center justify-between gap-2 mb-1.5">
-                  <input
-                    type="text"
-                    placeholder="Section Name (e.g. Chorus)"
-                    value={sec.name}
-                    onChange={(e) => handleSectionNameChange(e.target.value, sIdx)}
-                    className="flex-1 bg-indigo-900/40 py-1.5 px-2.5 rounded-md outline-none focus:ring-1 focus:ring-indigo-400/60 text-[11px] font-bold uppercase tracking-wide text-indigo-100 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] border border-indigo-500/20 placeholder-indigo-300/40"
-                  />
+                  <div className="relative flex-1 flex items-center">
+                    <input
+                      type="text"
+                      placeholder="Section Name (e.g. Chorus)"
+                      value={sec.name}
+                      onChange={(e) => handleSectionNameChange(e.target.value, sIdx)}
+                      readOnly={usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong}
+                      className={`flex-1 bg-indigo-900/40 py-1.5 px-2.5 rounded-md outline-none focus:ring-1 focus:ring-indigo-400/60 text-[11px] font-bold uppercase tracking-wide text-indigo-100 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] border ${
+                        usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong
+                          ? 'border-amber-500/40 bg-amber-500/10 cursor-not-allowed pr-8 text-amber-200'
+                          : 'border-indigo-500/20'
+                      } placeholder-indigo-300/40`}
+                    />
+                    {usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong && (
+                      <span className="absolute right-2.5 text-[10px]" title="This section is locked because it is used in active arrangements or setlists.">🔒</span>
+                    )}
+                  </div>
                   {sections.length > 1 && (
                     <button
                       onClick={() => removeSection(sIdx)}
-                      className="text-rose-400/50 hover:text-rose-400 p-1.5 rounded-md hover:bg-rose-500/10 transition-colors"
-                      title="Remove entire section"
+                      disabled={usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong}
+                      className={`${
+                        usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong
+                          ? 'text-gray-600 cursor-not-allowed opacity-30 p-1.5 rounded-md'
+                          : 'text-rose-400/50 hover:text-rose-400 p-1.5 rounded-md hover:bg-rose-500/10'
+                      } transition-colors`}
+                      title={
+                        usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong
+                          ? "This section is locked because it is used in active arrangements or setlists."
+                          : "Remove entire section"
+                      }
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path

@@ -371,3 +371,69 @@ body {
   color: #4f46e5 !important;
 }
 
+/* @media print styles for pristine PDF/Print rendering */
+@media print {
+  /* Hide the main page body, sidebars, background elements, and modal controls */
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  /* Target everything in the root container and hide it */
+  #root * {
+    visibility: hidden;
+  }
+
+  /* Make only the print-document-container and its elements visible */
+  .print-document-container,
+  .print-document-container * {
+    visibility: visible;
+  }
+
+  /* Position the print container perfectly on the sheet */
+  .print-document-container {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 210mm !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: white !important;
+  }
+
+  .break-before-page {
+    page-break-before: always !important;
+    break-before: page !important;
+  }
+
+  .break-after-page {
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+
+  .print-cover-page {
+    position: relative !important;
+    height: 270mm !important;
+    box-sizing: border-box !important;
+  }
+
+  .print-song-page-preview {
+    position: relative !important;
+    min-height: 270mm !important;
+    box-sizing: border-box !important;
+    padding-bottom: 25px !important;
+  }
+
+  .print-footer {
+    position: absolute !important;
+    bottom: 5px !important;
+    left: 0 !important;
+    right: 0 !important;
+    background: transparent !important;
+  }
+}
+
+

@@ -40,6 +40,189 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
   const [keyWarning, setKeyWarning] = useState('');
   const [saveDisabled, setSaveDisabled] = useState(false);
 
+  const [isLockedByOther, setIsLockedByOther] = useState(false);
+  const [lockedByUser, setLockedByUser] = useState('');
+  const [lastTypingHeartbeat, setLastTypingHeartbeat] = useState(0);
+
+  // Mock google.script.run interface that performs fetch calls to Apps Script backend
+  const googleScriptRun = {
+    withSuccessHandler: function(onSuccess: (data: any) => void) {
+      const runMethod = (action: string, payload: any) => {
+        fetch(scriptUrl, {
+          method: 'POST',
+          body: JSON.stringify({ action, ...payload }),
+        })
+          .then((res) => res.json())
+          .then((data) => onSuccess(data))
+          .catch((err) => console.error(`Error in Apps Script action ${action}:`, err));
+      };
+      return {
+        withFailureHandler: function(onFailure: (err: any) => void) {
+          return {
+            checkLock: (lockId: string) => {
+              fetch(scriptUrl, {
+                method: 'POST',
+                body: JSON.stringify({ action: 'checkLock', lockId }),
+              })
+                .then((res) => res.json())
+                .then((data) => onSuccess(data))
+                .catch((err) => onFailure(err));
+            },
+            acquireLock: (lockId: string, username: string) => {
+              fetch(scriptUrl, {
+                method: 'POST',
+                body: JSON.stringify({ action: 'acquireLock', lockId, username }),
+              })
+                .then((res) => res.json())
+                .then((data) => onSuccess(data))
+                .catch((err) => onFailure(err));
+            },
+            releaseLock: (lockId: string, username: string) => {
+              fetch(scriptUrl, {
+                method: 'POST',
+                body: JSON.stringify({ action: 'releaseLock', lockId, username }),
+              })
+                .then((res) => res.json())
+                .then((data) => onSuccess(data))
+                .catch((err) => onFailure(err));
+            },
+            updateLockHeartbeat: (lockId: string, username: string) => {
+              fetch(scriptUrl, {
+                method: 'POST',
+                body: JSON.stringify({ action: 'updateLockHeartbeat', lockId, username }),
+              })
+                .then((res) => res.json())
+                .then((data) => onSuccess(data))
+                .catch((err) => onFailure(err));
+            }
+          };
+        },
+        checkLock: (lockId: string) => runMethod('checkLock', { lockId }),
+        acquireLock: (lockId: string, username: string) => runMethod('acquireLock', { lockId, username }),
+        releaseLock: (lockId: string, username: string) => runMethod('releaseLock', { lockId, username }),
+        updateLockHeartbeat: (lockId: string, username: string) => runMethod('updateLockHeartbeat', { lockId, username })
+      };
+    }
+  };
+
+  // Lock management: On-Load Check, release lock on unmount, active checks
+  useEffect(() => {
+    if (!isOpen || !editingSong) {
+      setIsLockedByOther(false);
+      setLockedByUser('');
+      return;
+    }
+
+    const lockId = `song_${editingSong.SongID}`;
+    const username = appUser || 'Viewer';
+
+    // On-Load Check: Fetch the lock status immediately
+    googleScriptRun.withSuccessHandler((result: any) => {
+      if (result.isLocked && result.lockedBy !== username) {
+        setIsLockedByOther(true);
+        setLockedByUser(result.lockedBy);
+        showToast(`${result.lockedBy} is currently editing this song. Please wait.`, 'info');
+      } else {
+        setIsLockedByOther(false);
+        setLockedByUser('');
+        // Acquire lock on load
+        googleScriptRun.withSuccessHandler((acquireRes: any) => {
+          if (!acquireRes.success) {
+            setIsLockedByOther(true);
+            setLockedByUser(acquireRes.lockedBy);
+            showToast(`${acquireRes.lockedBy} has locked this song for editing.`, 'error');
+          }
+        }).acquireLock(lockId, username);
+      }
+    }).checkLock(lockId);
+
+    // Release lock when modal is closed
+    return () => {
+      googleScriptRun.withSuccessHandler(() => {}).releaseLock(lockId, username);
+    };
+  }, [isOpen, editingSong, appUser]);
+
+  // Heartbeat check: lightweight 45-second heartbeat setInterval
+  useEffect(() => {
+    if (!isOpen || !editingSong) return;
+
+    const lockId = `song_${editingSong.SongID}`;
+    const username = appUser || 'Viewer';
+
+    const interval = setInterval(() => {
+      googleScriptRun.withSuccessHandler((result: any) => {
+        if (result.isLocked && result.lockedBy !== username) {
+          setIsLockedByOther(true);
+          setLockedByUser(result.lockedBy);
+          showToast(`Admin or ${result.lockedBy} is now editing this song. Please wait.`, 'error');
+        }
+      }).checkLock(lockId);
+    }, 45000);
+
+    return () => clearInterval(interval);
+  }, [isOpen, editingSong, appUser]);
+
+  // Visibility Change API: Check lock status when user returns to tab
+  useEffect(() => {
+    if (!isOpen || !editingSong) return;
+
+    const lockId = `song_${editingSong.SongID}`;
+    const username = appUser || 'Viewer';
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        googleScriptRun.withSuccessHandler((result: any) => {
+          if (result.isLocked && result.lockedBy !== username) {
+            setIsLockedByOther(true);
+            setLockedByUser(result.lockedBy);
+            showToast(`${result.lockedBy} is currently editing this song. Please wait.`, 'error');
+          } else if (!result.isLocked) {
+            googleScriptRun.withSuccessHandler(() => {}).acquireLock(lockId, username);
+          }
+        }).checkLock(lockId);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [isOpen, editingSong, appUser]);
+
+  // Silent On-Focus Check (The Secret Weapon)
+  const handleInputFocus = () => {
+    if (!editingSong) return;
+    const lockId = `song_${editingSong.SongID}`;
+    const username = appUser || 'Viewer';
+
+    googleScriptRun.withSuccessHandler((result: any) => {
+      if (result.isLocked && result.lockedBy !== username) {
+        setIsLockedByOther(true);
+        setLockedByUser(result.lockedBy);
+        showToast(`${result.lockedBy} is currently editing this song. Please wait.`, 'error');
+      }
+    }).checkLock(lockId);
+  };
+
+  // Throttled active timestamp update (every 15 seconds of typing)
+  const handleUserTyping = () => {
+    if (!editingSong) return;
+    const now = Date.now();
+    if (now - lastTypingHeartbeat > 15000) {
+      setLastTypingHeartbeat(now);
+      const lockId = `song_${editingSong.SongID}`;
+      const username = appUser || 'Viewer';
+
+      googleScriptRun.withSuccessHandler((result: any) => {
+        if (!result.success) {
+          setIsLockedByOther(true);
+          setLockedByUser(result.lockedBy);
+          showToast(`This song is now locked by ${result.lockedBy}.`, 'error');
+        }
+      }).updateLockHeartbeat(lockId, username);
+    }
+  };
+
   useEffect(() => {
     if (isOpen) {
       if (editingSong) {
@@ -314,6 +497,28 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
 
     setLoading(true);
 
+    // On-Save Check (The Safety Net)
+    if (editingSong) {
+      const lockId = `song_${editingSong.SongID}`;
+      const username = appUser || 'Viewer';
+      try {
+        const checkRes = await fetch(scriptUrl, {
+          method: 'POST',
+          body: JSON.stringify({ action: 'checkLock', lockId }),
+        });
+        const lockStatus = await checkRes.json();
+        if (lockStatus.isLocked && lockStatus.lockedBy !== username) {
+          setIsLockedByOther(true);
+          setLockedByUser(lockStatus.lockedBy);
+          showToast(`Save Aborted! This song was locked for editing by ${lockStatus.lockedBy}.`, 'error');
+          setLoading(false);
+          return;
+        }
+      } catch (err) {
+        console.warn('Final save lock check failed, proceeding with caution', err);
+      }
+    }
+
     if (!appUser || !appSecret) {
       try {
         const songId = editingSong?.SongID || `local-song-${Date.now()}`;
@@ -478,123 +683,198 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
               </svg>
             </button>
           </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <input
-              type="text"
-              placeholder="Song Title"
-              value={title}
-              onChange={(e) => {
-                setTitle(e.target.value);
-                validateForm(sections);
-              }}
-              className="col-span-2 bg-indigo-900/30 text-indigo-100 py-1.5 px-2.5 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-400/60 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] border border-indigo-500/30"
-            />
-            <input
-              type="text"
-              placeholder="Artist"
-              value={artist}
-              onChange={(e) => {
-                setArtist(e.target.value);
-                validateForm(sections);
-              }}
-              className="col-span-2 bg-indigo-900/30 text-indigo-100 py-1.5 px-2.5 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-400/60 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] border border-indigo-500/30"
-            />
-            <select
-              value={key}
-              onChange={(e) => {
-                setKey(e.target.value);
-                validateForm(sections);
-              }}
-              className="col-span-2 bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-1.5 px-2.5 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-400/60 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] border border-indigo-500/30 hover:border-indigo-400/50 transition-all appearance-none cursor-pointer"
-            >
-              {NOTES.map((k) => (
-                <option key={k} value={k} className="bg-[#0a0b16]">
-                  Key of {k}
-                </option>
-              ))}
-            </select>
-            <input
-              type="text"
-              placeholder="Version (e.g. 1.0)"
-              value={version}
-              onChange={(e) => setVersion(e.target.value)}
-              className="col-span-2 bg-indigo-900/30 text-indigo-100 py-1.5 px-2.5 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-400/60 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] border border-indigo-500/30"
-            />
-          </div>
-
-          <div className="mt-2.5 flex flex-wrap items-center gap-2">
-            <span className="text-[9px] uppercase tracking-widest font-extrabold text-indigo-400 select-none">
-              Diatonic Key Reference:
-            </span>
-            {renderFamilyChords()}
-          </div>
-
-          {keyWarning && (
-            <div className="mt-2 p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[10px] rounded-lg leading-relaxed flex items-start gap-1.5 animate-fadeIn">
-              <span className="text-xs select-none mt-0.5">⚠️</span>
-              <div>
-                <strong className="block uppercase tracking-wide text-[9px]">Key Alignment Warning</strong>
-                {keyWarning}
-              </div>
-            </div>
-          )}
         </div>
 
-        <div className="overflow-y-auto flex-1 pr-1 pb-2 custom-scrollbar">
+        {isLockedByOther && (
+          <div className="mx-4 sm:mx-6 mb-3 p-3 bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs rounded-xl flex items-center gap-2 animate-pulse shrink-0">
+            <span className="text-sm">🔒</span>
+            <p className="font-semibold">
+              {lockedByUser === 'Admin' ? 'Nai-lock na ng Admin ang setlist na ito.' : `${lockedByUser} is currently editing this song. Please wait.`}
+            </p>
+          </div>
+        )}
+
+        <div className="overflow-y-auto flex-1 pr-1 pb-4 custom-scrollbar space-y-5 px-1">
+          {/* Metadata Card */}
+          <div className="bg-[#0b0c1e]/40 border border-indigo-500/15 rounded-2xl p-4 sm:p-5 flex flex-col gap-4 shadow-sm">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5">
+              
+              {/* Song Title */}
+              <div className="col-span-2 flex flex-col gap-1.5">
+                <label className="text-[10px] font-bold text-indigo-300 uppercase tracking-widest select-none">
+                  Song Title
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Still"
+                  value={title}
+                  disabled={isLockedByOther}
+                  onFocus={handleInputFocus}
+                  onChange={(e) => {
+                    setTitle(e.target.value);
+                    validateForm(sections);
+                    handleUserTyping();
+                  }}
+                  className="bg-[#030308]/60 hover:bg-[#030308]/90 focus:bg-indigo-950/40 text-white py-2 px-3 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500/40 border border-indigo-500/15 focus:border-indigo-500/40 transition-all shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] disabled:opacity-40 disabled:cursor-not-allowed placeholder-indigo-300/25"
+                />
+              </div>
+
+              {/* Artist */}
+              <div className="col-span-2 md:col-span-1 flex flex-col gap-1.5">
+                <label className="text-[10px] font-bold text-indigo-300 uppercase tracking-widest select-none">
+                  Artist
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Hillsong"
+                  value={artist}
+                  disabled={isLockedByOther}
+                  onFocus={handleInputFocus}
+                  onChange={(e) => {
+                    setArtist(e.target.value);
+                    validateForm(sections);
+                    handleUserTyping();
+                  }}
+                  className="bg-[#030308]/60 hover:bg-[#030308]/90 focus:bg-indigo-950/40 text-white py-2 px-3 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500/40 border border-indigo-500/15 focus:border-indigo-500/40 transition-all shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] disabled:opacity-40 disabled:cursor-not-allowed placeholder-indigo-300/25"
+                />
+              </div>
+
+              {/* Version */}
+              <div className="col-span-2 md:col-span-1 flex flex-col gap-1.5">
+                <label className="text-[10px] font-bold text-indigo-300 uppercase tracking-widest select-none">
+                  Version
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. 1.0"
+                  value={version}
+                  disabled={isLockedByOther}
+                  onFocus={handleInputFocus}
+                  onChange={(e) => {
+                    setVersion(e.target.value);
+                    handleUserTyping();
+                  }}
+                  className="bg-[#030308]/60 hover:bg-[#030308]/90 focus:bg-indigo-950/40 text-white py-2 px-3 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500/40 border border-indigo-500/15 focus:border-indigo-500/40 transition-all shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] disabled:opacity-40 disabled:cursor-not-allowed placeholder-indigo-300/25"
+                />
+              </div>
+
+              {/* Original Key */}
+              <div className="col-span-2 flex flex-col gap-1.5">
+                <label className="text-[10px] font-bold text-indigo-300 uppercase tracking-widest select-none">
+                  Original Key
+                </label>
+                <div className="relative">
+                  <select
+                    value={key}
+                    disabled={isLockedByOther}
+                    onFocus={handleInputFocus}
+                    onChange={(e) => {
+                      setKey(e.target.value);
+                      validateForm(sections);
+                      handleUserTyping();
+                    }}
+                    className="w-full bg-[#030308]/60 hover:bg-[#030308]/90 focus:bg-indigo-950/40 text-white py-2 px-3 pr-8 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500/40 border border-indigo-500/15 focus:border-indigo-500/40 transition-all shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] appearance-none cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {NOTES.map((k) => (
+                      <option key={k} value={k} className="bg-[#0a0b16] text-white">
+                        Key of {k}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-indigo-400">
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
+                </div>
+              </div>
+
+              {/* Diatonic HUD inside Card */}
+              <div className="col-span-2 flex flex-col gap-1.5 bg-indigo-950/30 border border-indigo-500/10 p-2 rounded-xl">
+                <span className="text-[9px] uppercase tracking-widest font-extrabold text-indigo-400 select-none px-1">
+                  Diatonic Key HUD:
+                </span>
+                {renderFamilyChords()}
+              </div>
+
+            </div>
+
+            {keyWarning && (
+              <div className="p-3 bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[10px] rounded-xl leading-relaxed flex items-start gap-2 animate-fadeIn">
+                <span className="text-sm select-none shrink-0">⚠️</span>
+                <div>
+                  <strong className="block uppercase tracking-wider text-[8.5px] font-bold">Key Alignment Warning</strong>
+                  {keyWarning}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Arrangement safeguard box */}
           {!!editingSong && sections.some(sec => usedSectionNames.includes(sec.name.trim().toLowerCase())) && (
-            <div className="mb-3 p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[9.5px] rounded-lg leading-relaxed flex items-start gap-1.5 animate-fadeIn">
-              <span className="text-[11px] select-none shrink-0 mt-0.5">🔒</span>
+            <div className="p-3 bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[10px] rounded-xl leading-relaxed flex items-start gap-2 animate-fadeIn">
+              <span className="text-sm select-none shrink-0">🔒</span>
               <div>
                 <strong className="block uppercase tracking-wider text-[8.5px] font-black">Arrangement Safeguards Active</strong>
                 Some sections are locked because they are used in active setlists or arrangements. You can freely edit their chords and lyrics, but you cannot rename or delete them to prevent breaking roadmap sequences.
               </div>
             </div>
           )}
-          <div className="space-y-3 mb-2">
+
+          {/* Sections List */}
+          <div className="space-y-4">
             {sections.map((sec, sIdx) => (
               <div
                 key={sIdx}
-                className="bg-indigo-900/10 p-2 sm:p-3 rounded-xl shadow-[inset_0_0_20px_rgba(99,102,241,0.05)] border border-indigo-500/25 mb-2 transition-all"
+                className="bg-[#0b0c1e]/20 hover:bg-[#0b0c1e]/30 border-l-4 border-indigo-500/40 p-4 sm:p-5 rounded-r-2xl rounded-l-md shadow-sm border border-y-indigo-500/10 border-r-indigo-500/10 mb-2 transition-all flex flex-col gap-3.5"
               >
-                <div className="flex items-center justify-between gap-2 mb-1.5">
-                  <div className="relative flex-1 flex items-center">
-                    <input
-                      type="text"
-                      placeholder="Section Name (e.g. Chorus)"
-                      value={sec.name}
-                      onChange={(e) => handleSectionNameChange(e.target.value, sIdx)}
-                      readOnly={usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong}
-                      className={`flex-1 bg-indigo-900/40 py-1.5 px-2.5 rounded-md outline-none focus:ring-1 focus:ring-indigo-400/60 text-[11px] font-bold uppercase tracking-wide text-indigo-100 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] border ${
-                        usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong
-                          ? 'border-amber-500/40 bg-amber-500/10 cursor-not-allowed pr-8 text-amber-200'
-                          : 'border-indigo-500/20'
-                      } placeholder-indigo-300/40`}
-                    />
-                    {usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong && (
-                      <span className="absolute right-2.5 text-[10px]" title="This section is locked because it is used in active arrangements or setlists.">🔒</span>
-                    )}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="relative flex-1 flex flex-col gap-1.5">
+                    <span className="text-[9px] font-bold text-indigo-400 uppercase tracking-wider select-none">Section Header Name</span>
+                    <div className="relative flex items-center">
+                      <input
+                        type="text"
+                        placeholder="e.g. Chorus / Intro / Outro"
+                        value={sec.name}
+                        disabled={isLockedByOther}
+                        onFocus={handleInputFocus}
+                        onChange={(e) => {
+                          handleSectionNameChange(e.target.value, sIdx);
+                          handleUserTyping();
+                        }}
+                        readOnly={usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong}
+                        className={`w-full bg-[#030308]/60 py-2 px-3 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500/40 text-xs font-bold uppercase tracking-wider text-indigo-100 shadow-[inset_0_2px_4px_rgba(0,0,0,0.4)] border ${
+                          usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong
+                            ? 'border-amber-500/30 bg-amber-500/5 cursor-not-allowed pr-9 text-amber-200'
+                            : 'border-indigo-500/15 focus:border-indigo-500/40'
+                        } placeholder-indigo-300/20 disabled:opacity-40 disabled:cursor-not-allowed`}
+                      />
+                      {usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong && (
+                        <span className="absolute right-3 text-xs" title="This section is locked because it is used in active arrangements or setlists.">🔒</span>
+                      )}
+                    </div>
                   </div>
+                  
                   {sections.length > 1 && (
                     <button
                       onClick={() => removeSection(sIdx)}
-                      disabled={usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong}
-                      className={`${
-                        usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong
-                          ? 'text-gray-600 cursor-not-allowed opacity-30 p-1.5 rounded-md'
-                          : 'text-rose-400/50 hover:text-rose-400 p-1.5 rounded-md hover:bg-rose-500/10'
-                      } transition-colors`}
+                      disabled={isLockedByOther || (usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong)}
+                      className={`mt-5 ${
+                        (isLockedByOther || (usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong))
+                          ? 'text-gray-600 cursor-not-allowed opacity-30 p-2 rounded-xl'
+                          : 'text-rose-400/60 hover:text-rose-400 p-2 rounded-xl hover:bg-rose-500/10'
+                      } transition-all`}
                       title={
                         usedSectionNames.includes(sec.name.trim().toLowerCase()) && !!editingSong
                           ? "This section is locked because it is used in active arrangements or setlists."
                           : "Remove entire section"
                       }
                     >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path
                           strokeLinecap="round"
                           strokeLinejoin="round"
-                          strokeWidth="2"
+                          strokeWidth="2.5"
                           d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
                         />
                       </svg>
@@ -603,42 +883,61 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
                 </div>
 
                 {warnings[sIdx] && (
-                  <div className="text-[9px] text-rose-400 mb-1.5 font-semibold">
-                    {warnings[sIdx]}
+                  <div className="text-[10px] text-rose-400 font-semibold bg-rose-500/5 py-1 px-2.5 rounded-lg border border-rose-500/10">
+                    ⚠️ {warnings[sIdx]}
                   </div>
                 )}
 
-                <p className="text-[8px] text-indigo-300/60 mb-2 italic select-none">
-                  Note: Enter chords separated by spaces (e.g. <kbd className="font-mono font-bold text-indigo-300">C G</kbd> translates to <kbd className="font-mono font-bold text-indigo-300">C - G</kbd>). Use numbers 1-7 for instant diatonic mapping.
-                </p>
+                <div className="flex items-start gap-1.5 p-2 bg-[#030308]/30 rounded-xl text-[10px] text-indigo-300/60 select-none">
+                  <span className="text-indigo-400 font-bold">Pro Tip:</span>
+                  <p>
+                    Enter chords separated by spaces (e.g. <span className="font-mono font-black text-amber-400">C G</span> translates to <span className="font-mono font-black text-amber-400">C - G</span>). Use numbers <span className="font-mono font-black text-indigo-400">1-7</span> for instant diatonic chord family mapping.
+                  </p>
+                </div>
 
-                <div className="space-y-1">
+                {/* Lines inside section block */}
+                <div className="space-y-2">
                   {sec.lines.map((l, lIdx) => (
                     <div
                       key={lIdx}
-                      className="flex flex-col sm:flex-row gap-1.5 sm:gap-2 bg-indigo-950/40 p-1.5 rounded-lg border border-indigo-500/10 relative group items-start"
+                      className="flex flex-col sm:flex-row gap-2 bg-[#030308]/40 p-2 rounded-xl border border-indigo-500/5 hover:border-indigo-500/15 relative group items-start sm:items-center transition-all"
                     >
-                      <div className="w-full sm:w-[40%] flex-shrink-0">
+                      <div className="w-full sm:w-[35%] flex-shrink-0 flex flex-col gap-1">
+                        <span className="text-[8px] font-bold text-amber-500 uppercase tracking-wider select-none sm:hidden">Chords</span>
                         <textarea
                           rows={1}
-                          placeholder="Chords (e.g. A B)"
+                          placeholder="Chords (e.g. 1 5 6 4)"
                           value={l.chords}
-                          onChange={(e) => handleLineChange('chords', e.target.value, sIdx, lIdx, false)}
+                          disabled={isLockedByOther}
+                          onFocus={handleInputFocus}
+                          onChange={(e) => {
+                            handleLineChange('chords', e.target.value, sIdx, lIdx, false);
+                            handleUserTyping();
+                          }}
                           onBlur={(e) => handleLineChange('chords', e.target.value, sIdx, lIdx, true)}
-                          className="w-full bg-indigo-900/30 py-1.5 px-2 rounded outline-none focus:ring-1 focus:ring-amber-500/50 text-xs text-amber-400 font-mono shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] border border-indigo-500/25 placeholder-amber-600/30 resize-none"
+                          className="w-full bg-white py-2 px-2.5 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500/50 text-xs text-indigo-900 font-mono font-bold shadow-sm border border-indigo-300/30 focus:border-indigo-500/50 placeholder-slate-400 resize-none disabled:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
                         />
                       </div>
-                      <div className="w-full sm:w-[60%] flex gap-1.5 items-start">
-                        <textarea
-                          rows={1}
-                          placeholder="Lyrics"
-                          value={l.lyrics}
-                          onChange={(e) => handleLineChange('lyrics', e.target.value, sIdx, lIdx)}
-                          className="flex-1 bg-indigo-900/30 py-1.5 px-2 rounded outline-none focus:ring-1 focus:ring-indigo-400/60 text-xs text-gray-100 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] border border-indigo-500/25 placeholder-indigo-300/35 resize-none"
-                        />
+                      <div className="w-full sm:w-[65%] flex gap-2 items-center">
+                        <div className="flex-1 flex flex-col gap-1">
+                          <span className="text-[8px] font-bold text-indigo-400 uppercase tracking-wider select-none sm:hidden">Lyrics</span>
+                          <textarea
+                            rows={1}
+                            placeholder="Lyrics (e.g. Hide me now...)"
+                            value={l.lyrics}
+                            disabled={isLockedByOther}
+                            onFocus={handleInputFocus}
+                            onChange={(e) => {
+                              handleLineChange('lyrics', e.target.value, sIdx, lIdx);
+                              handleUserTyping();
+                            }}
+                            className="w-full bg-white py-2 px-2.5 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500/50 text-xs text-slate-800 shadow-sm border border-indigo-300/30 focus:border-indigo-500/50 placeholder-slate-400 resize-none disabled:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                          />
+                        </div>
                         <button
                           onClick={() => removeLine(sIdx, lIdx)}
-                          className="text-indigo-400/30 hover:text-rose-400 p-1 sm:opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity mt-0.5"
+                          disabled={isLockedByOther}
+                          className="text-indigo-400/40 hover:text-rose-400 p-1.5 rounded-lg hover:bg-rose-500/10 sm:opacity-0 group-hover:opacity-100 focus:opacity-100 transition-all shrink-0 mt-4 sm:mt-0 disabled:cursor-not-allowed"
                           title="Remove line"
                         >
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -650,34 +949,52 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
                   ))}
                 </div>
 
-                <div className="mt-1.5">
+                {/* Add Line inside section block */}
+                <div className="mt-1">
                   <button
                     onClick={() => addLine(sIdx)}
-                    className="text-[9px] text-indigo-300 hover:text-indigo-100 font-extrabold uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1 py-1"
+                    disabled={isLockedByOther}
+                    className={`text-[9px] font-extrabold uppercase tracking-widest transition-all active:scale-95 flex items-center gap-1.5 py-1.5 px-3 rounded-lg border border-indigo-500/10 ${
+                      isLockedByOther
+                        ? 'text-gray-600 cursor-not-allowed opacity-50 bg-transparent'
+                        : 'text-indigo-300 hover:text-indigo-100 bg-indigo-950/20 hover:bg-indigo-950/40 hover:border-indigo-500/30'
+                    }`}
                   >
-                    + Add Line
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
+                    </svg>
+                    Add Line
                   </button>
                 </div>
               </div>
             ))}
           </div>
 
+          {/* Add New Section Block Button */}
           <button
             onClick={addSection}
-            className="w-full mt-1 mb-2 py-2.5 btn-5d text-indigo-300 hover:text-white text-[11px] font-bold tracking-widest rounded-lg transition-all active:scale-95 flex items-center justify-center gap-1.5 shadow-sm border border-indigo-500/25"
+            disabled={isLockedByOther}
+            className={`w-full mt-2 py-3 text-[11px] font-black tracking-widest rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2 shadow-md border uppercase ${
+              isLockedByOther
+                ? 'bg-[#0a0b16]/30 text-gray-600 border-indigo-500/10 cursor-not-allowed opacity-50'
+                : 'bg-indigo-900/10 hover:bg-indigo-900/20 text-indigo-200 hover:text-white border-dashed border-indigo-500/30 hover:border-indigo-500/60'
+            }`}
           >
-            + ADD NEW SECTION BLOCK
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
+            </svg>
+            Add New Section Block
           </button>
         </div>
 
-        <div className="flex-shrink-0 pt-2 border-t border-indigo-500/20">
+        <div className="flex-shrink-0 pt-3 border-t border-indigo-500/20">
           <button
             onClick={submitForm}
-            disabled={saveDisabled}
-            className={`w-full py-2.5 rounded-lg text-white text-[13px] font-bold tracking-wider shadow-lg active:scale-95 transition-all ${
-              saveDisabled
+            disabled={saveDisabled || isLockedByOther}
+            className={`w-full py-3 rounded-xl text-white text-[12px] font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all ${
+              (saveDisabled || isLockedByOther)
                 ? 'bg-indigo-950/40 text-gray-500 border border-indigo-500/10 cursor-not-allowed opacity-50'
-                : 'btn-5d-primary'
+                : 'bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 border border-indigo-400/20 shadow-indigo-900/40 hover:shadow-indigo-500/20'
             }`}
           >
             SAVE SONG SHEET

@@ -11,7 +11,7 @@ interface PianoVisualizerProps {
 }
 
 export const PianoVisualizer: React.FC<PianoVisualizerProps> = ({
-  absoluteNotes,
+  absoluteNotes = [],
   title = "",
   scale = 1,
   isStandalone = true,

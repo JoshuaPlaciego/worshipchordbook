@@ -28,6 +28,8 @@ interface SidebarCatalogProps {
   activeSetlistFolder?: string;
   onDownloadManual?: () => void;
   onOpenInstallGuide?: () => void;
+  onDownloadSetlistPDF?: (setName: string) => void;
+  isDesktopSidebar?: boolean;
 }
 
 export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
@@ -57,6 +59,8 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
   activeSetlistFolder,
   onDownloadManual,
   onOpenInstallGuide,
+  onDownloadSetlistPDF,
+  isDesktopSidebar = false,
 }) => {
   const [search, setSearch] = useState('');
   const [expandedSets, setExpandedSets] = useState<{ [setName: string]: boolean }>({});
@@ -134,12 +138,15 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
 
   return (
     <>
-      {/* Lateral Menu Drawer */}
+      {/* Lateral Menu Drawer / Desktop Persistent Column */}
       <div
         id="navDrawer"
-        className={`fixed inset-y-0 left-0 w-[85vw] max-w-sm bg-gradient-to-br from-indigo-950/95 via-[#0a0b16]/95 to-[#05060a]/95 backdrop-blur-3xl z-[100] transform shadow-[4px_0_40px_rgba(49,46,129,0.5)] flex flex-col transition-transform duration-300 border-r border-indigo-500/20 ${
-          isOpen ? 'translate-x-0' : '-translate-x-full'
-        }`}
+        className={isDesktopSidebar
+          ? "w-full h-full bg-[#03040c]/40 flex flex-col border-r border-indigo-500/10"
+          : `fixed inset-y-0 left-0 w-[85vw] max-w-sm bg-gradient-to-br from-indigo-950/95 via-[#0a0b16]/95 to-[#05060a]/95 backdrop-blur-3xl z-[100] transform shadow-[4px_0_40px_rgba(49,46,129,0.5)] flex flex-col transition-transform duration-300 border-r border-indigo-500/20 ${
+              isOpen ? 'translate-x-0' : '-translate-x-full'
+            }`
+        }
       >
         {/* Drawer Header & Search Controls */}
         <div className="p-5 sm:p-6 pb-2 flex-shrink-0">
@@ -577,6 +584,21 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                 );
                               })
                             )}
+                            {folderSongs.length > 0 && (
+                              <div className="pt-2 px-1 pb-1 border-t border-indigo-500/10 flex items-center justify-end">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (onDownloadSetlistPDF) {
+                                      onDownloadSetlistPDF(setName);
+                                    }
+                                  }}
+                                  className="w-full py-2 bg-indigo-600/20 hover:bg-indigo-600 border border-indigo-500/30 hover:border-indigo-500/60 rounded-xl text-[10px] text-indigo-200 hover:text-white font-black uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 shadow-md text-center"
+                                >
+                                  <span>📄</span> Download Merged Setlist PDF
+                                </button>
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -726,7 +748,7 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
       </div>
 
       {/* Dimmed Background Overlay */}
-      {isOpen && (
+      {!isDesktopSidebar && isOpen && (
         <div
           onClick={onClose}
           className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[90] transition-opacity cursor-pointer"
@@ -764,6 +786,8 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
 
   function changeSongHandler(s: Song) {
     onChangeSong(s);
-    onClose();
+    if (!isDesktopSidebar) {
+      onClose();
+    }
   }
 };

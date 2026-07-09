@@ -1227,7 +1227,7 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 bg-black/70 backdrop-blur-md z-[500] flex items-center justify-center p-4 sm:p-6 animate-fadeIn"
+      className="fixed inset-0 bg-black/80 backdrop-blur-md z-[500] flex items-center justify-center p-4 sm:p-6 animate-fadeIn"
       onClick={() => {
         if (selectedSubChord) {
           setSelectedSubChord(null);
@@ -1238,54 +1238,66 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="bg-gradient-to-br from-indigo-950/95 via-[#0a0b16]/95 to-[#05060a]/95 backdrop-blur-xl border border-indigo-500/30 p-0 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.8)] w-full max-w-[850px] flex flex-col h-[650px] max-h-[85vh] overflow-hidden"
+        className="bg-gradient-to-br from-[#07091e]/98 via-[#04050d]/98 to-[#020306]/98 backdrop-blur-2xl border border-indigo-500/25 p-0 rounded-[24px] shadow-[0_32px_95px_rgba(0,0,0,0.9)] w-full max-w-[850px] flex flex-col h-[650px] max-h-[85vh] overflow-hidden relative group/modal"
       >
-        {/* Header Dashboard */}
-        <div className="flex justify-between items-start p-4 sm:p-5 border-b border-indigo-500/20 bg-indigo-900/20 shrink-0">
-          <div className="flex-1 min-w-0 pr-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <span className="text-xl sm:text-2xl font-bold text-amber-400 font-mono shadow-sm">
+        {/* Futuristic Grid and Glow Background Elements */}
+        <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(99,102,241,0.015)_1px,transparent_1px),linear-gradient(to_right,rgba(99,102,241,0.015)_1px,transparent_1px)] bg-[size:20px_20px] pointer-events-none rounded-[24px]" />
+        <div className="absolute -left-1/3 -top-1/3 w-96 h-96 bg-indigo-500/5 blur-[100px] rounded-full pointer-events-none" />
+        <div className="absolute -right-1/3 -bottom-1/3 w-96 h-96 bg-cyan-500/5 blur-[100px] rounded-full pointer-events-none" />
+
+        {/* Outer Corner Tech Accents */}
+        <div className="absolute top-0 left-0 w-3.5 h-3.5 border-t-2 border-l-2 border-indigo-400/50 pointer-events-none rounded-tl-xl" />
+        <div className="absolute top-0 right-0 w-3.5 h-3.5 border-t-2 border-r-2 border-indigo-400/50 pointer-events-none rounded-tr-xl" />
+        <div className="absolute bottom-0 left-0 w-3.5 h-3.5 border-b-2 border-l-2 border-indigo-400/50 pointer-events-none rounded-bl-xl" />
+        <div className="absolute bottom-0 right-0 w-3.5 h-3.5 border-b-2 border-r-2 border-indigo-400/50 pointer-events-none rounded-br-xl" />
+
+        {/* Header Dashboard with futuristic sci-fi layout */}
+        <div className="flex justify-between items-center p-4 sm:p-5 border-b border-indigo-500/15 bg-indigo-950/40 shrink-0 relative z-10 select-none">
+          <div className="flex-1 min-w-0 pr-4 text-left">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="text-xl sm:text-2xl font-black text-amber-400 font-mono tracking-tight drop-shadow-[0_0_8px_rgba(245,158,11,0.3)]">
                 {chordName}
               </span>
               {theory && (
                 <>
-                  <span className="text-[10px] sm:text-xs px-2.5 py-1 rounded bg-indigo-500/20 border border-indigo-500/30 text-indigo-200 tracking-wider uppercase font-bold">
+                  <span className="text-[9px] font-mono font-black uppercase tracking-widest px-2.5 py-0.5 rounded-md bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 shadow-sm">
                     {theory.role}
                   </span>
-                  <span className="text-[10px] sm:text-xs px-2.5 py-1 rounded border tracking-wider font-bold bg-sky-500/20 border-sky-500/30 text-sky-200 flex items-center gap-1 shadow-sm">
-                    <span className="text-sky-400">🔑</span> Key: {songKey}
+                  <span className="text-[9px] font-mono font-black uppercase tracking-widest px-2.5 py-0.5 rounded-md bg-cyan-500/10 border border-cyan-500/35 text-cyan-300 flex items-center gap-1 shadow-sm">
+                    <span className="text-cyan-400">🔑</span> KEY: {songKey}
                   </span>
                 </>
               )}
             </div>
             {theory && (
-              <p className="text-[10px] sm:text-xs text-indigo-300/80 mt-1.5 italic leading-snug">
-                {theory.roleDefinition}
+              <p className="text-[10px] sm:text-xs text-indigo-300/70 mt-1 font-medium tracking-wide uppercase font-sans">
+                // {theory.roleDefinition}
               </p>
             )}
           </div>
+          
           <div className="flex items-center gap-3 sm:gap-4 shrink-0">
             {/* Master Volume Controller */}
-            <div className="flex items-center gap-1.5 bg-indigo-950/60 border border-indigo-500/30 px-2.5 py-1.5 rounded-full shadow-inner text-indigo-300">
+            <div className="flex items-center gap-2 bg-indigo-950/75 border border-indigo-500/20 px-3 py-1.5 rounded-full shadow-[0_0_15px_rgba(0,0,0,0.5)] text-indigo-300">
               <button
                 onClick={() => handleVolumeChange(volume === 0 ? 0.7 : 0)}
-                className="hover:text-amber-400 transition-colors active:scale-90 flex items-center justify-center"
+                className="hover:text-amber-400 transition-colors active:scale-90 flex items-center justify-center text-xs"
                 title={volume === 0 ? "Unmute" : "Mute"}
               >
                 {volume === 0 ? (
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
                   </svg>
                 ) : volume < 0.4 ? (
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.54 8.46a5 5 0 010 7.07" />
+                  <svg className="w-3.5 h-3.5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15.54 8.46a5 5 0 010 7.07" />
                   </svg>
                 ) : (
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.54 8.46a5 5 0 010 7.07m2.83-9.9a9 9 0 010 12.73" />
+                  <svg className="w-3.5 h-3.5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15.54 8.46a5 5 0 010 7.07m2.83-9.9a9 9 0 010 12.73" />
                   </svg>
                 )}
               </button>
@@ -1301,34 +1313,40 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                   background: `linear-gradient(to right, rgb(251, 191, 36) ${volume * 100}%, rgb(30, 27, 75) ${volume * 100}%)`
                 }}
               />
-              <span className="text-[9px] font-mono text-indigo-300 font-semibold w-6 text-right">
-                {Math.round(volume * 100)}
+              <span className="text-[9px] font-mono text-indigo-300 font-extrabold w-6 text-right">
+                {Math.round(volume * 100)}%
               </span>
             </div>
+            
             <button
               onClick={onClose}
-              className="text-indigo-300 hover:text-white hover:bg-white/10 rounded-full w-8 h-8 flex items-center justify-center transition-all active:scale-95 flex-shrink-0 text-lg"
+              className="text-indigo-300 hover:text-white bg-indigo-950/50 hover:bg-white/10 rounded-xl border border-indigo-500/15 w-8 h-8 flex items-center justify-center transition-all active:scale-95 flex-shrink-0 text-sm font-bold"
             >
               ✕
             </button>
           </div>
         </div>
 
-        {/* Tab Selection */}
-        <div className="flex border-b border-indigo-500/20 bg-indigo-950/40 text-[10px] sm:text-xs font-bold uppercase tracking-wider select-none shrink-0">
-          {(['guitar', 'keys', 'bass', 'lead', 'ideas'] as TabType[]).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`flex-1 py-3.5 transition-all text-center font-bold ${
-                activeTab === tab
-                  ? 'text-white bg-indigo-600/60 shadow-[0_0_20px_rgba(79,70,229,0.3)] border-b-2 border-indigo-400 z-10 relative font-extrabold'
-                  : 'text-indigo-300/60 hover:bg-indigo-900/40 hover:text-indigo-200 border-b-2 border-transparent'
-              }`}
-            >
-              {tab.charAt(0).toUpperCase() + tab.slice(1)}
-            </button>
-          ))}
+        {/* Tab Selection: Sleek, high-contrast synth switch style tabs */}
+        <div className="flex border-b border-indigo-500/15 bg-[#05060f] text-[9px] sm:text-[10px] font-mono font-black uppercase tracking-widest select-none shrink-0 relative z-10">
+          {(['guitar', 'keys', 'bass', 'lead', 'ideas'] as TabType[]).map((tab) => {
+            const isActive = activeTab === tab;
+            return (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`flex-1 py-4 transition-all text-center flex items-center justify-center gap-1.5 relative border-r last:border-r-0 border-indigo-500/10 ${
+                  isActive
+                    ? 'text-white bg-indigo-500/10 shadow-[inset_0_-2px_0_#818cf8] font-black'
+                    : 'text-indigo-400/50 hover:bg-indigo-950/20 hover:text-indigo-300'
+                }`}
+              >
+                {/* Micro-dot active indicator */}
+                <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-amber-400 animate-pulse' : 'bg-transparent'}`} />
+                <span>{tab}</span>
+              </button>
+            );
+          })}
         </div>
 
         {/* Scrollable Content */}
@@ -2208,26 +2226,32 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
         {/* Help Detail Popup Overlay */}
         {activeHelpDetail && (
           <div className="absolute inset-0 z-[700] flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md animate-fadeIn">
-            <div className="bg-gradient-to-b from-indigo-950 to-slate-950 border border-amber-500/40 rounded-2xl max-w-md w-full p-5 sm:p-6 text-white shadow-2xl relative flex flex-col max-h-[90%] overflow-hidden animate-blur-fade">
+            <div className="bg-gradient-to-b from-[#090b1e]/98 to-[#030409]/98 border border-indigo-500/20 rounded-2xl max-w-md w-full p-5 sm:p-6 text-white shadow-2xl relative flex flex-col max-h-[90%] overflow-hidden animate-blur-fade">
+              
+              {/* Corner Accents */}
+              <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-amber-400/50 pointer-events-none rounded-tl-lg" />
+              <div className="absolute top-0 right-0 w-3 h-3 border-t-2 border-r-2 border-amber-400/50 pointer-events-none rounded-tr-lg" />
+              <div className="absolute bottom-0 left-0 w-3 h-3 border-b-2 border-l-2 border-amber-400/50 pointer-events-none rounded-bl-lg" />
+              <div className="absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 border-amber-400/50 pointer-events-none rounded-br-lg" />
               
               {/* Header */}
-              <div className="flex justify-between items-start gap-3 mb-4 shrink-0">
-                <div>
-                  <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                    <span className="text-[10px] font-black uppercase tracking-widest bg-amber-400 text-slate-950 px-2 py-0.5 rounded shadow-sm">
+              <div className="flex justify-between items-start gap-3 mb-4 shrink-0 relative z-10">
+                <div className="text-left">
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                    <span className="text-[9px] font-mono font-black uppercase tracking-wider bg-amber-500/15 text-amber-400 px-2 py-0.5 rounded border border-amber-500/30 shadow-sm">
                       {activeHelpDetail.type}
                     </span>
-                    <span className="text-[10px] font-black uppercase tracking-widest bg-indigo-500/30 text-indigo-200 px-2 py-0.5 rounded border border-indigo-500/40">
+                    <span className="text-[9px] font-mono font-black uppercase tracking-wider bg-indigo-500/15 text-indigo-300 px-2 py-0.5 rounded border border-indigo-500/25">
                       {activeHelpDetail.instrument}
                     </span>
                   </div>
-                  <h3 className="text-base sm:text-lg font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-300 to-amber-100 leading-tight">
+                  <h3 className="text-base sm:text-lg font-black text-white leading-tight uppercase tracking-tight">
                     {activeHelpDetail.title}
                   </h3>
                 </div>
                 <button
                   onClick={() => setActiveHelpDetail(null)}
-                  className="text-indigo-300 hover:text-white hover:bg-white/10 rounded-full w-8 h-8 flex items-center justify-center transition-all active:scale-95 text-lg"
+                  className="text-indigo-300 hover:text-white bg-indigo-950/40 hover:bg-white/10 rounded-xl border border-indigo-500/15 w-8 h-8 flex items-center justify-center transition-all active:scale-95 text-sm"
                   title="Close"
                 >
                   ✕
@@ -2235,16 +2259,16 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               </div>
 
               {/* Scrollable Body */}
-              <div className="flex-1 overflow-y-auto custom-scrollbar pr-1.5 space-y-4 text-xs leading-relaxed text-indigo-100">
+              <div className="flex-1 overflow-y-auto custom-scrollbar pr-1.5 space-y-4 text-xs leading-relaxed text-indigo-100 relative z-10 text-left">
                 {/* Notes list */}
                 {activeHelpDetail.notes.length > 0 && (
-                  <div className="bg-indigo-950/40 p-3 rounded-xl border border-indigo-500/20 shadow-inner">
-                    <span className="text-[10px] font-bold text-amber-400 uppercase tracking-wider block mb-2">
+                  <div className="bg-indigo-950/40 p-3 rounded-xl border border-indigo-500/15 shadow-inner">
+                    <span className="text-[9px] font-mono font-black text-amber-400 uppercase tracking-wider block mb-2">
                       Voiced Notes
                     </span>
                     <div className="flex flex-wrap gap-1.5">
                       {activeHelpDetail.notes.map((note, idx) => (
-                        <span key={idx} className="bg-indigo-500/20 border border-indigo-500/30 px-2.5 py-1 rounded-full font-mono text-xs text-amber-200 font-extrabold shadow-sm">
+                        <span key={idx} className="bg-indigo-500/15 border border-indigo-500/25 px-2.5 py-1 rounded-full font-mono text-xs text-amber-200 font-extrabold shadow-sm">
                           {note}
                         </span>
                       ))}
@@ -2253,11 +2277,11 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                 )}
 
                 {/* Theory Info */}
-                <div className="bg-indigo-950/20 p-3 rounded-xl border border-indigo-500/10">
-                  <span className="text-[10px] font-bold text-indigo-300 uppercase tracking-wider block mb-1.5">
+                <div className="bg-indigo-950/20 p-3.5 rounded-xl border border-indigo-500/10">
+                  <span className="text-[9px] font-mono font-black text-indigo-300 uppercase tracking-wider block mb-1.5">
                     Theory Insights
                   </span>
-                  <p className="text-indigo-200 font-medium">
+                  <p className="text-indigo-200/90 font-medium">
                     {activeHelpDetail.theoryInfo}
                   </p>
                 </div>
@@ -2265,12 +2289,12 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                 {/* Performance Technique */}
                 {activeHelpDetail.technique && (
                   <div>
-                    <span className="text-[10px] font-bold text-indigo-300 uppercase tracking-wider block mb-2">
+                    <span className="text-[9px] font-mono font-black text-indigo-300 uppercase tracking-wider block mb-2">
                       Technique & Pro Tips
                     </span>
                     <div className="space-y-2 bg-black/30 p-3.5 rounded-xl border border-indigo-500/10 shadow-inner">
                       {activeHelpDetail.technique.split('\n').filter(Boolean).map((line, lIdx) => (
-                        <p key={lIdx} className="text-indigo-100 flex items-start gap-1.5 font-medium">
+                        <p key={lIdx} className="text-indigo-100/90 flex items-start gap-1.5 font-medium">
                           <span className="text-amber-400 mt-0.5 shrink-0">✦</span>
                           <span>{line.replace(/^•\s*/, '')}</span>
                         </p>
@@ -2281,7 +2305,7 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
               </div>
 
               {/* Footer / Actions */}
-              <div className="mt-5 pt-3 border-t border-indigo-500/20 flex gap-3 shrink-0">
+              <div className="mt-5 pt-3 border-t border-indigo-500/15 flex gap-3 shrink-0 relative z-10">
                 <button
                   onClick={() => {
                     const inst = activeHelpDetail.instrument;
@@ -2300,13 +2324,13 @@ export const MusicianModal: React.FC<MusicianModalProps> = ({
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
-                  <span>Hear Sound Voice</span>
+                  <span>HEAR SOUND</span>
                 </button>
                 <button
                   onClick={() => setActiveHelpDetail(null)}
-                  className="bg-indigo-950 hover:bg-indigo-900 border border-indigo-500/30 hover:border-indigo-400/50 text-indigo-200 hover:text-white font-bold text-xs py-2.5 px-4 rounded-xl transition-all active:scale-[0.98]"
+                  className="bg-indigo-950 hover:bg-indigo-900 border border-indigo-500/20 hover:border-indigo-400/50 text-indigo-200 hover:text-white font-bold text-xs py-2.5 px-4 rounded-xl transition-all active:scale-[0.98]"
                 >
-                  Got it!
+                  GOT IT
                 </button>
               </div>
 

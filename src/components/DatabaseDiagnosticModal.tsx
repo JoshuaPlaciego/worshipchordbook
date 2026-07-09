@@ -87,9 +87,9 @@ export const DatabaseDiagnosticModal: React.FC<DiagnosticModalProps> = ({ isOpen
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose}></div>
       
       {/* Modal */}
-      <div className="relative bg-[#0d0f1a] border border-indigo-500/30 rounded-2xl w-full max-w-lg shadow-[0_0_50px_rgba(49,46,129,0.5)] overflow-hidden flex flex-col">
+      <div className="relative bg-gradient-to-br from-indigo-950/95 via-[#0a0b16]/95 to-[#05060a]/95 backdrop-blur-3xl border border-indigo-500/20 rounded-3xl w-full max-w-lg shadow-[0_20px_50px_rgba(99,102,241,0.25)] overflow-hidden flex flex-col">
         {/* Header */}
-        <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between bg-indigo-950/20">
+        <div className="px-5 py-4 border-b border-indigo-500/15 flex items-center justify-between bg-indigo-950/25">
           <h2 className="text-sm font-black text-indigo-300 uppercase tracking-widest flex items-center gap-2">
             <span className="text-xl">🩺</span> Database Diagnostics
           </h2>
@@ -104,8 +104,8 @@ export const DatabaseDiagnosticModal: React.FC<DiagnosticModalProps> = ({ isOpen
         </div>
 
         {/* Console Body */}
-        <div className="p-5 flex-1 overflow-hidden flex flex-col bg-[#05060a]">
-          <div className="bg-black/50 border border-gray-800 rounded-lg p-3 font-mono text-[10px] sm:text-xs h-64 overflow-y-auto custom-scrollbar">
+        <div className="p-5 flex-1 overflow-hidden flex flex-col bg-transparent">
+          <div className="bg-indigo-950/30 border border-indigo-500/15 rounded-xl p-3 font-mono text-[10px] sm:text-xs h-64 overflow-y-auto custom-scrollbar shadow-inner">
             {logs.map((log, idx) => (
               <div key={idx} className="mb-1.5 flex gap-2">
                 <span className="text-gray-600 shrink-0">[{log.time}]</span>

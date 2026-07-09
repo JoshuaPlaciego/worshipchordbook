@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Song, SongLine, RoadmapBlock } from './types';
 import {
   transposeChord,
@@ -12,10 +12,14 @@ import { SongEditModal } from './components/SongEditModal';
 import { MusicianModal } from './components/MusicianModal';
 import { SidebarCatalog } from './components/SidebarCatalog';
 import { DatabaseDiagnosticModal } from './components/DatabaseDiagnosticModal';
+import { ArrangementDAWModal } from './components/ArrangementDAWModal';
 import SetlistSelectorDialog from './components/SetlistSelectorDialog';
+import { InstallAndConfigureModal } from './components/InstallAndConfigureModal';
+import { LiveConcertClock } from './components/LiveConcertClock';
 import { FALLBACK_SONGS, FALLBACK_SONG_LINES } from './fallbackData';
 
-const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyXCeXackc_suAUMKCGJ6qIjMygAADB9zHmoJ5EqWU_OTmBxkgH9uHLP4nY427farS5/exec';
+const DEFAULT_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyXCeXackc_suAUMKCGJ6qIjMygAADB9zHmoJ5EqWU_OTmBxkgH9uHLP4nY427farS5/exec';
+let SCRIPT_URL = localStorage.getItem('custom_script_url') || DEFAULT_SCRIPT_URL;
 const LOCAL_STORAGE_KEY = 'user_added_songs';
 
 export interface BlockRepetitionInfo {
@@ -223,9 +227,31 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<'songs' | 'setlists' | 'favorites'>('songs');
   const [isNavOpen, setIsNavOpen] = useState(false);
   const [isDiagnosticModalOpen, setIsDiagnosticModalOpen] = useState(false);
-  const [isInstallModalOpen, setIsInstallModalOpen] = useState(false);
+   const [isInstallModalOpen, setIsInstallModalOpen] = useState(false);
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
+  const [currentScriptUrl, setCurrentScriptUrl] = useState(SCRIPT_URL);
   const [isOfflineMode, setIsOfflineMode] = useState(false);
+
+  const handleSaveScriptUrl = (url: string) => {
+    localStorage.setItem('custom_script_url', url);
+    SCRIPT_URL = url;
+    setCurrentScriptUrl(url);
+    showToast('Backend API URL saved successfully!', 'success');
+    setTimeout(() => {
+      fetchCatalog();
+    }, 100);
+  };
+
+  const handleResetScriptUrl = () => {
+    const defaultUrl = 'https://script.google.com/macros/s/AKfycbyXCeXackc_suAUMKCGJ6qIjMygAADB9zHmoJ5EqWU_OTmBxkgH9uHLP4nY427farS5/exec';
+    localStorage.removeItem('custom_script_url');
+    SCRIPT_URL = defaultUrl;
+    setCurrentScriptUrl(defaultUrl);
+    showToast('Backend API URL reset to default.', 'info');
+    setTimeout(() => {
+      fetchCatalog();
+    }, 100);
+  };
   const [lastSynced, setLastSynced] = useState<number | null>(() => {
     try {
       const synced = localStorage.getItem('catalog_last_synced');
@@ -251,6 +277,7 @@ export default function App() {
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
   const [formEditingSong, setFormEditingSong] = useState<Song | null>(null);
   const [currentKey, setCurrentKey] = useState('C');
+  const [capo, setCapo] = useState<number>(0);
   const [songLines, setSongLines] = useState<SongLine[]>([]);
   const [focusedLineId, setFocusedLineId] = useState<string | null>(null);
 
@@ -263,6 +290,8 @@ export default function App() {
   const [pdfScope, setPdfScope] = useState<'current' | 'all' | 'custom'>('current');
   const [pdfSelectedSongIds, setPdfSelectedSongIds] = useState<string[]>([]);
   const [pdfSongKeys, setPdfSongKeys] = useState<{ [songId: string]: string }>({});
+  const [pdfShowHeaders, setPdfShowHeaders] = useState(false);
+  const [pdfShowMetadata, setPdfShowMetadata] = useState(false);
   const [controlsExpanded, setControlsExpanded] = useState(false);
 
   // Autoscroll Engine
@@ -277,6 +306,31 @@ export default function App() {
   // Performance Arrangement / Roadmap
   const [activeRoadmap, setActiveRoadmap] = useState<RoadmapBlock[]>([]);
   const [sectionTemplates, setSectionTemplates] = useState<{ [key: string]: SongLine[] }>({});
+  const [loadedSnapshotSections, setLoadedSnapshotSections] = useState<{ [key: string]: SongLine[] } | null>(null);
+
+  // Cross-song section/line pulling state
+  const [isPullingFromOtherSong, setIsPullingFromOtherSong] = useState(false);
+  const [pullSourceSongId, setPullSourceSongId] = useState<string | number | ''>('');
+  const [pullSourceSectionName, setPullSourceSectionName] = useState<string>('');
+
+  const effectiveSectionTemplates = useMemo(() => {
+    const result: { [key: string]: SongLine[] } = {};
+    
+    // First, populate all live sectionTemplates
+    Object.keys(sectionTemplates).forEach((secName) => {
+      result[secName] = sectionTemplates[secName];
+    });
+    
+    // If we have loaded snapshot sections, overlay them. Snapshots are the absolute source of truth for saved arrangements.
+    if (loadedSnapshotSections) {
+      Object.keys(loadedSnapshotSections).forEach((secName) => {
+        result[secName] = loadedSnapshotSections[secName];
+      });
+    }
+    
+    return result;
+  }, [sectionTemplates, loadedSnapshotSections]);
+
   const [originalRoadmap, setOriginalRoadmap] = useState<RoadmapBlock[]>([]);
   const [arrangerOpen, setArrangerOpen] = useState(false);
   const [editingBlockId, setEditingBlockId] = useState<string | null>(null);
@@ -381,6 +435,17 @@ export default function App() {
   const [isMusicianModalOpen, setIsMusicianModalOpen] = useState(false);
   const [selectedChord, setSelectedChord] = useState('');
 
+  // Load & Configure Modal States
+  const [pendingSongLoad, setPendingSongLoad] = useState<{
+    song: Song;
+    forceDefaultArrangement: boolean;
+    activeFolderOverride?: string;
+    arrsOverride?: any[];
+  } | null>(null);
+  const [loadConfigDisplayMode, setLoadConfigDisplayMode] = useState<'both' | 'chords' | 'numbers'>('both');
+  const [loadConfigShowLyrics, setLoadConfigShowLyrics] = useState<boolean>(true);
+  const [loadConfigSheetLayoutMode, setLoadConfigSheetLayoutMode] = useState<'sequence' | 'compact'>('sequence');
+
   // Setlist Manager & Arrangements State
   const [isSetlistManagerOpen, setIsSetlistManagerOpen] = useState(false);
   const [activeSetlistFolder, setActiveSetlistFolder] = useState<string>('');
@@ -420,6 +485,20 @@ export default function App() {
       return false;
     }
   };
+
+  const getSetlistArrangement = (setId: string, songId: string) => {
+    return allSharedArrangements.find(
+      (arr: any) =>
+        String(arr.SongID) === String(songId) &&
+        arr.PresetName.toLowerCase().trim() === `set: ${setId}`.toLowerCase().trim()
+    ) || null;
+  };
+  (window as any).getSetlistArrangement = getSetlistArrangement;
+
+  const exportToPDF = () => {
+    window.print();
+  };
+  (window as any).exportToPDF = exportToPDF;
 
   const toggleSetlistLock = async (setName: string) => {
     if (!appUser || !appSecret) {
@@ -499,8 +578,8 @@ export default function App() {
         fetch(`${SCRIPT_URL}?tab=Setlists`)
       ]);
       const [presetsText, setlistsText] = await Promise.all([
-        presetsRes.text(),
-        setlistsRes.text()
+        (presetsRes as any).text(),
+        (setlistsRes as any).text()
       ]);
       
       const presetsList = JSON.parse(presetsText);
@@ -537,17 +616,41 @@ export default function App() {
     }
   };
 
-  const saveSongToSetlist = async (setName: string) => {
+  const saveSongToSetlist = async (setName: string, arrangementName: string) => {
     if (isSetlistLocked(setName) && !(appUser && appSecret)) {
       showToast(`Setlist "${setName}" is locked by an admin. Modifying is restricted.`, 'error');
       return;
     }
     if (!currentSong) return;
+
+    const isDuplicate = syncedSheetArrangements.some((arr) => {
+      if (String(arr.SongID) !== String(currentSong.SongID)) return false;
+      if (arr.PresetName === arrangementName) return true;
+      try {
+        const parsed = JSON.parse(arr.RoadmapJSON);
+        if (
+          parsed &&
+          parsed.arrangementName &&
+          parsed.arrangementName.trim().toLowerCase() === arrangementName.trim().toLowerCase()
+        ) {
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    });
+
+    if (isDuplicate) {
+      showToast(`Arrangement name "${arrangementName}" already exists for this song.`, 'error');
+      throw new Error(`Duplicate arrangement name`);
+    }
+
     setIsLoading(true);
     try {
       const capturedSettings = {
         key: currentKey,
-        roadmap: activeRoadmap,
+        roadmap: originalRoadmap,
+        arrangementName: arrangementName,
+        snapshotSections: sectionTemplates,
       };
 
       const payloadArrangement = {
@@ -561,6 +664,7 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify(payloadArrangement),
       });
+
       const resArrJson = await resArr.json();
       if (resArrJson.status !== 'success') {
         throw new Error(resArrJson.message || 'Failed to save arrangement');
@@ -592,22 +696,25 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify(payloadMeta),
       });
+
       const resMetaJson = await resMeta.json();
       if (resMetaJson.status !== 'success') {
         throw new Error(resMetaJson.message || 'Failed to save setlist metadata');
       }
 
-      showToast(`Song "${currentSong.Title}" added to "${setName}" with arrangement captured!`, 'success');
+      showToast(`Added to "${setName}" as "${arrangementName}" (using Default flow)`, 'success');
       setIsSetlistManagerOpen(false);
       setCurrentTab('songs');
       await refetchArrangements();
     } catch (err: any) {
       console.error(err);
       showToast(err.message || 'Failed to save to Setlist', 'error');
+      throw err;
     } finally {
       setIsLoading(false);
     }
   };
+
 
   const removeSongFromSetlist = async (setName: string, songIdToRemove: string) => {
     if (isSetlistLocked(setName) && !(appUser && appSecret)) {
@@ -621,7 +728,7 @@ export default function App() {
         songId: songIdToRemove,
         name: `Set: ${setName}`,
       };
-      await fetch(SCRIPT_URL, {
+      fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payloadDelete),
       });
@@ -644,7 +751,7 @@ export default function App() {
           roadmap: { songIds: updatedSongIds, lastUpdated: Date.now(), locked: isSetlistLocked(setName) },
         };
 
-        await fetch(SCRIPT_URL, {
+        fetch(SCRIPT_URL, {
           method: 'POST',
           body: JSON.stringify(payloadMeta),
         });
@@ -735,7 +842,7 @@ export default function App() {
         action: 'deleteSetlist',
         name: setName,
       };
-      await fetch(SCRIPT_URL, {
+      fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payloadMeta),
       });
@@ -750,7 +857,7 @@ export default function App() {
           songId: String(preset.SongID),
           name: `Set: ${setName}`,
         };
-        await fetch(SCRIPT_URL, {
+        fetch(SCRIPT_URL, {
           method: 'POST',
           body: JSON.stringify(payloadDelete),
         });
@@ -960,7 +1067,7 @@ export default function App() {
         remoteSongs = JSON.parse(localStorage.getItem('cached_songs') || '[]');
       } else {
         const res = await fetch(`${SCRIPT_URL}?tab=Songs`, { signal: controller.signal });
-        const textData = await res.text();
+        const textData = (await (res as any).text());
         let list: Song[] = [];
         try { list = JSON.parse(textData); } catch { throw new Error('Invalid Songs payload.'); }
         if (list && (list as any).error) throw new Error((list as any).error);
@@ -1304,7 +1411,7 @@ export default function App() {
     setCloudArrangementDeletionNotice(null);
 
     // Safely revert the active screen to the song's default structure
-    await executeSongLoad(currentSong, true, undefined, allArrs.length > 0 ? allArrs : undefined);
+    executeSongLoad(currentSong, true, undefined, (allArrs && allArrs.length > 0) ? allArrs : undefined);
 
     // Collect available presets remaining for this song
     const remainingPresets: any[] = [];
@@ -1453,6 +1560,7 @@ export default function App() {
   ) => {
     setIsLoading(true);
     setCurrentSong(song);
+    setCapo(0);
     setCurrentArrangementName('');
     setCloudArrangementUpdateNotice(null);
     setCloudArrangementDeletionNotice(null);
@@ -1475,9 +1583,7 @@ export default function App() {
     const activeFolder = activeFolderOverride !== undefined ? activeFolderOverride : activeSetlistFolder;
     let setlistPresetKey = '';
     if (activeFolder && !forceDefaultArrangement) {
-      const setPreset = arrangementsToUse.find(
-        (arr) => String(arr.SongID) === String(song.SongID) && arr.PresetName === `Set: ${activeFolder}`
-      );
+      const setPreset = (window as any).getSetlistArrangement(activeFolder, String(song.SongID));
       if (setPreset) {
         try {
           const settings = JSON.parse(setPreset.RoadmapJSON);
@@ -1516,7 +1622,24 @@ export default function App() {
       requestWakeLock();
       let filteredLines: SongLine[] = [];
 
-      if (String(song.SongID).startsWith('fallback-')) {
+      const packedLinesRaw = (song as any).SongLinesJSON || (song as any).SongLines || (song as any).LinesJSON;
+      if (packedLinesRaw) {
+        try {
+          const parsed = typeof packedLinesRaw === 'string' ? JSON.parse(packedLinesRaw) : packedLinesRaw;
+          if (Array.isArray(parsed)) {
+            filteredLines = parsed.map((l: any) => ({
+              ...l,
+              SongID: String(song.SongID),
+            }));
+          }
+        } catch (e) {
+          console.warn('Error parsing packed lines on song object:', e);
+        }
+      }
+
+      if (filteredLines.length > 0) {
+        console.log('Loaded song lines from packed SongLinesJSON cell.');
+      } else if (String(song.SongID).startsWith('fallback-')) {
         filteredLines = FALLBACK_SONG_LINES.filter(
           (line) => line && String(line.SongID) === String(song.SongID)
         );
@@ -1549,7 +1672,7 @@ export default function App() {
 
           if (fetchLines) {
             const res = await fetch(`${SCRIPT_URL}?tab=SongLines`, { signal: controller.signal });
-            const textData = await res.text();
+            const textData = (await (res as any).text());
             let allLines: SongLine[] = [];
             try {
               allLines = JSON.parse(textData);
@@ -1677,9 +1800,7 @@ export default function App() {
       let loadedCustomRoadmap = false;
       const activeFolder = activeFolderOverride !== undefined ? activeFolderOverride : activeSetlistFolder;
       if (!forceDefaultArrangement && activeFolder) {
-        const setPreset = arrangementsToUse.find(
-          (arr) => String(arr.SongID) === String(song.SongID) && arr.PresetName === `Set: ${activeFolder}`
-        );
+        const setPreset = (window as any).getSetlistArrangement(activeFolder, String(song.SongID));
         if (setPreset) {
           try {
             const settings = JSON.parse(setPreset.RoadmapJSON);
@@ -1692,6 +1813,13 @@ export default function App() {
               }));
               setActiveRoadmap(mappedRoadmap);
               loadedCustomRoadmap = true;
+              
+              if (settings.snapshotSections) {
+                setLoadedSnapshotSections(settings.snapshotSections);
+              } else {
+                setLoadedSnapshotSections(null);
+              }
+
               
               // Resolve the friendly arrangement name instead of "Set: <Folder>"
               let foundName = '';
@@ -1721,6 +1849,13 @@ export default function App() {
             if (savedSettings && savedSettings.roadmap && savedSettings.roadmap.length > 0) {
               setActiveRoadmap(savedSettings.roadmap);
               loadedCustomRoadmap = true;
+              
+              if (savedSettings.snapshotSections) {
+                setLoadedSnapshotSections(savedSettings.snapshotSections);
+              } else {
+                setLoadedSnapshotSections(null);
+              }
+
             }
           } catch (e) {
             console.error('Error loading captured roadmap:', e);
@@ -1730,6 +1865,8 @@ export default function App() {
 
       if (!loadedCustomRoadmap) {
         setActiveRoadmap(roadmap);
+        setLoadedSnapshotSections(null);
+
       }
       setOriginalRoadmap(original);
 
@@ -1767,8 +1904,8 @@ export default function App() {
             fetch(`${SCRIPT_URL}?tab=Setlists`, { signal: controller.signal })
           ]);
           const [presetsText, setlistsText] = await Promise.all([
-            presetsRes.text(),
-            setlistsRes.text()
+            (presetsRes as any).text(),
+            (setlistsRes as any).text()
           ]);
           
           const presetsList = JSON.parse(presetsText);
@@ -2196,6 +2333,13 @@ export default function App() {
         return;
       }
 
+      if (isObject && presetData.snapshotSections) {
+        setLoadedSnapshotSections(presetData.snapshotSections);
+      } else {
+        setLoadedSnapshotSections(null);
+      }
+
+
       setActiveRoadmap(
         blocksArray.map((b: any, idx: number) => ({
           id: b.id || `block-${idx}`,
@@ -2236,7 +2380,12 @@ export default function App() {
       try {
         const rawSaved = localStorage.getItem('captured_song_settings') || '{}';
         const dict = JSON.parse(rawSaved);
-        dict[songId] = { key: targetKey, roadmap: roadmap, arrangementName: optArrangementName || currentArrangementName };
+        dict[songId] = {
+          key: targetKey,
+          roadmap: roadmap,
+          arrangementName: optArrangementName || currentArrangementName,
+          snapshotSections: sectionTemplates,
+        };
         localStorage.setItem('captured_song_settings', JSON.stringify(dict));
       } catch (err) {
         console.error('Error saving local fallback:', err);
@@ -2250,6 +2399,7 @@ export default function App() {
         key: targetKey,
         roadmap: roadmap,
         arrangementName: targetArrName,
+        snapshotSections: sectionTemplates,
       };
       
       // 1. Save to spreadsheet via POST
@@ -2260,7 +2410,7 @@ export default function App() {
         roadmap: capturedSettings,
       };
       
-      await fetch(SCRIPT_URL, {
+      fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payloadArrangement),
       });
@@ -2284,7 +2434,7 @@ export default function App() {
         name: activeSetlistFolder,
         roadmap: { songIds, lastUpdated: Date.now(), locked: isSetlistLocked(activeSetlistFolder) },
       };
-      await fetch(SCRIPT_URL, {
+      fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payloadMeta),
       });
@@ -2317,18 +2467,25 @@ export default function App() {
   const executeSaveArrangement = async (name: string, shouldApplyToSetlist: boolean, roadmapToSave: any[]) => {
     setIsLoading(true);
     try {
+      const richRoadmap = {
+        roadmap: roadmapToSave,
+        key: currentKey,
+        arrangementName: name,
+        snapshotSections: effectiveSectionTemplates,
+      };
+
       const payload = {
         action: 'saveArrangement',
         songId: String(currentSong?.SongID),
         name: name,
-        roadmap: roadmapToSave,
+        roadmap: richRoadmap,
       };
 
       const res = await fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payload),
       });
-      const textResponse = await res.text();
+      const textResponse = (await (res as any).text());
       const result = JSON.parse(textResponse);
 
       if (result.status === 'success') {
@@ -2341,7 +2498,12 @@ export default function App() {
         if (isSetlistLocked(activeSetlistFolder) && !(appUser && appSecret)) {
           const rawSaved = localStorage.getItem('captured_song_settings') || '{}';
           const dict = JSON.parse(rawSaved);
-          dict[String(currentSong.SongID)] = { key: currentKey, roadmap: roadmapToSave, arrangementName: name };
+          dict[String(currentSong.SongID)] = {
+            key: currentKey,
+            roadmap: roadmapToSave,
+            arrangementName: name,
+            snapshotSections: effectiveSectionTemplates,
+          };
           localStorage.setItem('captured_song_settings', JSON.stringify(dict));
           showToast(`This setlist is locked by an admin. Your arrangement changes are saved locally only.`, 'info');
         } else {
@@ -2349,6 +2511,7 @@ export default function App() {
             key: currentKey,
             roadmap: roadmapToSave,
             arrangementName: name,
+            snapshotSections: effectiveSectionTemplates,
           };
           const payloadArrangement = {
             action: 'saveArrangement',
@@ -2356,7 +2519,7 @@ export default function App() {
             name: `Set: ${activeSetlistFolder}`,
             roadmap: capturedSettings,
           };
-          await fetch(SCRIPT_URL, {
+          fetch(SCRIPT_URL, {
             method: 'POST',
             body: JSON.stringify(payloadArrangement),
           });
@@ -2380,7 +2543,7 @@ export default function App() {
             name: activeSetlistFolder,
             roadmap: { songIds, lastUpdated: Date.now(), locked: isSetlistLocked(activeSetlistFolder) },
           };
-          await fetch(SCRIPT_URL, {
+          fetch(SCRIPT_URL, {
             method: 'POST',
             body: JSON.stringify(payloadMeta),
           });
@@ -2397,14 +2560,27 @@ export default function App() {
           localObj = JSON.parse(localRaw);
         }
       } catch {}
-      localObj[name] = roadmapToSave;
+      
+      const richRoadmap = {
+        roadmap: roadmapToSave,
+        key: currentKey,
+        arrangementName: name,
+        snapshotSections: sectionTemplates,
+      };
+      
+      localObj[name] = richRoadmap;
       localStorage.setItem(`custom_arrangements_${currentSong?.SongID}`, JSON.stringify(localObj));
       showToast(`Saved locally on this device as "${name}"`, 'success');
 
       if (shouldApplyToSetlist && currentSong) {
         const rawSaved = localStorage.getItem('captured_song_settings') || '{}';
         const dict = JSON.parse(rawSaved);
-        dict[String(currentSong.SongID)] = { key: currentKey, roadmap: roadmapToSave, arrangementName: name };
+        dict[String(currentSong.SongID)] = {
+          key: currentKey,
+          roadmap: roadmapToSave,
+          arrangementName: name,
+          snapshotSections: sectionTemplates,
+        };
         localStorage.setItem('captured_song_settings', JSON.stringify(dict));
         showToast(`Loaded arrangement to active setlist locally on this device`, 'success');
       }
@@ -2433,7 +2609,7 @@ export default function App() {
           setCurrentArrangementName(cachedBackupName || '');
           showToast(`Setlist arrangement kept intact and restored on screen.`, 'info');
         } else {
-          await executeSongLoad(currentSong, false, undefined, latestArrs.length > 0 ? latestArrs : undefined);
+          executeSongLoad(currentSong, false, undefined, latestArrs.length > 0 ? latestArrs : undefined);
           showToast(`Setlist arrangement kept intact and restored on screen.`, 'info');
         }
       } else {
@@ -2553,7 +2729,7 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify(payload),
       });
-      const result = await res.json();
+      const result = (await (res as any).json());
       if (result.status === 'success') {
         showToast(`Deleted from shared library: ${baseName}`, 'info');
       } else {
@@ -2588,14 +2764,14 @@ export default function App() {
       // 4. If active and inside a setlist context, delete the setlist-specific arrangement from db
       if (isCurrentlyActive && activeSetlistFolder && currentSong) {
         try {
-          const payloadSet = {
+          const payloadDel = {
             action: 'deleteArrangement',
             songId: String(currentSong.SongID),
             name: `Set: ${activeSetlistFolder}`,
           };
-          await fetch(SCRIPT_URL, {
+          fetch(SCRIPT_URL, {
             method: 'POST',
-            body: JSON.stringify(payloadSet),
+            body: JSON.stringify(payloadDel),
           });
         } catch (e) {
           console.warn("Failed to delete setlist mapping:", e);
@@ -2625,7 +2801,7 @@ export default function App() {
         });
 
         // Load default arrangement on screen
-        await executeSongLoad(currentSong, true, undefined, latestArrs.length > 0 ? latestArrs : undefined);
+        executeSongLoad(currentSong, true, undefined, latestArrs.length > 0 ? latestArrs : undefined);
 
         setArrangementReplacementModal({
           songId: String(currentSong.SongID),
@@ -2657,7 +2833,7 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify(payload),
       });
-      const result = await res.json();
+      const result = (await (res as any).json());
 
       if (result.success) {
         setAppUser(adminUsernameInput.trim());
@@ -2783,18 +2959,36 @@ export default function App() {
   // Helper to dynamically compile roadmap, templates, and key for any song
   const getSongPreviewData = (song: Song) => {
     let filteredLines: SongLine[] = [];
-    try {
-      const rawLines = localStorage.getItem('cached_song_lines');
-      if (rawLines) {
-        const allLines = JSON.parse(rawLines);
-        if (Array.isArray(allLines)) {
-          filteredLines = allLines.filter(
-            (line: any) => line && String(line.SongID) === String(song.SongID)
-          );
+
+    const packedLinesRaw = (song as any).SongLinesJSON || (song as any).SongLines || (song as any).LinesJSON;
+    if (packedLinesRaw) {
+      try {
+        const parsed = typeof packedLinesRaw === 'string' ? JSON.parse(packedLinesRaw) : packedLinesRaw;
+        if (Array.isArray(parsed)) {
+          filteredLines = parsed.map((l: any) => ({
+            ...l,
+            SongID: String(song.SongID),
+          }));
         }
+      } catch (e) {
+        console.warn('Error parsing packed lines on song object:', e);
       }
-    } catch (e) {
-      console.warn("Error reading cached song lines:", e);
+    }
+
+    if (filteredLines.length === 0) {
+      try {
+        const rawLines = localStorage.getItem('cached_song_lines');
+        if (rawLines) {
+          const allLines = JSON.parse(rawLines);
+          if (Array.isArray(allLines)) {
+            filteredLines = allLines.filter(
+              (line: any) => line && String(line.SongID) === String(song.SongID)
+            );
+          }
+        }
+      } catch (e) {
+        console.warn("Error reading cached song lines:", e);
+      }
     }
 
     if (filteredLines.length === 0) {
@@ -2840,6 +3034,7 @@ export default function App() {
 
     activeRoadmapToUse = standardRoadmap;
 
+
     // Read saved settings
     const rawSaved = localStorage.getItem('captured_song_settings');
     let savedSettings: any = null;
@@ -2847,28 +3042,24 @@ export default function App() {
       try {
         const dict = JSON.parse(rawSaved);
         savedSettings = dict[String(song.SongID)];
-      } catch {}
+      } catch (e) {}
     }
-
+    
     if (savedSettings) {
-      activeKey = savedSettings.key || song.OriginalKey || 'C';
+      if (savedSettings.key) activeKey = savedSettings.key;
       if (savedSettings.roadmap && savedSettings.roadmap.length > 0) {
         activeRoadmapToUse = savedSettings.roadmap;
       }
     }
-
-    // Active setlist arrangement override
+    
+    // Check if the current setlist has an override for this song
     if (activeSetlistFolder) {
-      const setPreset = allSharedArrangements.find(
-        (arr) => String(arr.SongID) === String(song.SongID) && arr.PresetName === `Set: ${activeSetlistFolder}`
-      );
+      const setPreset = getSetlistArrangement(activeSetlistFolder, String(song.SongID));
       if (setPreset) {
         try {
           const settings = JSON.parse(setPreset.RoadmapJSON);
           if (settings) {
-            if (settings.key) {
-              activeKey = settings.key;
-            }
+            if (settings.key) activeKey = settings.key;
             if (settings.roadmap && settings.roadmap.length > 0) {
               activeRoadmapToUse = settings.roadmap.map((b: any) => ({
                 id: b.id,
@@ -2878,3861 +3069,15 @@ export default function App() {
               }));
             }
           }
-        } catch {}
+        } catch (e) {}
       }
     }
 
-    // Use current interactive adjustments if it's the currently viewed song
-    if (currentSong && String(song.SongID) === String(currentSong.SongID)) {
-      activeKey = currentKey;
-      activeRoadmapToUse = activeRoadmap;
-    }
-
-    // PDF specific song-key override
-    if (pdfSongKeys[String(song.SongID)]) {
-      activeKey = pdfSongKeys[String(song.SongID)];
-    }
-
-    return {
-      key: activeKey,
-      roadmap: activeRoadmapToUse,
-      sectionTemplates: templates,
-      title: (song.Title || "Untitled").toUpperCase(),
-      artist: (song.Artist || "Unknown Artist").toUpperCase(),
-      song,
-    };
-  };
-
-  // Export selected Sheet View(s) to a perfectly formatted printable PDF layout
-  const exportToPDF = () => {
-    if (!currentSong) return;
-
-    // Resolve which songs are to be printed
-    const isInsideSetlistContext = !!activeSetlistFolder && setlists.length > 1;
-    let songsToPrint: any[] = [];
-
-    if (!isInsideSetlistContext || pdfScope === 'current') {
-      songsToPrint = [getSongPreviewData(currentSong)];
-    } else if (pdfScope === 'all') {
-      const resolvedSetSongs = setlists
-        .map((id) => songs.find((s) => String(s.SongID) === String(id)))
-        .filter((s): s is Song => !!s);
-      songsToPrint = resolvedSetSongs.map(s => getSongPreviewData(s));
-    } else if (pdfScope === 'custom') {
-      const resolvedSetSongs = setlists
-        .map((id) => songs.find((s) => String(s.SongID) === String(id)))
-        .filter((s): s is Song => !!s);
-      songsToPrint = resolvedSetSongs
-        .filter(s => pdfSelectedSongIds.includes(String(s.SongID)))
-        .map(s => getSongPreviewData(s));
-    } else {
-      songsToPrint = [getSongPreviewData(currentSong)];
-    }
-
-    if (songsToPrint.length === 0) {
-      showToast("No songs selected to export", "error");
-      return;
-    }
-
-    // Set page title as the single song title or the setlist title
-    const docTitle = songsToPrint.length === 1 
-      ? `${songsToPrint[0].title} - ${songsToPrint[0].artist}`
-      : `${activeSetlistFolder.toUpperCase()} SETLIST BOOKLET`;
-
-    let bodyHTML = "";
-
-    songsToPrint.forEach((songData, sIdx) => {
-      const { key: songKey, roadmap: songRoadmap, sectionTemplates: songTemplates, title, artist, song } = songData;
-
-      // Build Flow Roadmap (Sequenced Transposed Horizontal, CAPS LOCK ALL)
-      const roadmapFiltered = songRoadmap.filter((block: any, idx: number) => {
-        const isDuplicate = songRoadmap.findIndex((b: any, bIdx: number) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, songTemplates)) !== -1;
-        return !isDuplicate;
-      });
-      const roadmapParts = roadmapFiltered.map((block: any) => {
-        const blockOffset = block.keyOffset || 0;
-        const blockKeyName = getModulatedKeyName(songKey, blockOffset);
-        return `${block.name.toUpperCase()} (${blockKeyName.toUpperCase()})`;
-      });
-      const roadmapHorizontal = roadmapParts.join(" ➔ ");
-
-      // Assemble Sections for this song
-      let sheetHTML = "";
-      const repInfo = getRoadmapRepetitionInfo(songRoadmap);
-
-      songRoadmap.forEach((block: any, idx: number) => {
-        let blockDisplayName = block.name;
-
-        // Check if this block is an entirely identical repetition of a PREVIOUS block in the flow
-        if (sheetLayoutMode === 'sequence') {
-          const firstIdenticalIdx = songRoadmap.findIndex((b: any, bIdx: number) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, songTemplates));
-          if (firstIdenticalIdx !== -1) {
-            sheetHTML += `
-              <div class="print-section-repeat" style="padding: 6px 10px; margin-bottom: 8px; border: 1px dashed rgba(99,102,241,0.3); border-radius: 8px; background-color: rgba(99,102,241,0.03); font-size: 10px; color: #4f46e5; font-weight: bold; display: flex; align-items: center; gap: 6px; page-break-inside: avoid;">
-                <span>🔁 REPLAY: ${block.name.toUpperCase()}</span>
-                <span style="font-size: 8.5px; font-weight: normal; color: #64748b; margin-left: 4px;">(Identical chords & lyrics as Section #${firstIdenticalIdx + 1} - ${songRoadmap[firstIdenticalIdx].name})</span>
-              </div>
-            `;
-            return; // Skip rendering full chords and lyrics for this duplicate
-          }
-        }
-
-        // Match the app's exact compact mode skipping logic
-        if (sheetLayoutMode === 'compact') {
-          if (!showLyrics) {
-            const firstIdx = songRoadmap.findIndex((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
-            if (firstIdx !== idx) return;
-            const identicalBlocks = songRoadmap.filter((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
-            const uniqueNames = Array.from(new Set(identicalBlocks.map((b: any) => b.name)));
-            blockDisplayName = uniqueNames.join(' / ');
-          } else {
-            const firstIdx = songRoadmap.findIndex((b: any) => b.name === block.name);
-            if (firstIdx !== idx) return;
-          }
-        }
-
-        const blockRep = repInfo[idx];
-        const templateLines = songTemplates[block.name] || [];
-        const blockOffset = block.keyOffset || 0;
-        const blockKeyName = getModulatedKeyName(songKey, blockOffset);
-
-        const originalIdx = NOTE_TO_INDEX[song.OriginalKey || 'C'] || 0;
-        const currentIdx = NOTE_TO_INDEX[songKey] || 0;
-        const totalSemitonesOffset = currentIdx - originalIdx + blockOffset;
-
-        sheetHTML += `
-          <div class="print-section">
-            <h3 class="print-section-header" style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
-              <span>${blockDisplayName.toUpperCase()} ${blockOffset !== 0 ? `(KEY: ${blockKeyName.toUpperCase()})` : ''}</span>
-              ${blockRep && blockRep.totalInRun > 1 ? `
-                <span class="print-run-badge" style="margin-left: auto;">${blockRep.totalInRun}X</span>
-              ` : ''}
-            </h3>
-            <div class="print-lines">
-        `;
-
-        if (!showLyrics) {
-          if (sheetLayoutMode === 'compact') {
-            const identicalBlocks = songRoadmap.filter((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
-            const renderedHints: any[] = [];
-            const seenNames = new Set();
-            
-            identicalBlocks.forEach((b: any) => {
-              if (seenNames.has(b.name)) return;
-              seenNames.add(b.name);
-              const lines = songTemplates[b.name] || [];
-              const firstLyric = lines.find((l: any) => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
-              if (firstLyric) {
-                renderedHints.push({ name: b.name, lyric: firstLyric });
-              }
-            });
-
-            // Group by lyric
-            const groups: { lyric: string; names: string[] }[] = [];
-            renderedHints.forEach(h => {
-              const normLyric = h.lyric.trim();
-              const existingGroup = groups.find(g => g.lyric.trim().toLowerCase() === normLyric.toLowerCase());
-              if (existingGroup) {
-                existingGroup.names.push(h.name);
-              } else {
-                groups.push({ lyric: h.lyric, names: [h.name] });
-              }
-            });
-
-            if (groups.length > 0) {
-              sheetHTML += `<div class="print-hint-container">`;
-              groups.forEach(g => {
-                const badgeText = g.names.map(n => n.toUpperCase()).join(' & ');
-                const labelSuffix = g.names.length > 1 ? ` <span style="font-size: 8px; opacity: 0.6; font-weight: normal; margin-left: 4px;">(Shared first line for ${g.names.length} sections)</span>` : '';
-                sheetHTML += `
-                  <div class="print-hint-line">
-                    <span class="print-hint-badge">${badgeText}</span>
-                    <span class="print-hint-text">“${g.lyric}”${labelSuffix}</span>
-                  </div>
-                `;
-              });
-              sheetHTML += `</div>`;
-            }
-          } else {
-            const lines = songTemplates[block.name] || [];
-            const firstLyric = lines.find((l: any) => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
-            if (firstLyric) {
-              sheetHTML += `
-                <div class="print-hint-container">
-                  <div class="print-hint-line">
-                    <span class="print-hint-badge">${block.name.toUpperCase()}</span>
-                    <span class="print-hint-text">“${firstLyric}”</span>
-                  </div>
-                </div>
-              `;
-            }
-          }
-        }
-
-        // Get only enabled lines for this block
-        const enabledLinesList = templateLines
-          .map((l: any, lIdx: number) => ({ l, lIdx }))
-          .filter(({ lIdx }: any) => (block.enabledLines || []).includes(lIdx));
-
-        const processedLines = enabledLinesList.map(({ l, lIdx }: any) => {
-          const transposed = transposeChord(l.Chords || '', totalSemitonesOffset);
-          const numbers = getNumberForChord(transposed, blockKeyName, songKey);
-          const lyrics = l.Lyrics || '';
-          return {
-            l,
-            lIdx,
-            transposed,
-            numbers,
-            lyrics,
-          };
-        });
-
-        // Find the best multi-line chord progression loop (pattern length L, repeat count K)
-        let bestL = -1;
-        let bestK = -1;
-        const N = processedLines.length;
-
-        if (!showLyrics && N >= 4) {
-          for (let L = 2; L <= Math.floor(N / 2); L++) {
-            let K = 1;
-            while ((K + 1) * L <= N) {
-              let matches = true;
-              for (let offset = 0; offset < L; offset++) {
-                const originalChord = processedLines[offset].transposed;
-                const nextChord = processedLines[K * L + offset].transposed;
-                if (originalChord !== nextChord) {
-                  matches = false;
-                  break;
-                }
-              }
-              if (matches) {
-                K++;
-              } else {
-                break;
-              }
-            }
-
-            if (K >= 2) {
-              // Make sure at least one line in the pattern has non-empty chords
-              let hasChords = false;
-              for (let offset = 0; offset < L; offset++) {
-                if (processedLines[offset].transposed && processedLines[offset].transposed.trim() !== '') {
-                  hasChords = true;
-                  break;
-                }
-              }
-
-              if (hasChords) {
-                if (bestL === -1 || (K * L > bestK * bestL) || (K * L === bestK * bestL && L < bestL)) {
-                  bestL = L;
-                  bestK = K;
-                }
-              }
-            }
-          }
-        }
-
-        // Render with Loop-Grouping if a pattern is detected
-        if (bestL >= 2 && bestK >= 2) {
-          const loopLength = bestL;
-          const repeatCount = bestK;
-          const loopedLinesCount = loopLength * repeatCount;
-
-          const lyricsAreIdenticalOrHidden = !showLyrics || (() => {
-            for (let r = 1; r < repeatCount; r++) {
-              for (let offset = 0; offset < loopLength; offset++) {
-                const lineA = processedLines[offset];
-                const lineB = processedLines[r * loopLength + offset];
-                if ((lineA.lyrics || '') !== (lineB.lyrics || '')) {
-                  return false;
-                }
-              }
-            }
-            return true;
-          })();
-
-          if (lyricsAreIdenticalOrHidden) {
-            const runLines = processedLines.slice(0, loopLength);
-            sheetHTML += `
-              <div class="print-loop-container print-loop-amber">
-                <div class="print-loop-badge-row">
-                  <span class="print-loop-badge">🔁 PLAY ${repeatCount}X</span>
-                  <span class="print-loop-subtitle">(chords progression repeats)</span>
-                </div>
-                <div class="print-loop-lines">
-            `;
-            runLines.forEach((lineData) => {
-              const { transposed, numbers, lyrics } = lineData;
-              sheetHTML += `<div class="print-line">`;
-              if (displayMode !== 'numbers' && transposed) {
-                sheetHTML += `<div class="print-chord-line">${transposed}</div>`;
-              }
-              if (displayMode !== 'chords' && numbers) {
-                sheetHTML += `<div class="print-num-line">${numbers}</div>`;
-              }
-              if (showLyrics && lyrics) {
-                sheetHTML += `<div class="print-lyric-line">${lyrics}</div>`;
-              }
-              sheetHTML += `</div>`;
-            });
-            sheetHTML += `
-                </div>
-              </div>
-            `;
-          } else {
-            for (let r = 0; r < repeatCount; r++) {
-              const runLines = processedLines.slice(r * loopLength, (r + 1) * loopLength);
-              const isFirst = (r === 0);
-              sheetHTML += `
-                <div class="print-loop-container print-loop-indigo">
-                  <div class="print-loop-badge-row">
-                    ${isFirst ? `
-                      <span class="print-loop-badge" style="background-color: #fef3c7; color: #b45309; border: 1px solid #fde68a;">🔁 CHORD LOOP (${repeatCount}X) — ROUND 1</span>
-                      <span class="print-loop-subtitle">(chords progression pattern repeats)</span>
-                    ` : `
-                      <span class="print-loop-badge" style="background-color: #e0e7ff; color: #4338ca; border: 1px solid #c7d2fe;">🔁 ROUND ${r + 1}</span>
-                      <span class="print-loop-subtitle">(identical chords as Round 1)</span>
-                    `}
-                  </div>
-                  <div class="print-loop-lines">
-              `;
-              runLines.forEach((lineData) => {
-                const { transposed, numbers, lyrics } = lineData;
-                sheetHTML += `<div class="print-line">`;
-                if (displayMode !== 'numbers' && transposed) {
-                  sheetHTML += `<div class="print-chord-line">${transposed}</div>`;
-                }
-                if (displayMode !== 'chords' && numbers) {
-                  sheetHTML += `<div class="print-num-line">${numbers}</div>`;
-                }
-                if (showLyrics && lyrics) {
-                  sheetHTML += `<div class="print-lyric-line">${lyrics}</div>`;
-                }
-                sheetHTML += `</div>`;
-              });
-              sheetHTML += `
-                  </div>
-                </div>
-              `;
-            }
-          }
-
-          const remainingLines = processedLines.slice(loopedLinesCount);
-          if (remainingLines.length > 0) {
-            sheetHTML += `<div class="print-remaining-lines">`;
-            remainingLines.forEach((lineData) => {
-              const { transposed, numbers, lyrics } = lineData;
-              sheetHTML += `<div class="print-line">`;
-              if (displayMode !== 'numbers' && transposed) {
-                sheetHTML += `<div class="print-chord-line">${transposed}</div>`;
-              }
-              if (displayMode !== 'chords' && numbers) {
-                sheetHTML += `<div class="print-num-line">${numbers}</div>`;
-              }
-              if (showLyrics && lyrics) {
-                sheetHTML += `<div class="print-lyric-line">${lyrics}</div>`;
-              }
-              sheetHTML += `</div>`;
-            });
-            sheetHTML += `</div>`;
-          }
-        } else {
-          // Fallback: Compute consecutive runs of identical lines
-          const lineRuns: { startIndex: number; endIndex: number; count: number }[] = [];
-          let i = 0;
-          while (i < processedLines.length) {
-            let j = i + 1;
-            while (j < processedLines.length) {
-              const lineA = processedLines[i];
-              const lineB = processedLines[j];
-
-              const chordsIdentical = lineA.transposed === lineB.transposed;
-              const lyricsIdentical = !showLyrics || lineA.lyrics === lineB.lyrics;
-
-              if (chordsIdentical && lyricsIdentical) {
-                j++;
-              } else {
-                break;
-              }
-            }
-
-            lineRuns.push({
-              startIndex: i,
-              endIndex: j - 1,
-              count: j - i,
-            });
-
-            i = j;
-          }
-
-          lineRuns.forEach((run) => {
-            const firstLine = processedLines[run.startIndex];
-            const { transposed, numbers, lyrics } = firstLine;
-
-            sheetHTML += `<div class="print-line">`;
-            if (displayMode !== 'numbers' && transposed) {
-              sheetHTML += `
-                <div class="print-chord-line" style="display: flex; align-items: center; gap: 8px;">
-                  <span>${transposed}</span>
-                  ${run.count > 1 ? `
-                    <span class="print-run-badge">${run.count}x</span>
-                  ` : ''}
-                </div>
-              `;
-            }
-            if (displayMode !== 'chords' && numbers) {
-              sheetHTML += `
-                <div class="print-num-line">${numbers}</div>
-              `;
-            }
-            if (showLyrics && lyrics) {
-              sheetHTML += `
-                <div class="print-lyric-line">${lyrics}</div>
-              `;
-            }
-            sheetHTML += `</div>`;
-          });
-        }
-
-        sheetHTML += `
-            </div>
-          </div>
-        `;
-      });
-
-      bodyHTML += `
-        <div class="print-song-page">
-          <div class="header-container">
-            <div class="title-row">
-              <div>
-                <h1 class="song-title">
-                  ${isInsideSetlistContext && pdfScope !== 'current' ? `<span class="song-index-badge">#${setlists.indexOf(String(song.SongID)) + 1}</span> ` : ''}
-                  ${title}
-                </h1>
-                <h2 class="song-artist">BY ${artist}</h2>
-              </div>
-              <div class="song-key">${`KEY: ${songKey}`.toUpperCase()}</div>
-            </div>
-          </div>
-
-          <div class="roadmap-container">
-            <div class="roadmap-title">FLOW ROADMAP (TRANSPOSED SEQUENCE)</div>
-            <div class="roadmap-sequence">${roadmapHorizontal}</div>
-          </div>
-
-          <div class="sheet-body">
-            ${sheetHTML}
-          </div>
-        </div>
-      `;
-    });
-
-    // Mount Hidden Print IFrame
-    const iframe = document.createElement('iframe');
-    iframe.style.position = 'fixed';
-    iframe.style.bottom = '0';
-    iframe.style.right = '0';
-    iframe.style.width = '0';
-    iframe.style.height = '0';
-    iframe.style.border = 'none';
-    document.body.appendChild(iframe);
-
-    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
-    if (!iframeDoc) return;
-
-    iframeDoc.open();
-    iframeDoc.write(`
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <title>${docTitle}</title>
-          <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
-          <style>
-            @page {
-              size: A4;
-              margin: 15mm 15mm 15mm 15mm;
-            }
-            body {
-              font-family: 'Inter', sans-serif;
-              color: #0f172a;
-              background-color: #ffffff;
-              margin: 0;
-              padding: 0;
-              -webkit-print-color-adjust: exact;
-              print-color-adjust: exact;
-            }
-            .print-song-page {
-              page-break-after: always;
-              break-after: page;
-            }
-            .print-song-page:last-child {
-              page-break-after: avoid;
-              break-after: avoid;
-            }
-            .header-container {
-              border-bottom: 2px solid #0f172a;
-              padding-bottom: 8px;
-              margin-bottom: 16px;
-            }
-            .title-row {
-              display: flex;
-              justify-content: space-between;
-              align-items: flex-end;
-            }
-            .song-title {
-              font-size: 20px;
-              font-weight: 900;
-              color: #0f172a;
-              margin: 0;
-              letter-spacing: -0.5px;
-              display: flex;
-              align-items: center;
-              gap: 8px;
-            }
-            .song-index-badge {
-              font-size: 13px;
-              background-color: #0f172a;
-              color: #ffffff;
-              padding: 2px 6px;
-              border-radius: 4px;
-              font-weight: 900;
-            }
-            .song-artist {
-              font-size: 11px;
-              font-weight: 700;
-              color: #475569;
-              margin: 2px 0 0 0;
-            }
-            .song-key {
-              font-size: 12px;
-              font-weight: 900;
-              color: #4f46e5;
-              border: 1.5px solid #4f46e5;
-              padding: 4px 10px;
-              border-radius: 6px;
-              font-family: monospace;
-              letter-spacing: 0.5px;
-            }
-            .roadmap-container {
-              background-color: #f8fafc;
-              border: 1px solid #e2e8f0;
-              border-radius: 6px;
-              padding: 10px 12px;
-              margin-bottom: 20px;
-            }
-            .roadmap-title {
-              font-size: 9px;
-              font-weight: 900;
-              color: #64748b;
-              text-transform: uppercase;
-              letter-spacing: 0.8px;
-              margin-bottom: 4px;
-            }
-            .roadmap-sequence {
-              font-size: 10px;
-              font-weight: 700;
-              color: #1e293b;
-              line-height: 1.4;
-            }
-            .print-section {
-              margin-bottom: 18px;
-              break-inside: avoid;
-            }
-            .print-section-header {
-              font-size: 12px;
-              font-weight: 900;
-              color: #1e1b4b;
-              border-bottom: 1px solid #cbd5e1;
-              padding-bottom: 3px;
-              margin-top: 0;
-              margin-bottom: 10px;
-              letter-spacing: 0.5px;
-            }
-            .print-lines {
-              padding-left: 8px;
-            }
-            .print-line {
-              margin-bottom: 10px;
-              break-inside: avoid;
-            }
-            .print-chord-line {
-              font-family: 'Courier New', Courier, monospace;
-              font-size: 12px;
-              font-weight: bold;
-              color: #4f46e5;
-              white-space: pre;
-              line-height: 1.1;
-              margin-bottom: 1.5px;
-            }
-            .print-num-line {
-              font-family: 'Courier New', Courier, monospace;
-              font-size: 10px;
-              font-weight: bold;
-              color: #64748b;
-              white-space: pre;
-              line-height: 1.1;
-              margin-bottom: 1.5px;
-            }
-            .print-lyric-line {
-              font-size: 11px;
-              color: #334155;
-              line-height: 1.35;
-            }
-            .print-hint-container {
-              margin-bottom: 8px;
-              padding: 4px 6px;
-              background-color: #f1f5f9;
-              border-left: 2px solid #6366f1;
-              border-radius: 0 4px 4px 0;
-            }
-            .print-hint-line {
-              display: flex;
-              align-items: center;
-              gap: 6px;
-              font-size: 10px;
-              font-style: italic;
-              color: #475569;
-              line-height: 1.3;
-            }
-            .print-hint-badge {
-              font-size: 8px;
-              font-weight: 900;
-              font-style: normal;
-              color: #4f46e5;
-              background-color: #e0e7ff;
-              padding: 1px 4px;
-              border-radius: 3px;
-              text-transform: uppercase;
-              letter-spacing: 0.5px;
-            }
-            .print-hint-text {
-              overflow: hidden;
-              text-overflow: ellipsis;
-              white-space: nowrap;
-            }
-            .print-loop-container {
-              border-left: 3px solid #cbd5e1;
-              padding: 6px 10px;
-              border-radius: 0 6px 6px 0;
-              margin: 10px 0;
-              break-inside: avoid;
-            }
-            .print-loop-amber {
-              border-left-color: #f59e0b;
-              background-color: #fffbeb;
-            }
-            .print-loop-indigo {
-              border-left-color: #6366f1;
-              background-color: #f5f3ff;
-            }
-            .print-loop-badge-row {
-              display: flex;
-              align-items: center;
-              gap: 8px;
-              margin-bottom: 6px;
-            }
-            .print-loop-badge {
-              font-size: 8px;
-              font-weight: 900;
-              text-transform: uppercase;
-              letter-spacing: 0.5px;
-              padding: 2px 6px;
-              border-radius: 4px;
-            }
-            .print-loop-amber .print-loop-badge {
-              background-color: #fef3c7;
-              color: #b45309;
-              border: 1px solid #fde68a;
-            }
-            .print-loop-indigo .print-loop-badge {
-              background-color: #e0e7ff;
-              color: #4338ca;
-              border: 1px solid #c7d2fe;
-            }
-            .print-loop-subtitle {
-              font-size: 8px;
-              color: #64748b;
-              font-family: monospace;
-            }
-            .print-loop-lines {
-              display: flex;
-              flex-direction: column;
-              gap: 6px;
-            }
-            .print-run-badge {
-              font-size: 8px;
-              font-weight: 900;
-              color: #b45309;
-              background-color: #fef3c7;
-              border: 1px solid #fde68a;
-              padding: 1px 4px;
-              border-radius: 3px;
-              font-family: monospace;
-            }
-            .print-remaining-lines {
-              margin-top: 10px;
-              border-top: 1px dashed #cbd5e1;
-              padding-top: 10px;
-            }
-          </style>
-        </head>
-        <body>
-          <div class="sheet-body-container">
-            ${bodyHTML}
-          </div>
-
-          <script>
-            window.onload = function() {
-              window.focus();
-              window.print();
-              setTimeout(function() {
-                window.frameElement.parentNode.removeChild(window.frameElement);
-              }, 1000);
-            };
-          </script>
-        </body>
-      </html>
-    `);
-    iframeDoc.close();
-  };
-
-  // Export Complete User Manual to PDF Layout
-  const exportManualToPDF = () => {
-    const docTitle = "ChordSheet Live Flow - Complete User Guide & Stage Manual";
-
-    const bodyHTML = `
-      <div class="print-song-page">
-        <div class="header-container" style="border-bottom: 3px solid #4f46e5; padding-bottom: 12px; margin-bottom: 24px;">
-          <div class="title-row" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-            <div>
-              <h1 class="song-title" style="font-size: 24px; font-weight: 900; color: #1e1b4b; margin: 0; letter-spacing: -1.5px; display: flex; align-items: center; gap: 8px;">
-                🎸 CHORDSHEET LIVE FLOW
-              </h1>
-              <h2 class="song-artist" style="font-size: 11px; font-weight: 700; color: #4f46e5; margin-top: 4px; text-transform: uppercase; letter-spacing: 1px;">
-                Complete Stage Manual & Technical Guide
-              </h2>
-            </div>
-            <div class="song-key" style="font-size: 10px; font-weight: 900; color: #4f46e5; border: 1.5px solid #4f46e5; padding: 4px 10px; border-radius: 6px; font-family: monospace; letter-spacing: 0.5px;">
-              VERSION 2.1
-            </div>
-          </div>
-        </div>
-
-        <div style="margin-bottom: 24px; font-size: 12px; line-height: 1.6; color: #334155;">
-          <p style="font-size: 13px; font-weight: bold; color: #0f172a; margin-bottom: 6px;">Welcome to worshipchordbook - ChordSheet Live Flow!</p>
-          <p>This manual provides complete documentation on operating, configuring, and installing this interactive digital music stand. ChordSheet Live Flow is designed for live stage musicians, worship leaders, and music directors seeking dynamic transposing, automatic scrolling, setlist mapping, and robust offline capability.</p>
-        </div>
-
-        <div class="print-section" style="margin-bottom: 18px; break-inside: avoid;">
-          <h3 class="print-section-header" style="font-size: 13px; font-weight: 900; color: #1e1b4b; border-bottom: 1px solid #cbd5e1; padding-bottom: 3px; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase;">
-            1. Core Functional Component Manual
-          </h3>
-          <div style="font-size: 11px; line-height: 1.6; color: #334155; padding-left: 8px;">
-            <div style="margin-bottom: 10px;">
-              <strong style="color: #0f172a; font-size: 11.5px; display: block;">🔄 Dynamic Transposition & Musical Keys</strong>
-              <span>Our transposition engine supports full 12-key modulation. Change the key of any song on the fly using the transposition buttons in the control bar. The chords will re-transpose instantly across all sections of your active arrangement, including inline repeats.</span>
-            </div>
-            <div style="margin-bottom: 10px;">
-              <strong style="color: #0f172a; font-size: 11.5px; display: block;">⏱️ Advanced Metronome & Speed Controllers</strong>
-              <span>Includes an interactive metronome with speed tap tempo. Adjust target BPM via manual step or by clicking the TAP button to sync immediately. The visual flash indicator stays aligned with your active beat, supporting dual-channel tempo monitoring on stage.</span>
-            </div>
-            <div style="margin-bottom: 10px;">
-              <strong style="color: #0f172a; font-size: 11.5px; display: block;">📜 Smart Auto-Scroll with Speed Tracking</strong>
-              <span>Activate hands-free autoscrolling during live sets. Speed parameters adapt dynamically based on your screen height and scrolling speed. Seamlessly start, pause, or reset with standard foot pedals or touchscreen taps.</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="print-section" style="margin-bottom: 18px; break-inside: avoid; page-break-before: always; break-before: page;">
-          <h3 class="print-section-header" style="font-size: 13px; font-weight: 900; color: #1e1b4b; border-bottom: 1px solid #cbd5e1; padding-bottom: 3px; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase;">
-            2. Interactive Visual Helpers & Diagnostics
-          </h3>
-          <div style="font-size: 11px; line-height: 1.6; color: #334155; padding-left: 8px;">
-            <div style="margin-bottom: 10px;">
-              <strong style="color: #0f172a; font-size: 11.5px; display: block;">🎹 Interactive Piano Keyboards & Guitar Fretboards</strong>
-              <span>Tap on any chord name inside a sheet section to display its direct finger-placements on our live virtual instrument helper. Interactive diagrams show exact fingering on the keyboard and fretboard.</span>
-            </div>
-            <div style="margin-bottom: 10px;">
-              <strong style="color: #0f172a; font-size: 11.5px; display: block;">⚡ Live Setlist Organizers & Custom Preset Drafting</strong>
-              <span>Create setlists, sequence songs in your performance order, and map customized structures. You can drag and drop to re-sequence songs inside any folder, modify chord arrangements, and save presets permanently to local cache and synchronized database registers.</span>
-            </div>
-            <div style="margin-bottom: 10px;">
-              <strong style="color: #0f172a; font-size: 11.5px; display: block;">🩺 Local Real-Time Database Diagnostics</strong>
-              <span>Review network latency, sync status, and storage performance directly. The Diagnostic panel provides detailed readouts of the sync payload, active Google Sheets cells, and offline cache integrity.</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="print-section" style="margin-bottom: 18px; break-inside: avoid; page-break-before: always; break-before: page;">
-          <h3 class="print-section-header" style="font-size: 13px; font-weight: 900; color: #1e1b4b; border-bottom: 1px solid #cbd5e1; padding-bottom: 3px; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase;">
-            3. Mobile PWA Installation & Offline Pre-Caching
-          </h3>
-          <div style="font-size: 11px; line-height: 1.6; color: #334155; padding-left: 8px;">
-            <p style="margin-bottom: 12px;">This web application is configured as an installable Progressive Web App (PWA), turning the website into a standalone native-feeling application with full offline capabilities on your mobile device.</p>
-            
-            <div style="margin-bottom: 12px;">
-              <strong style="color: #0f172a; font-size: 11.5px; display: block;">🍏 iOS Installation (Safari Browser)</strong>
-              <ol style="margin-top: 4px; padding-left: 18px;">
-                <li style="margin-bottom: 3px;">Open the application URL in your native <strong>Safari</strong> browser.</li>
-                <li style="margin-bottom: 3px;">Tap the <strong>Share</strong> button (box with an upward arrow) in the browser navigation bar.</li>
-                <li style="margin-bottom: 3px;">Scroll down and tap <strong>Add to Home Screen</strong>.</li>
-                <li style="margin-bottom: 3px;">Tap <strong>Add</strong> in the upper right. The app will launch as a distraction-free, fullscreen application!</li>
-              </ol>
-            </div>
-
-            <div style="margin-bottom: 12px;">
-              <strong style="color: #0f172a; font-size: 11.5px; display: block;">🤖 Android Installation (Google Chrome / Samsung Internet)</strong>
-              <ol style="margin-top: 4px; padding-left: 18px;">
-                <li style="margin-bottom: 3px;">Open the application URL in <strong>Chrome</strong>.</li>
-                <li style="margin-bottom: 3px;">A prompt "Add ChordSheet to Home Screen" or an <strong>Install App</strong> button will appear dynamically in the sidebar. Click it!</li>
-                <li style="margin-bottom: 3px;">Alternatively, tap the <strong>Menu</strong> (three dots in upper right) and choose <strong>Install App</strong>.</li>
-              </ol>
-            </div>
-
-            <div style="margin-bottom: 12px;">
-              <strong style="color: #0f172a; font-size: 11.5px; display: block;">📶 Seamless Offline Mode</strong>
-              <span>Once installed, the PWA Service Worker caches the interface, fonts, and assets automatically. In the absence of network connection, the app switches to offline cache mode, enabling full access to your setlists, transposition features, local arrangements, metronomes, and visuals. All edits are saved to LocalStorage and synced automatically when network service is restored!</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="print-section" style="margin-bottom: 18px; break-inside: avoid; page-break-before: always; break-before: page;">
-          <h3 class="print-section-header" style="font-size: 13px; font-weight: 900; color: #1e1b4b; border-bottom: 1px solid #cbd5e1; padding-bottom: 3px; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase;">
-            4. Performance Keyboard Shortcuts Reference
-          </h3>
-          <table style="width: 100%; border-collapse: collapse; font-size: 11px; color: #334155; text-align: left; margin-top: 8px;">
-            <thead>
-              <tr style="border-bottom: 2px solid #0f172a;">
-                <th style="padding: 6px 4px; font-weight: bold; color: #0f172a; width: 30%;">KEYSTROKE</th>
-                <th style="padding: 6px 4px; font-weight: bold; color: #0f172a;">STAGE ACTION / COMMAND RESPONSE</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr style="border-bottom: 1px solid #e2e8f0;">
-                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">Spacebar</td>
-                <td style="padding: 6px 4px;">Pause or Resume auto-scroller scrolling action</td>
-              </tr>
-              <tr style="border-bottom: 1px solid #e2e8f0;">
-                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">Arrow Up / Down</td>
-                <td style="padding: 6px 4px;">Increase / Decrease auto-scrolling speed on active sheet</td>
-              </tr>
-              <tr style="border-bottom: 1px solid #e2e8f0;">
-                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">M</td>
-                <td style="padding: 6px 4px;">Toggle Metronome audio beat and visual pulse indicator</td>
-              </tr>
-              <tr style="border-bottom: 1px solid #e2e8f0;">
-                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">T</td>
-                <td style="padding: 6px 4px;">Tap Tempo (tap multiple times to set BPM speed)</td>
-              </tr>
-              <tr style="border-bottom: 1px solid #e2e8f0;">
-                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">F</td>
-                <td style="padding: 6px 4px;">Toggle Stage Fullscreen view for distraction-free performance</td>
-              </tr>
-              <tr style="border-bottom: 1px solid #e2e8f0;">
-                <td style="padding: 6px 4px; font-family: monospace; font-weight: bold; color: #4f46e5;">Esc</td>
-                <td style="padding: 6px 4px;">Close any open modal panels or exit fullscreen view</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    `;
-
-    // Mount Hidden Print IFrame
-    const iframe = document.createElement('iframe');
-    iframe.style.position = 'fixed';
-    iframe.style.bottom = '0';
-    iframe.style.right = '0';
-    iframe.style.width = '0';
-    iframe.style.height = '0';
-    iframe.style.border = 'none';
-    document.body.appendChild(iframe);
-
-    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
-    if (!iframeDoc) return;
-
-    iframeDoc.open();
-    iframeDoc.write(`
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <title>${docTitle}</title>
-          <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap" rel="stylesheet">
-          <style>
-            @page {
-              size: A4;
-              margin: 15mm 15mm 15mm 15mm;
-            }
-            body {
-              font-family: 'Inter', sans-serif;
-              color: #0f172a;
-              background-color: #ffffff;
-              margin: 0;
-              padding: 0;
-              -webkit-print-color-adjust: exact;
-              print-color-adjust: exact;
-            }
-            .print-song-page {
-              page-break-after: always;
-              break-after: page;
-            }
-            .print-song-page:last-child {
-              page-break-after: avoid;
-              break-after: avoid;
-            }
-          </style>
-        </head>
-        <body>
-          <div class="sheet-body-container">
-            ${bodyHTML}
-          </div>
-
-          <script>
-            window.onload = function() {
-              window.focus();
-              window.print();
-              setTimeout(function() {
-                window.frameElement.parentNode.removeChild(window.frameElement);
-              }, 1000);
-            };
-          </script>
-        </body>
-      </html>
-    `);
-    iframeDoc.close();
-    showToast("Opening system print dialog for ChordSheet Live Flow Manual...", "success");
+    return { song, activeKey, activeRoadmapToUse, templates };
   };
 
   return (
-    <div className="text-gray-100 min-h-screen selection:bg-indigo-500/30 selection:text-white bg-fixed">
-      {/* Header Sticky Ingress */}
-      <header
-        id="stageHeader"
-        className="sticky top-0 bg-[#0f111a]/80 backdrop-blur-xl pb-2 px-3 sm:px-4 z-[80] flex items-center justify-between shadow-[0_4px_30px_rgba(0,0,0,0.5)] border-b border-white/5 transition-all duration-150"
-        style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 8px)' }}
-      >
-        <div className="flex items-center gap-2 sm:gap-3">
-          <button
-            onClick={() => setIsNavOpen(true)}
-            className="p-1.5 sm:p-2 btn-5d rounded-lg text-indigo-400 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 6h16M4 12h16M4 18h16" />
-            </svg>
-            <span className="hidden sm:inline drop-shadow-md">MENU</span>
-          </button>
-          <button
-            onClick={() => {
-              setCurrentSong(null);
-              setIsScrollingActive(false);
-              setIsMetronomeActive(false);
-            }}
-            className="p-1.5 sm:p-2 btn-5d rounded-lg text-emerald-400 font-bold text-xs flex items-center justify-center cursor-pointer"
-            title="Home Dashboard"
-          >
-            <svg className="w-4 h-4 drop-shadow-md" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="2.5"
-                d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"
-              />
-            </svg>
-          </button>
-          <div className="flex items-center gap-1.5 select-none">
-            <svg
-              className="w-5 h-5 drop-shadow-[0_2px_4px_rgba(99,102,241,0.5)] flex-shrink-0 animate-pulse"
-              viewBox="0 0 120 120"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <defs>
-                <linearGradient id="header-music-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" stopColor="#818cf8" />
-                  <stop offset="100%" stopColor="#312e81" />
-                </linearGradient>
-              </defs>
-              <rect x="10" y="10" width="100" height="100" rx="30" fill="url(#header-music-grad)" />
-              <path
-                d="M45 80 v-40 l35 -10 v40"
-                fill="none"
-                stroke="#ffffff"
-                strokeWidth="8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              <circle cx="35" cy="80" r="12" fill="#ffffff" />
-              <circle cx="70" cy="70" r="12" fill="#ffffff" />
-            </svg>
-            <h1 className="text-sm sm:text-base font-bold tracking-wide text-transparent bg-clip-text bg-gradient-to-r from-indigo-300 to-white select-none truncate max-w-[140px] sm:max-w-none drop-shadow-sm lowercase">
-              worshipchordbook
-            </h1>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          {lastSynced && (
-            <div
-              className={`hidden sm:flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-[10px] font-bold uppercase tracking-widest ${
-                isOfflineMode 
-                  ? 'bg-amber-950/30 border-amber-500/20 text-amber-400'
-                  : 'bg-emerald-950/30 border-emerald-500/20 text-emerald-400'
-              }`}
-              title={isOfflineMode ? `Offline Mode - Last Synced: ${new Date(lastSynced).toLocaleString()}` : "Live - Connected to Database"}
-            >
-              <span className={`w-2 h-2 rounded-full ${isOfflineMode ? 'bg-amber-500' : 'bg-emerald-500'} ${!isOfflineMode && 'animate-pulse'}`}></span>
-              <span>{isOfflineMode ? 'Offline' : 'Live'}</span>
-            </div>
-          )}
-          <button
-            onClick={toggleFullScreen}
-            className="p-1.5 sm:p-2 btn-5d rounded-lg text-gray-400 hover:text-white hidden sm:flex items-center justify-center cursor-pointer"
-            title="Toggle Fullscreen"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="2"
-                d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"
-              />
-            </svg>
-          </button>
-          <button
-            onClick={() => setIsShortcutsOpen(true)}
-            className="hidden sm:block p-1.5 sm:p-2 btn-5d rounded-lg text-gray-400 hover:text-white cursor-pointer"
-            title="Keyboard Shortcuts"
-          >
-            ⌨
-          </button>
-          <button
-            onClick={handleAdminLockToggle}
-            className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 sm:py-1.5 btn-5d rounded-lg text-[10px] font-bold text-gray-400 uppercase tracking-widest cursor-pointer"
-          >
-            <span className="text-xs">{appUser && appSecret ? '🔓' : '🔒'}</span>
-            <span className="hidden sm:inline drop-shadow-md">
-              {appUser && appSecret ? 'Admin' : 'View Only'}
-            </span>
-          </button>
-        </div>
-      </header>
-
-      {/* Main Workspace Frame */}
-      <main id="appView" className="max-w-5xl mx-auto p-2 sm:p-3 md:p-4 pb-32">
-        {!currentSong ? (
-          /* Home view dashboard */
-          <div className="p-6 md:p-10 bg-indigo-950/10 backdrop-blur-xl rounded-2xl sm:rounded-[2.5rem] shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] border border-indigo-500/20 transition-all overflow-hidden relative">
-            <div className="flex items-center gap-4 sm:gap-6 mb-2 animate-blur-fade relative z-10">
-              <div className="flex-shrink-0">
-                <svg
-                  className="w-16 h-16 sm:w-20 sm:h-20 drop-shadow-[0_10px_20px_rgba(99,102,241,0.5)] animate-music-float"
-                  viewBox="0 0 120 120"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <defs>
-                    <linearGradient id="music-grad1" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#818cf8" />
-                      <stop offset="100%" stopColor="#312e81" />
-                    </linearGradient>
-                    <linearGradient id="music-shine" x1="0%" y1="0%" x2="0%" y2="100%">
-                      <stop offset="0%" stopColor="#ffffff" stopOpacity="0.6" />
-                      <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-                    </linearGradient>
-                  </defs>
-                  <rect x="10" y="10" width="100" height="100" rx="30" fill="url(#music-grad1)" />
-                  <rect x="10" y="10" width="100" height="100" rx="30" fill="url(#music-shine)" opacity="0.5" />
-                  <path
-                    d="M45 80 v-40 l35 -10 v40"
-                    fill="none"
-                    stroke="#ffffff"
-                    strokeWidth="8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    filter="drop-shadow(0 4px 8px rgba(0,0,0,0.4))"
-                  />
-                  <circle cx="35" cy="80" r="12" fill="#ffffff" filter="drop-shadow(0 4px 8px rgba(0,0,0,0.4))" />
-                  <circle cx="70" cy="70" r="12" fill="#ffffff" filter="drop-shadow(0 4px 8px rgba(0,0,0,0.4))" />
-                </svg>
-              </div>
-              <h2 className="text-3xl sm:text-5xl font-extrabold tracking-tight text-white select-none leading-tight">
-                Welcome to <br className="hidden sm:block" />
-                <span className="text-shimmer drop-shadow-[0_2px_10px_rgba(139,92,246,0.3)]">
-                  worshipchordbook
-                </span>
-              </h2>
-            </div>
-
-            <p className="text-sm sm:text-lg text-indigo-200/80 mb-10 max-w-2xl font-medium mt-4 select-none animate-blur-fade delay-100 relative z-10">
-              Your intelligent, stage-ready digital music stand. Select a song from the library to begin
-              playing, or jump straight into your curated sets below.
-            </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 sm:gap-8 animate-blur-fade delay-200 relative z-10">
-              <div
-                onClick={() => {
-                  setCurrentTab('songs');
-                  setIsNavOpen(true);
-                }}
-                className="group cursor-pointer bg-gradient-to-br from-black/40 to-indigo-950/40 hover:from-indigo-900/40 hover:to-blue-900/40 p-8 rounded-[2rem] border border-white/5 hover:border-sky-500/50 transition-all duration-500 shadow-2xl hover:shadow-[0_20px_40px_rgba(56,189,248,0.2)] active:scale-95 flex flex-col items-center text-center relative overflow-hidden"
-              >
-                <div className="absolute inset-0 bg-gradient-to-t from-sky-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-                <svg
-                  className="w-20 h-20 mb-5 group-hover:scale-110 group-hover:-translate-y-2 transition-all duration-500 drop-shadow-[0_15px_25px_rgba(56,189,248,0.4)] relative z-10"
-                  viewBox="0 0 120 120"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <defs>
-                    <linearGradient id="cat-grad1" x1="20%" y1="0%" x2="80%" y2="100%">
-                      <stop offset="0%" stopColor="#38bdf8" />
-                      <stop offset="100%" stopColor="#312e81" />
-                    </linearGradient>
-                    <linearGradient id="cat-grad2" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#7dd3fc" />
-                      <stop offset="100%" stopColor="#0284c7" />
-                    </linearGradient>
-                    <linearGradient id="cat-shine" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#ffffff" stopOpacity="0.6" />
-                      <stop offset="50%" stopColor="#ffffff" stopOpacity="0.1" />
-                      <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-                    </linearGradient>
-                  </defs>
-                  <rect x="25" y="25" width="60" height="75" rx="12" fill="url(#cat-grad1)" />
-                  <rect x="35" y="15" width="60" height="75" rx="12" fill="url(#cat-grad2)" />
-                  <rect x="35" y="15" width="60" height="75" rx="12" fill="url(#cat-shine)" />
-                  <path
-                    d="M50 40h30M50 55h20"
-                    stroke="#ffffff"
-                    strokeWidth="5"
-                    strokeLinecap="round"
-                    filter="drop-shadow(0 4px 6px rgba(0,0,0,0.4))"
-                  />
-                </svg>
-                <h3 className="text-white font-bold text-xl mb-1 tracking-wide relative z-10">
-                  Browse Catalog
-                </h3>
-                <p className="text-sm text-sky-300/80 font-mono relative z-10">
-                  {songs.length} total songs
-                </p>
-              </div>
-
-              <div
-                onClick={() => {
-                  setCurrentTab('setlists');
-                  setIsNavOpen(true);
-                }}
-                className="group cursor-pointer bg-gradient-to-br from-black/40 to-indigo-950/40 hover:from-purple-900/40 hover:to-fuchsia-900/40 p-8 rounded-[2rem] border border-white/5 hover:border-fuchsia-500/50 transition-all duration-500 shadow-2xl hover:shadow-[0_20px_40px_rgba(192,132,252,0.2)] active:scale-95 flex flex-col items-center text-center relative overflow-hidden"
-              >
-                <div className="absolute inset-0 bg-gradient-to-t from-fuchsia-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-                <svg
-                  className="w-20 h-20 mb-5 group-hover:scale-110 group-hover:-translate-y-2 transition-all duration-500 drop-shadow-[0_15px_25px_rgba(192,132,252,0.4)] relative z-10"
-                  viewBox="0 0 120 120"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <defs>
-                    <linearGradient id="set-grad1" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#4c1d95" />
-                      <stop offset="100%" stopColor="#1e1b4b" />
-                    </linearGradient>
-                    <linearGradient id="set-grad2" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#e879f9" />
-                      <stop offset="100%" stopColor="#9333ea" />
-                    </linearGradient>
-                    <linearGradient id="set-shine" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#ffffff" stopOpacity="0.8" />
-                      <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-                    </linearGradient>
-                  </defs>
-                  <rect x="20" y="20" width="80" height="80" rx="25" fill="url(#set-grad1)" />
-                  <path
-                    d="M65 15 L35 60 h25 L45 105 L90 50 H65 L80 15 Z"
-                    fill="url(#set-grad2)"
-                    filter="drop-shadow(0 5px 15px rgba(0,0,0,0.5))"
-                  />
-                  <path d="M65 15 L35 60 h25 L45 105 L90 50 H65 L80 15 Z" fill="url(#set-shine)" />
-                </svg>
-                <h3 className="text-white font-bold text-xl mb-1 tracking-wide relative z-10">
-                  Live Setlist
-                </h3>
-                <p className="text-sm text-fuchsia-300/80 font-mono relative z-10">
-                  {setlists.length} songs queued
-                </p>
-              </div>
-
-              <div
-                onClick={() => {
-                  setCurrentTab('favorites');
-                  setIsNavOpen(true);
-                }}
-                className="group cursor-pointer bg-gradient-to-br from-black/40 to-indigo-950/40 hover:from-amber-900/40 hover:to-orange-900/40 p-8 rounded-[2rem] border border-white/5 hover:border-amber-500/50 transition-all duration-500 shadow-2xl hover:shadow-[0_20px_40px_rgba(251,191,36,0.2)] active:scale-95 flex flex-col items-center text-center relative overflow-hidden"
-              >
-                <div className="absolute inset-0 bg-gradient-to-t from-amber-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-                <svg
-                  className="w-20 h-20 mb-5 group-hover:scale-110 group-hover:-translate-y-2 transition-all duration-500 drop-shadow-[0_15px_25px_rgba(251,191,36,0.4)] relative z-10"
-                  viewBox="0 0 120 120"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <defs>
-                    <linearGradient id="fav-grad1" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#78350f" />
-                      <stop offset="100%" stopColor="#451a03" />
-                    </linearGradient>
-                    <linearGradient id="fav-grad2" x1="0%" y1="10%" x2="100%" y2="90%">
-                      <stop offset="0%" stopColor="#fef08a" />
-                      <stop offset="100%" stopColor="#ea580c" />
-                    </linearGradient>
-                    <linearGradient id="fav-shine" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="#ffffff" stopOpacity="0.8" />
-                      <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-                    </linearGradient>
-                    <radialGradient id="fav-glow" cx="50%" cy="50%" r="50%">
-                      <stop offset="0%" stopColor="#fef08a" stopOpacity="1" />
-                      <stop offset="100%" stopColor="#fef08a" stopOpacity="0" />
-                    </radialGradient>
-                  </defs>
-                  <rect x="20" y="20" width="80" height="80" rx="40" fill="url(#fav-grad1)" />
-                  <path
-                    d="M60 20 l12 28 h30 l-24 18 9 29 -27 -18 -27 18 9 -29 -24 -18 h30 z"
-                    fill="url(#fav-grad2)"
-                    filter="drop-shadow(0 10px 15px rgba(0,0,0,0.5))"
-                  />
-                  <path
-                    d="M60 20 l12 28 h30 l-24 18 9 29 -27 -18 -27 18 9 -29 -24 -18 h30 z"
-                    fill="url(#fav-shine)"
-                  />
-                  <circle
-                    cx="60"
-                    cy="55"
-                    r="15"
-                    fill="url(#fav-glow)"
-                    opacity="0.6"
-                    style={{ mixBlendMode: 'screen' }}
-                  />
-                </svg>
-                <h3 className="text-white font-bold text-xl mb-1 tracking-wide relative z-10">Favorites</h3>
-                <p className="text-sm text-amber-300/80 font-mono relative z-10">{favorites.length} starred charts</p>
-              </div>
-            </div>
-          </div>
-        ) : (
-          /* ACTIVE SHEET WORKSPACE VIEW */
-          <div
-            className="p-2.5 sm:p-3 md:p-4 bg-gradient-to-br from-indigo-950/40 via-[#0a0b16]/60 to-[#05060a]/80 backdrop-blur-xl rounded-xl sm:rounded-2xl shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] border border-indigo-500/20 flex flex-col"
-          >
-            {/* Song Header Toolbar */}
-            <div className="flex-shrink-0 border-b border-indigo-500/10 pb-2 mb-1.5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 w-full">
-                <div className="flex-1 min-w-0 flex flex-col sm:flex-row sm:items-center sm:gap-3">
-                  <div ref={containerRef} className="overflow-hidden whitespace-nowrap relative min-w-0 shrink-0 max-w-[240px] sm:max-w-xs md:max-w-sm">
-                    <div className={`inline-block ${isTitleOverflowing ? 'animate-marquee' : ''}`}>
-                      <h2 ref={textRef} className="text-sm sm:text-base md:text-lg font-black tracking-tight text-white select-none inline-block">
-                        {currentSong.Title}
-                      </h2>
-                      {isTitleOverflowing && (
-                        <h2 className="text-sm sm:text-base md:text-lg font-black tracking-tight text-white select-none inline-block ml-8">
-                          {currentSong.Title}
-                        </h2>
-                      )}
-                    </div>
-                  </div>
-                  <span className="text-[9px] sm:text-[10px] text-indigo-300/70 font-semibold select-none truncate">
-                    by {currentSong.Artist || 'Unknown Artist'}
-                  </span>
-                  
-                  {/* Play Context Mode Indicator Badge */}
-                  <div className="flex items-center gap-1.5 mt-1 sm:mt-0 shrink-0">
-                    {activeSetlistFolder ? (
-                      <div className="flex items-center gap-1 bg-violet-500/15 border border-violet-500/30 text-violet-300 px-2.5 py-0.5 rounded-lg text-[9px] font-black tracking-wider uppercase select-none shadow-[0_0_10px_rgba(139,92,246,0.15)] animate-fadeIn">
-                        <span>📂 Setlist: {activeSetlistFolder}</span>
-                        {isSetlistLocked(activeSetlistFolder) && (
-                          <span className="text-amber-400 font-extrabold ml-1.5 flex items-center gap-0.5" title="Setlist Locked by Admin">
-                            <span>🔒</span>
-                            <span className="text-[8px] tracking-normal font-bold">LOCKED</span>
-                          </span>
-                        )}
-                        <button
-                          onClick={() => {
-                            setActiveSetlistFolder('');
-                            showToast(`Switched "${currentSong.Title}" to Standalone mode`, 'info');
-                          }}
-                          className="ml-1 hover:text-rose-400 text-violet-400 transition-colors cursor-pointer font-extrabold text-[10px] px-0.5"
-                          title="Switch to Standalone Song"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="bg-slate-500/15 border border-slate-500/25 text-slate-300 px-2.5 py-0.5 rounded-lg text-[9px] font-black tracking-wider uppercase select-none flex items-center gap-1 shadow-inner animate-fadeIn">
-                        <span>👤 Standalone Song</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Squeezed beautifully aligned controls row - Resized smaller for both web and mobile viewing */}
-                <div className="flex flex-wrap items-center gap-1.5 shrink-0 select-none">
-                  <button
-                    onClick={() => toggleFav(String(currentSong.SongID))}
-                    className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-wider btn-5d transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
-                      favorites.includes(String(currentSong.SongID))
-                        ? 'text-amber-400 border-amber-500/40 shadow-[0_0_12px_rgba(251,191,36,0.2)] bg-amber-500/10'
-                        : 'text-gray-400 hover:text-white bg-white/5 border border-white/5'
-                    }`}
-                    title="Toggle Favorite"
-                  >
-                    <span className="text-xs">{favorites.includes(String(currentSong.SongID)) ? '★' : '☆'}</span>
-                    <span>Fav</span>
-                  </button>
-                  {/* Dynamic Set / Update Set Button Group */}
-                  {(() => {
-                    const matchingSetsForSong = allSharedSetlists
-                      .filter((sl) => {
-                        try {
-                          const parsed = JSON.parse(sl.RoadmapJSON);
-                          const songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
-                          return songIds.some((id: any) => String(id) === String(currentSong.SongID));
-                        } catch {
-                          return false;
-                        }
-                      })
-                      .map((sl) => sl.PresetName);
-
-                    const isInAnySet = matchingSetsForSong.length > 0;
-
-                    return (
-                      <button
-                        onClick={() => setIsSetlistManagerOpen(true)}
-                        className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
-                          isInAnySet
-                            ? 'bg-violet-600/20 text-violet-300 border border-violet-500/40 shadow-[0_0_12px_rgba(139,92,246,0.2)]'
-                            : 'text-gray-400 hover:text-white bg-white/5 border border-white/5'
-                        }`}
-                        title="Add Song to Setlist folders and capture arrangement"
-                      >
-                        <span className="text-xs">⚡</span>
-                        <span>{isInAnySet ? `Set (${matchingSetsForSong.length})` : 'Set'}</span>
-                      </button>
-                    );
-                  })()}
-                  <button
-                    onClick={() => setArrangerOpen((prev) => !prev)}
-                    className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer ${
-                      arrangerOpen
-                        ? 'bg-indigo-600 text-white shadow-inner border border-indigo-400/30'
-                        : 'btn-5d-primary text-white border border-indigo-500/30'
-                    }`}
-                  >
-                    <span>🗺️ Arrangement</span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      setIsPDFPreviewOpen(true);
-                      setPdfScope('current');
-                      setPdfSelectedSongIds(setlists.length > 0 ? setlists.map(String) : (currentSong ? [String(currentSong.SongID)] : []));
-                    }}
-                    className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer text-indigo-400 bg-white/5 border border-indigo-500/20 hover:bg-indigo-500/10 hover:text-white"
-                    title="Open PDF Preview Modal"
-                  >
-                    <span>📄</span>
-                    <span>PDF</span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      setFormEditingSong(currentSong);
-                      setIsFormModalOpen(true);
-                    }}
-                    className="px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-black btn-5d text-indigo-300 hover:text-white flex items-center gap-1 transition-all active:scale-95 cursor-pointer uppercase tracking-wider border border-indigo-500/30 bg-indigo-500/5 hover:bg-indigo-500/10"
-                    title={appUser && appSecret ? "Edit Song (Admin Mode - Synced with Spreadsheet)" : "Edit Song (Viewer Mode - Changes saved to your browser)"}
-                  >
-                    <span>✏️ Edit</span>
-                  </button>
-
-                  {/* Setlist Navigation (Prev / Next transition) */}
-                  {(() => {
-                    const currentIndexInSet = setlists.indexOf(String(currentSong.SongID));
-                    if (currentIndexInSet !== -1) {
-                      const prevSongID = currentIndexInSet > 0 ? setlists[currentIndexInSet - 1] : null;
-                      const nextSongID = currentIndexInSet < setlists.length - 1 ? setlists[currentIndexInSet + 1] : null;
-                      const prevSong = prevSongID ? songs.find((s) => String(s.SongID) === prevSongID) : null;
-                      const nextSong = nextSongID ? songs.find((s) => String(s.SongID) === nextSongID) : null;
-
-                      return (
-                        <div className="flex items-center gap-1 border-l border-indigo-500/10 pl-1.5 ml-1">
-                          {prevSong && (
-                            <button
-                              onClick={() => {
-                                executeSongLoad(prevSong);
-                              }}
-                              className="px-2 sm:px-2.5 py-1.5 sm:py-2 rounded-xl text-[9px] sm:text-[10px] font-bold text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 border border-white/5 transition-all active:scale-95 flex items-center justify-center cursor-pointer"
-                              title={`Go back to: ${prevSong.Title}`}
-                            >
-                              <span>⏮️</span>
-                            </button>
-                          )}
-                          {nextSong && (
-                            <button
-                              onClick={() => {
-                                executeSongLoad(nextSong);
-                              }}
-                              className="px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl text-[9px] sm:text-[10px] font-black bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white border border-emerald-500/20 shadow-md shadow-emerald-500/10 transition-all active:scale-95 flex items-center gap-1 cursor-pointer uppercase tracking-wider"
-                              title={`Transition to: ${nextSong.Title}`}
-                            >
-                              <span>Next</span>
-                              <span>⏭️</span>
-                            </button>
-                          )}
-                        </div>
-                      );
-                    }
-                    return null;
-                  })()}
-                </div>
-              </div>
-
-              {/* Arrange flow drawer panel */}
-              <div className={`panel-wrap ${arrangerOpen ? 'is-open' : ''}`}>
-                  <div className="panel-inner">
-                    <div className="pt-2.5">
-                      <div className={`mb-2.5 p-3 rounded-xl border space-y-3 transition-all duration-300 ${
-                        isArrangementLocked 
-                          ? 'bg-black/40 border-indigo-500/20 shadow-none' 
-                          : 'bg-emerald-950/20 border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.15)]'
-                      }`}>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-b border-white/5 pb-3">
-                          <div>
-                            <div className="flex items-center justify-between mb-1.5 select-none">
-                              <div className="text-[9px] text-indigo-400 uppercase tracking-widest font-bold">
-                                Shared Band Presets
-                              </div>
-                              <button
-                                onClick={async () => {
-                                  setIsLoading(true);
-                                  try {
-                                    await refetchArrangements();
-                                    showToast('Cloud presets refreshed successfully!', 'success');
-                                  } catch (e) {
-                                    showToast('Could not sync with cloud.', 'error');
-                                  } finally {
-                                    setIsLoading(false);
-                                  }
-                                }}
-                                className="text-[7px] bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 hover:border-emerald-500/40 px-1.5 py-0.5 rounded flex-shrink-0 font-bold uppercase tracking-widest font-mono transition-all active:scale-95 cursor-pointer flex items-center gap-1 select-none"
-                              >
-                                <span>☁️</span> Cloud Sync
-                              </button>
-                            </div>
-                            <div className="space-y-2 overflow-y-auto max-h-[280px] pr-1 custom-scrollbar">
-                              {(() => {
-                                // Grouping helper
-                                const groups: { [folderName: string]: { originalName: string; displayName: string; roadmap: any; isSetlist: boolean; isDefault?: boolean }[] } = {};
-
-                                // Initialize all folders from allSharedSetlists to guarantee they appear
-                                allSharedSetlists.forEach((sl) => {
-                                  const folderName = sl.PresetName;
-                                  if (folderName) {
-                                    groups[folderName] = [];
-                                  }
-                                });
-
-                                // Process synced sheet arrangements
-                                syncedSheetArrangements.forEach((p) => {
-                                  if (!p.PresetName) return;
-
-                                  if (p.PresetName.startsWith('Set: ')) {
-                                    const folderName = p.PresetName.slice(5);
-                                    if (!groups[folderName]) {
-                                      groups[folderName] = [];
-                                    }
-                                    let displayName = 'Custom Arrangement';
-                                    let roadmapData = null;
-                                    try {
-                                      const parsed = JSON.parse(p.RoadmapJSON);
-                                      if (parsed) {
-                                        roadmapData = parsed.roadmap || parsed;
-                                        if (parsed.arrangementName) {
-                                          displayName = parsed.arrangementName;
-                                        }
-                                      }
-                                    } catch {}
-                                    groups[folderName].push({
-                                      originalName: p.PresetName,
-                                      displayName: displayName,
-                                      roadmap: roadmapData,
-                                      isSetlist: true,
-                                    });
-                                  } else {
-                                    const folderName = 'General Presets';
-                                    if (!groups[folderName]) {
-                                      groups[folderName] = [];
-                                    }
-                                    let roadmapData = null;
-                                    try {
-                                      roadmapData = JSON.parse(p.RoadmapJSON);
-                                    } catch {}
-                                    groups[folderName].push({
-                                      originalName: p.PresetName,
-                                      displayName: p.PresetName,
-                                      roadmap: roadmapData,
-                                      isSetlist: false,
-                                    });
-                                  }
-                                });
-
-                                // Add local generic arrangements
-                                try {
-                                  const local = localStorage.getItem(`custom_arrangements_${currentSong?.SongID}`);
-                                  if (local) {
-                                    const localObj = JSON.parse(local);
-                                    Object.keys(localObj).forEach((k) => {
-                                      if (k.startsWith('Set: ')) return;
-                                      const folderName = 'General Presets';
-                                      if (!groups[folderName]) {
-                                        groups[folderName] = [];
-                                      }
-                                      const alreadyExists = groups[folderName].some(
-                                        (item) => item.originalName.toLowerCase().trim() === k.toLowerCase().trim()
-                                      );
-                                      if (!alreadyExists) {
-                                        groups[folderName].push({
-                                          originalName: k,
-                                          displayName: k,
-                                          roadmap: localObj[k],
-                                          isSetlist: false,
-                                        });
-                                      }
-                                    });
-                                  }
-                                } catch {}
-
-                                // Ensure Default Flow for empty setlist folders
-                                Object.keys(groups).forEach((folderName) => {
-                                  if (folderName !== 'General Presets' && groups[folderName].length === 0) {
-                                    groups[folderName].push({
-                                      originalName: `Set: ${folderName}`,
-                                      displayName: 'Default Flow',
-                                      roadmap: null,
-                                      isSetlist: true,
-                                      isDefault: true,
-                                    });
-                                  }
-                                });
-
-                                const folderNames = Object.keys(groups).sort((a, b) => {
-                                  if (a === 'General Presets') return -1;
-                                  if (b === 'General Presets') return 1;
-                                  return a.localeCompare(b);
-                                });
-
-                                if (folderNames.length === 0) {
-                                  return (
-                                    <div className="text-[9px] text-gray-500 italic py-2 text-center">
-                                      No arrangements saved yet...
-                                    </div>
-                                  );
-                                }
-
-                                return folderNames.map((folderName) => {
-                                  const items = groups[folderName];
-                                  const isExpanded = expandedArrangementSetlists[folderName] !== undefined
-                                    ? expandedArrangementSetlists[folderName]
-                                    : (folderName === 'General Presets' || folderName === activeSetlistFolder);
-
-                                  return (
-                                    <div key={folderName} className="space-y-1 border-b border-white/5 pb-1 last:border-0 last:pb-0">
-                                      {/* Collapsible Folder Header */}
-                                      <button
-                                        onClick={() => {
-                                          setExpandedArrangementSetlists(prev => ({
-                                            ...prev,
-                                            [folderName]: !isExpanded
-                                          }));
-                                        }}
-                                        className={`w-full flex items-center justify-between py-1 px-2 rounded-lg text-[8px] font-black uppercase tracking-wider border transition-all cursor-pointer ${
-                                          folderName === activeSetlistFolder 
-                                            ? 'bg-indigo-500/20 text-indigo-200 border-indigo-500/30' 
-                                            : 'bg-white/5 text-gray-400 border-white/5 hover:bg-white/10'
-                                        }`}
-                                      >
-                                        <div className="flex items-center gap-1 min-w-0">
-                                          <span className="shrink-0 text-[10px]">
-                                            {folderName === 'General Presets' ? '📂' : '📁'}
-                                          </span>
-                                          <span className="truncate">{folderName}</span>
-                                          {isSetlistLocked(folderName) && (
-                                            <span className="shrink-0 text-amber-400 text-[8px]" title="Locked by Admin">🔒</span>
-                                          )}
-                                          <span className="text-[7px] opacity-60 font-mono">({items.length})</span>
-                                        </div>
-                                        <span className="text-[7px] font-bold">
-                                          {isExpanded ? '▼' : '▶'}
-                                        </span>
-                                      </button>
-
-                                      {/* List of arrangements under this folder */}
-                                      {isExpanded && (
-                                        <div className="pl-1.5 space-y-1 animate-fadeIn pt-0.5">
-                                          {items.map((item) => {
-                                            // Determine active status
-                                            let isActive = false;
-                                            if (item.isDefault) {
-                                              isActive = !currentArrangementName || currentArrangementName === '';
-                                            } else if (activeSetlistFolder && folderName === activeSetlistFolder) {
-                                              if (item.isSetlist) {
-                                                const nameMatches = currentArrangementName === item.displayName || 
-                                                                    currentArrangementName === item.originalName ||
-                                                                    getPresetInputDisplayName(currentArrangementName) === item.displayName;
-                                                const roadmapMatches = item.roadmap && areRoadmapsIdentical(item.roadmap, activeRoadmap);
-                                                isActive = nameMatches || roadmapMatches;
-                                              }
-                                            } else if (!activeSetlistFolder && folderName === 'General Presets') {
-                                              isActive = currentArrangementName === item.originalName ||
-                                                         currentArrangementName === item.displayName ||
-                                                         getPresetInputDisplayName(currentArrangementName) === item.displayName ||
-                                                         (item.roadmap && areRoadmapsIdentical(item.roadmap, activeRoadmap));
-                                            } else {
-                                              isActive = !!item.roadmap && areRoadmapsIdentical(item.roadmap, activeRoadmap);
-                                            }
-
-                                            const isLocked = isSetlistLocked(folderName);
-                                            const isLockedForUser = isLocked && !(appUser && appSecret);
-
-                                            return (
-                                              <div
-                                                key={item.originalName}
-                                                className={`flex items-center justify-between p-1.5 rounded-xl border transition-all text-[10px] ${
-                                                  isActive
-                                                    ? 'bg-emerald-500/10 border-emerald-500/30 shadow-[0_0_10px_rgba(16,185,129,0.1)]'
-                                                    : 'bg-white/5 hover:bg-white/10 border-white/5'
-                                                }`}
-                                              >
-                                                <button
-                                                  onClick={() => {
-                                                    if (item.isDefault) {
-                                                      if (currentSong) {
-                                                        executeSongLoad(currentSong, true);
-                                                        showToast('Restored default song flow.', 'info');
-                                                      }
-                                                      return;
-                                                    }
-
-                                                    if (isActive) {
-                                                      if (currentSong) {
-                                                        executeSongLoad(currentSong, true);
-                                                        showToast('Deselected arrangement. Restored default song flow.', 'info');
-                                                      }
-                                                    } else {
-                                                      if (activeSetlistFolder && currentSong) {
-                                                        if (item.isSetlist) {
-                                                          loadPresetArrangement(item.originalName);
-                                                        } else {
-                                                          const presets = getPresets();
-                                                          const clickedPresetData = presets[item.originalName];
-                                                          if (clickedPresetData && areRoadmapsIdentical(clickedPresetData, activeRoadmap)) {
-                                                            setCurrentArrangementName(item.originalName);
-                                                            showToast(`"${item.displayName}" arrangement is already active for this song.`, 'info');
-                                                          } else {
-                                                            setPendingArrangementToLoad(item.originalName);
-                                                          }
-                                                        }
-                                                      } else {
-                                                        loadPresetArrangement(item.originalName);
-                                                      }
-                                                    }
-                                                  }}
-                                                  className={`flex-1 text-left cursor-pointer flex items-center gap-1.5 min-w-0`}
-                                                  title={isActive ? 'Click to deselect / restore default flow' : `Load arrangement: ${item.displayName}`}
-                                                >
-                                                  {isActive ? (
-                                                    <span className="text-emerald-400 shrink-0 text-[10px]">👉</span>
-                                                  ) : (
-                                                    <span className="text-gray-500 shrink-0 text-[9px]">
-                                                      {item.isDefault ? '⚙️' : '📄'}
-                                                    </span>
-                                                  )}
-                                                  <span className={`truncate text-[9.5px] uppercase ${
-                                                    isActive 
-                                                      ? 'text-emerald-300 font-extrabold' 
-                                                      : item.isDefault 
-                                                        ? 'text-gray-400 italic font-medium' 
-                                                        : 'text-gray-300 hover:text-white font-bold'
-                                                  }`}>
-                                                    {item.displayName}
-                                                  </span>
-                                                </button>
-
-                                                {!item.isDefault && !isLockedForUser && (
-                                                  <button
-                                                    onClick={() => {
-                                                      setDeleteArrangementConfirmation({
-                                                        name: item.originalName,
-                                                        isActive: isActive
-                                                      });
-                                                    }}
-                                                    className="text-rose-400/60 hover:text-rose-400 px-1.5 py-0.5 font-bold text-[10px] cursor-pointer shrink-0 transition-colors"
-                                                    title="Delete arrangement"
-                                                  >
-                                                    ✕
-                                                  </button>
-                                                )}
-                                                {isLockedForUser && !item.isDefault && (
-                                                  <span className="text-amber-500/60 px-1.5 py-0.5 text-[9px] shrink-0" title="Locked by Admin">🔒</span>
-                                                )}
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
-                                      )}
-                                    </div>
-                                  );
-                                });
-                              })()}
-                            </div>
-                          </div>
-
-                          <div className="flex flex-col justify-between">
-                            <div className="text-[9px] text-indigo-400 uppercase tracking-widest font-bold mb-1.5 select-none">
-                              {currentArrangementName && !currentArrangementName.startsWith('Set:') ? 'Save / Modify Arrangement' : 'Save New Arrangement'}
-                            </div>
-                            <div className="space-y-1.5">
-                              <input
-                                type="text"
-                                id="presetNameInput"
-                                value={getPresetInputDisplayName(currentArrangementName)}
-                                onChange={(e) => setCurrentArrangementName(e.target.value.toUpperCase())}
-                                disabled={isArrangementLocked}
-                                placeholder={isArrangementLocked ? "Arrangement is locked" : "Preset name (e.g. Acoustic)"}
-                                className="w-full bg-black/50 p-2 rounded-lg text-[10px] text-white border border-white/5 outline-none focus:ring-1 focus:ring-indigo-500/30 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
-                              />
-                              <button
-                                onClick={savePresetArrangement}
-                                disabled={isArrangementLocked}
-                                className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[9px] font-bold tracking-wider uppercase transition-all active:scale-95 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
-                              >
-                                Save Active Flow
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Lock / Unlocked Status Banner */}
-                        {isArrangementLocked ? (
-                          <div className="flex items-center justify-between p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl animate-fadeIn">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className="text-xs shrink-0">🔒</span>
-                              <div className="min-w-0">
-                                <div className="text-[10px] font-bold text-amber-300 truncate">Arrangement Locked</div>
-                                <div className="text-[8.5px] text-gray-400 truncate">Unlock to modify sequence blocks or lines.</div>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <button
-                                onClick={() => {
-                                  if (currentSong) {
-                                    executeSongLoad(currentSong, true);
-                                    showToast('Restored default song arrangement.', 'info');
-                                  }
-                                }}
-                                className="px-2.5 py-1 bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 rounded-lg text-[8.5px] font-bold uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
-                                title="Unload arrangement and restore original song sequence"
-                              >
-                                Default Flow
-                              </button>
-                              {activeSetlistFolder && isSetlistLocked(activeSetlistFolder) && !(appUser && appSecret) ? (
-                                <button
-                                  onClick={() => {
-                                    setRoadmapBackup(activeRoadmap.map(b => ({
-                                      id: b.id,
-                                      name: b.name,
-                                      enabledLines: b.enabledLines ? [...b.enabledLines] : [],
-                                      keyOffset: b.keyOffset || 0
-                                    })));
-                                    setNameBackup(currentArrangementName);
-                                    setIsArrangementLocked(false);
-                                    showToast('Locked Setlist arrangement mode. Editing locally only.', 'info');
-                                  }}
-                                  className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer flex items-center gap-1"
-                                  title="Edit the active arrangement structure for your local device only"
-                                >
-                                  <span>🔒 Modify (Local Only)</span>
-                                </button>
-                              ) : (
-                                <button
-                                  onClick={() => {
-                                    setRoadmapBackup(activeRoadmap.map(b => ({
-                                      id: b.id,
-                                      name: b.name,
-                                      enabledLines: b.enabledLines ? [...b.enabledLines] : [],
-                                      keyOffset: b.keyOffset || 0
-                                    })));
-                                    setNameBackup(currentArrangementName);
-                                    setIsArrangementLocked(false);
-                                    showToast('Arrangement is now in editing mode. Changes will be saved.', 'info');
-                                  }}
-                                  className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
-                                >
-                                  Modify
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="flex items-center justify-between p-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded-xl animate-fadeIn">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className="text-xs shrink-0">✍️</span>
-                              <div className="min-w-0">
-                                <div className="text-[10px] font-bold text-emerald-300 truncate">Active Editing Mode</div>
-                                <div className="text-[8.5px] text-emerald-400/80 truncate">Esc or Cancel button to revert/cancel edit attempt.</div>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <button
-                                onClick={cancelArrangementEdit}
-                                className="px-2.5 py-1 bg-rose-500/25 hover:bg-rose-500/40 text-rose-300 border border-rose-500/30 rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
-                              >
-                                Cancel
-                              </button>
-                              <span className="px-2 py-1 bg-emerald-500/20 text-emerald-300 rounded-lg text-[7.5px] font-mono font-black uppercase tracking-widest select-none">
-                                Unlocked
-                              </span>
-                            </div>
-                          </div>
-                        )}
-
-                        <div>
-                          <div className="text-[9px] text-indigo-400 uppercase tracking-widest font-bold mb-1.5 select-none">
-                            Configure sequence flow (Drag blocks to reorder)
-                          </div>
-                          <div className="flex flex-wrap gap-2 overflow-x-auto pb-6 pt-3 -mt-2 custom-scrollbar">
-                            {activeRoadmap.map((block, idx) => {
-                              const blockKey = getModulatedKeyName(currentKey, block.keyOffset || 0);
-                              const modSign = (block.keyOffset || 0) >= 0 ? '+' : '';
-                              const templateLines = sectionTemplates[block.name] || [];
-
-                              return (
-                                <div
-                                  key={block.id}
-                                  draggable={!isArrangementLocked}
-                                  onDragStart={() => handleDragStart(idx)}
-                                  onDragOver={(e) => e.preventDefault()}
-                                  onDrop={() => handleDrop(idx)}
-                                  onClick={() => setEditingBlockId(editingBlockId === block.id ? null : block.id)}
-                                  className={`flex flex-col items-center border rounded-lg p-2 min-w-[105px] select-none relative group transition-all mt-1 ${
-                                    isArrangementLocked ? 'cursor-not-allowed opacity-75' : 'cursor-grab active:cursor-grabbing'
-                                  } ${
-                                    editingBlockId === block.id
-                                      ? 'bg-indigo-600/20 border-indigo-500 shadow-[0_0_12px_rgba(99,102,241,0.2)] scale-105 z-10'
-                                      : 'bg-indigo-500/10 border-indigo-500/20 hover:bg-indigo-500/15'
-                                  }`}
-                                >
-                                  <span className="text-[8px] text-gray-500 font-mono font-bold absolute top-1 left-1.5">
-                                    #{idx + 1}
-                                  </span>
-                                  <span className="text-xs sm:text-sm font-bold text-indigo-300 uppercase mt-3 mb-1.5 flex items-center justify-center gap-1 flex-wrap">
-                                    {block.name}
-                                    {repInfo[idx]?.isRepeat && (
-                                      <span className="text-[7.5px] bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded px-1 font-mono font-black scale-90">
-                                        {repInfo[idx].repeatCount}x
-                                      </span>
-                                    )}
-                                  </span>
-                                  <span className="text-[8px] font-mono text-gray-400 mb-2">
-                                    {(block.enabledLines || []).length}/{templateLines.length} lines
-                                  </span>
-
-                                  <div
-                                    className="flex items-center justify-between w-full mt-1 pt-1 border-t border-white/5 select-none"
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    <span className="text-[8px] text-amber-400 font-mono font-bold">
-                                      {blockKey}
-                                    </span>
-                                    <div className="flex items-center gap-1">
-                                      <button
-                                        disabled={isArrangementLocked}
-                                        onClick={() => adjustBlockModulation(block.id, -1)}
-                                        className="w-5 h-5 rounded bg-black/40 hover:bg-white/10 text-xs flex items-center justify-center text-indigo-300 font-bold transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
-                                      >
-                                        -
-                                      </button>
-                                      <span className="text-[9px] text-indigo-200 font-mono font-bold px-0.5">
-                                        {modSign}
-                                        {block.keyOffset || 0}
-                                      </span>
-                                      <button
-                                        disabled={isArrangementLocked}
-                                        onClick={() => adjustBlockModulation(block.id, 1)}
-                                        className="w-5 h-5 rounded bg-black/40 hover:bg-white/10 text-xs flex items-center justify-center text-indigo-300 font-bold transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
-                                      >
-                                        +
-                                      </button>
-                                    </div>
-                                  </div>
-
-                                  <div className="flex gap-1.5 mt-2 w-full justify-center">
-                                    <button
-                                      disabled={isArrangementLocked || idx === 0}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        if (isArrangementLocked) {
-                                          showToast("Arrangement is locked. Click 'Modify' to unlock and edit.", 'warning');
-                                          return;
-                                        }
-                                        if (idx > 0) {
-                                          const next = [...activeRoadmap];
-                                          const temp = next[idx];
-                                          next[idx] = next[idx - 1];
-                                          next[idx - 1] = temp;
-                                          setActiveRoadmap(next);
-                                          showToast('Shifted left', 'success');
-                                        }
-                                      }}
-                                      className="w-6 h-6 rounded bg-black/30 hover:bg-white/10 active:scale-125 text-[10px] flex items-center justify-center transition-all shadow-sm cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
-                                    >
-                                      ◀
-                                    </button>
-                                    <button
-                                      disabled={isArrangementLocked}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        deleteRoadmapBlock(idx);
-                                      }}
-                                      className="w-6 h-6 rounded bg-rose-500/10 hover:bg-rose-500/30 text-rose-400 active:scale-125 text-[10px] flex items-center justify-center transition-all shadow-sm cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
-                                    >
-                                      ✕
-                                    </button>
-                                    <button
-                                      disabled={isArrangementLocked || idx === activeRoadmap.length - 1}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        if (isArrangementLocked) {
-                                          showToast("Arrangement is locked. Click 'Modify' to unlock and edit.", 'warning');
-                                          return;
-                                        }
-                                        if (idx < activeRoadmap.length - 1) {
-                                          const next = [...activeRoadmap];
-                                          const temp = next[idx];
-                                          next[idx] = next[idx + 1];
-                                          next[idx + 1] = temp;
-                                          setActiveRoadmap(next);
-                                          showToast('Shifted right', 'success');
-                                        }
-                                      }}
-                                      className="w-6 h-6 rounded bg-black/30 hover:bg-white/10 active:scale-125 text-[10px] flex items-center justify-center transition-all shadow-sm cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
-                                    >
-                                      ▶
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-
-                        {/* Line Dissector panel */}
-                        {editingBlockId && activeRoadmap.find((b) => b.id === editingBlockId) && (
-                          <div className="p-3 bg-indigo-950/10 rounded-xl border border-indigo-500/20 mt-2 select-none animate-fadeIn">
-                            <div className="flex justify-between items-center mb-2 pb-1.5 border-b border-white/5">
-                              <span className="text-[9px] text-indigo-400 uppercase tracking-widest font-bold flex items-center gap-1.5">
-                                <span>✂️ Line Dissector:</span>{' '}
-                                <b className="text-white">
-                                  {activeRoadmap.find((b) => b.id === editingBlockId)?.name}
-                                </b>
-                              </span>
-                              <span className="text-[8px] text-gray-500 font-mono">
-                                Toggle lines in active block to filter
-                              </span>
-                            </div>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                              {(
-                                sectionTemplates[
-                                  activeRoadmap.find((b) => b.id === editingBlockId)?.name || ''
-                                ] || []
-                              ).map((line, lIdx) => {
-                                const activeBlock = activeRoadmap.find((b) => b.id === editingBlockId);
-                                const isEnabled = (activeBlock?.enabledLines || []).includes(lIdx);
-
-                                return (
-                                  <div
-                                    key={lIdx}
-                                    onClick={() => toggleLineInBlock(editingBlockId, lIdx)}
-                                    className={`flex items-center justify-between p-2 rounded-lg transition-all ${
-                                      isArrangementLocked ? 'cursor-not-allowed' : 'cursor-pointer'
-                                    } ${
-                                      isEnabled
-                                        ? 'bg-white/5 border border-indigo-500/30'
-                                        : 'bg-black/20 border border-transparent opacity-40'
-                                    } text-[10px] ${
-                                      isArrangementLocked ? '' : 'hover:bg-white/10'
-                                    }`}
-                                  >
-                                    <div className="flex items-center gap-2 truncate pr-2">
-                                      <span className="font-mono text-[9px] text-gray-500">
-                                        L{lIdx + 1}
-                                      </span>
-                                      <div className="truncate">
-                                        <span
-                                          className={`text-amber-400/90 font-mono text-[8px] block ${
-                                            isEnabled ? '' : 'line-through italic'
-                                          }`}
-                                        >
-                                          {line.Chords || '[No Chords]'}
-                                        </span>
-                                        <span
-                                          className={`text-gray-200 text-[9px] block truncate ${
-                                            isEnabled ? '' : 'italic'
-                                          }`}
-                                        >
-                                          {line.Lyrics || '[Instrumental]'}
-                                        </span>
-                                      </div>
-                                    </div>
-                                    <div className="flex items-center gap-1.5 flex-shrink-0">
-                                      <span
-                                        className={`text-[7px] font-bold uppercase tracking-wider ${
-                                          isEnabled ? 'text-indigo-400' : 'text-gray-600'
-                                        }`}
-                                      >
-                                        {isEnabled ? 'Active' : 'Muted'}
-                                      </span>
-                                      <div
-                                        className={`w-6 h-3 rounded-full relative transition-colors duration-200 ${
-                                          isEnabled ? 'bg-indigo-500' : 'bg-white/10'
-                                        }`}
-                                      >
-                                        <div
-                                          className={`w-2.5 h-2.5 rounded-full bg-white absolute top-[1px] transition-all duration-200 ${
-                                            isEnabled ? 'left-[13px]' : 'left-[1px]'
-                                          }`}
-                                        />
-                                      </div>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        )}
-
-                        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/5 select-none">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="text-[8px] text-gray-500 uppercase tracking-widest font-bold">
-                              Inject Block:
-                            </span>
-                            {Object.keys(sectionTemplates).map((sec) => (
-                              <button
-                                key={sec}
-                                disabled={isArrangementLocked}
-                                onClick={() => addRoadmapBlock(sec)}
-                                className="px-2 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded text-[8px] font-bold uppercase tracking-widest text-emerald-300 transition-all active:scale-95 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
-                              >
-                                + {sec}
-                              </button>
-                            ))}
-                          </div>
-                          <button
-                            disabled={isArrangementLocked}
-                            onClick={resetRoadmapBlocks}
-                            className="px-2 py-1 bg-rose-500/10 hover:bg-[#16121f] text-rose-400 active:scale-125 border border-rose-500/30 rounded text-[8px] font-bold uppercase tracking-widest transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed disabled:pointer-events-none"
-                          >
-                            Reset Default
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              
-              {/* Real-time Cloud Arrangement Modified Notice */}
-              {cloudArrangementUpdateNotice && (
-                <div className="mt-2.5 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-fadeIn select-none">
-                  <div className="flex items-start gap-2 text-amber-300">
-                    <span className="text-sm shrink-0 animate-pulse mt-0.5 sm:mt-0">🔄</span>
-                    <div className="flex flex-col">
-                      <span className="text-[10px] font-black uppercase tracking-wider">Arrangement Updated on Cloud</span>
-                      <span className="text-[9.5px] text-gray-300 font-medium leading-relaxed">
-                        A bandmate just modified the active arrangement: <strong className="text-amber-400 font-bold uppercase">{parsePresetDate(cloudArrangementUpdateNotice.name).baseName}</strong>.
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0 w-full sm:w-auto justify-end">
-                    <button
-                      onClick={async () => {
-                        // Accept and load the updated arrangement
-                        setActiveRoadmap(cloudArrangementUpdateNotice.newRoadmap);
-                        if (cloudArrangementUpdateNotice.newKey) {
-                          setCurrentKey(cloudArrangementUpdateNotice.newKey);
-                        }
-                        setCloudArrangementUpdateNotice(null);
-                        showToast(`Updated to bandmate's latest arrangement!`, 'success');
-                      }}
-                      className="px-2.5 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
-                    >
-                      Load Latest
-                    </button>
-                    <button
-                      onClick={() => setCloudArrangementUpdateNotice(null)}
-                      className="px-2 py-1.5 bg-transparent hover:bg-white/5 text-gray-400 rounded-lg text-[8px] font-bold uppercase tracking-wider transition-all cursor-pointer"
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Real-time Cloud Arrangement Deleted Notice */}
-              {cloudArrangementDeletionNotice && (
-                <div className="mt-2.5 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-fadeIn select-none">
-                  <div className="flex items-start gap-2 text-rose-300">
-                    <span className="text-sm shrink-0 animate-pulse mt-0.5 sm:mt-0">🔄</span>
-                    <div className="flex flex-col">
-                      <span className="text-[10px] font-black uppercase tracking-wider text-rose-400">Arrangement Deleted on Cloud</span>
-                      <span className="text-[9.5px] text-gray-300 font-medium leading-relaxed">
-                        A bandmate just deleted the active arrangement: <strong className="text-rose-400 font-bold uppercase">"{parsePresetDate(cloudArrangementDeletionNotice.name).baseName}"</strong>.
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0 w-full sm:w-auto justify-end">
-                    <button
-                      onClick={async () => {
-                        await handleApplyArrangementDeletion(
-                          cloudArrangementDeletionNotice.name,
-                          cloudArrangementDeletionNotice.newSongArrangements,
-                          cloudArrangementDeletionNotice.allArrs
-                        );
-                      }}
-                      className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-[8.5px] font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
-                    >
-                      Refresh
-                    </button>
-                    <button
-                      onClick={() => setCloudArrangementDeletionNotice(null)}
-                      className="px-2 py-1.5 bg-transparent hover:bg-white/5 text-gray-400 rounded-lg text-[8px] font-bold uppercase tracking-wider transition-all cursor-pointer"
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Consolidated Collapsible Controls Panel */}
-              <div className="mt-2.5 flex-shrink-0 bg-[#0d0f1e]/40 backdrop-blur-md rounded-xl p-2.5 border border-indigo-500/25 space-y-2 select-none shadow-[inset_0_2px_8px_rgba(0,0,0,0.4)]">
-              
-              {/* 1. Collapsible Roadmap Flow */}
-              <div className="border-b border-white/5 last:border-0 pb-1.5 last:pb-0">
-                <div
-                  onClick={() => setIsRoadmapFlowCollapsed(!isRoadmapFlowCollapsed)}
-                  className="flex items-center justify-between cursor-pointer select-none text-[9px] sm:text-[10px] text-indigo-300 font-extrabold uppercase tracking-widest px-1 py-0.5 hover:text-white transition-colors"
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span>🧭</span> Roadmap Flow
-                  </span>
-                  <span className="text-[10px] font-mono font-black text-indigo-400">
-                    {isRoadmapFlowCollapsed ? '▼' : '▲'}
-                  </span>
-                </div>
-                <div className={`panel-wrap ${!isRoadmapFlowCollapsed ? 'is-open' : ''}`}>
-                  <div className="panel-inner pt-1.5 px-1">
-                    {activeRoadmap.length > 0 ? (
-                      <div className="flex flex-wrap items-center gap-1.5 w-full py-0.5">
-                        {(() => {
-                          const renderedBlocks: any[] = [];
-                          activeRoadmap.forEach((block, idx) => {
-                            const isDuplicate = activeRoadmap.findIndex((b, bIdx) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, sectionTemplates)) !== -1;
-                            if (isDuplicate) {
-                              return;
-                            }
-                            renderedBlocks.push({ block, originalIdx: idx });
-                          });
-
-                          return renderedBlocks.map(({ block, originalIdx: idx }, rIdx) => {
-                            const blockRep = repInfo[idx];
-                            let badgeStyle = 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20 hover:bg-indigo-500/20';
-                            const nameLower = block.name.toLowerCase();
-                            if (nameLower.includes('chorus')) {
-                              badgeStyle = 'bg-amber-500/10 text-amber-300 border-amber-500/20 hover:bg-amber-500/20';
-                            } else if (nameLower.includes('verse')) {
-                              badgeStyle = 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20 hover:bg-emerald-500/20';
-                            } else if (nameLower.includes('bridge')) {
-                              badgeStyle = 'bg-purple-500/10 text-purple-300 border-purple-500/20 hover:bg-purple-500/20';
-                            } else if (nameLower.includes('intro') || nameLower.includes('outro')) {
-                              badgeStyle = 'bg-sky-500/10 text-sky-300 border-sky-500/20 hover:bg-sky-500/20';
-                            }
-
-                            return (
-                              <div key={block.id} className="flex items-center gap-1 shrink-0">
-                                {rIdx > 0 && (
-                                  <span className="text-gray-600 text-[9px] font-bold font-mono px-0.5 select-none">➔</span>
-                                )}
-                                <button
-                                  onClick={() => {
-                                    const element = document.getElementById(`sec-wrapper-${idx}`);
-                                    if (element) {
-                                      element.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                      element.classList.add('ring-2', 'ring-indigo-500/50', 'rounded-xl');
-                                      setTimeout(() => {
-                                        element.classList.remove('ring-2', 'ring-indigo-500/50');
-                                      }, 1500);
-                                    }
-                                  }}
-                                  className={`px-2 py-0.5 text-[9px] font-semibold rounded-md border transition-all active:scale-95 cursor-pointer flex items-center gap-1 ${badgeStyle} shadow-sm`}
-                                  title={`Click to jump to ${block.name}`}
-                                >
-                                  <span>{block.name.toUpperCase()}</span>
-                                  {block.keyOffset && block.keyOffset !== 0 ? (
-                                    <span className="text-[7px] bg-red-500/20 text-red-300 px-0.5 rounded">
-                                      {block.keyOffset > 0 ? `+${block.keyOffset}` : block.keyOffset}
-                                    </span>
-                                  ) : null}
-                                  {blockRep && blockRep.totalInRun > 1 && (
-                                    <span className="text-[7.5px] bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded px-1 font-mono font-black select-none ml-0.5">
-                                      {blockRep.totalInRun}x
-                                    </span>
-                                  )}
-                                </button>
-                              </div>
-                            );
-                          });
-                        })()}
-                      </div>
-                    ) : (
-                      <div className="text-[9px] text-gray-500 italic">No roadmap defined for this song.</div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* 2. Collapsible Performance Panel */}
-              <div className="border-b border-white/5 last:border-0 pb-1.5 last:pb-0">
-                <div
-                  onClick={() => setIsPerformancePanelCollapsed(!isPerformancePanelCollapsed)}
-                  className="flex items-center justify-between cursor-pointer select-none text-[9px] sm:text-[10px] text-indigo-300 font-extrabold uppercase tracking-widest px-1 py-0.5 hover:text-white transition-colors"
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span>⚙️</span> Performance Settings
-                  </span>
-                  <span className="text-[10px] font-mono font-black text-indigo-400">
-                    {isPerformancePanelCollapsed ? '▼' : '▲'}
-                  </span>
-                </div>
-                <div className={`panel-wrap ${!isPerformancePanelCollapsed ? 'is-open' : ''}`}>
-                  <div className="panel-inner pt-1.5 px-1">
-                    <div className="grid grid-cols-12 gap-2 w-full p-2 bg-black/25 rounded-xl border border-indigo-500/10 shadow-sm select-none">
-                      
-                      {/* Widget 1: Key & Zoom */}
-                      <div className="col-span-12 sm:col-span-6 lg:col-span-3 flex items-center justify-between gap-2.5 bg-black/20 border border-white/5 rounded-lg px-2.5 py-1.5 shadow-inner">
-                        <div className="flex flex-col flex-1">
-                          <span className="text-[7.5px] text-indigo-300/80 uppercase tracking-widest font-black font-mono">Transpose</span>
-                          <div className="flex items-center gap-1 mt-0.5">
-                            <button
-                              onClick={() => shiftKey(-1)}
-                              className="w-5 h-5 rounded bg-white/5 hover:bg-white/10 active:scale-90 flex items-center justify-center font-black text-xs text-indigo-300 transition-all cursor-pointer"
-                            >
-                              -
-                            </button>
-                            <span className="w-6 text-center text-[10px] font-bold text-amber-400 font-mono">
-                              {currentKey}
-                            </span>
-                            <button
-                              onClick={() => shiftKey(1)}
-                              className="w-5 h-5 rounded bg-white/5 hover:bg-white/10 active:scale-90 flex items-center justify-center font-black text-xs text-indigo-300 transition-all cursor-pointer"
-                            >
-                              +
-                            </button>
-                          </div>
-                        </div>
-                        <div className="h-6 w-[1px] bg-white/10 self-center" />
-                        <div className="flex flex-col items-end flex-1">
-                          <span className="text-[7.5px] text-indigo-300/80 uppercase tracking-widest font-black font-mono">Zoom</span>
-                          <div className="flex items-center gap-1 mt-0.5">
-                            <button
-                              onClick={() => adjustZoom(-0.1)}
-                              className="w-5 h-5 rounded bg-white/5 hover:bg-white/10 flex items-center justify-center font-black text-[9px] text-gray-300 active:scale-90 transition-all cursor-pointer"
-                            >
-                              A-
-                            </button>
-                            <button
-                              onClick={() => adjustZoom(0.1)}
-                              className="w-5 h-5 rounded bg-white/5 hover:bg-white/10 flex items-center justify-center font-black text-[9px] text-gray-300 active:scale-90 transition-all cursor-pointer"
-                            >
-                              A+
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Widget 2: Display & Toggles */}
-                      <div className="col-span-12 sm:col-span-6 lg:col-span-4 flex flex-col justify-between gap-1 bg-black/20 border border-white/5 rounded-lg px-2.5 py-1.5 shadow-inner">
-                        <span className="text-[7.5px] text-indigo-300/80 uppercase tracking-widest font-black font-mono">View & Layout Options</span>
-                        <div className="grid grid-cols-3 gap-1 items-center mt-0.5">
-                          <select
-                            value={displayMode}
-                            onChange={(e) => setDisplayMode(e.target.value as any)}
-                            className="col-span-1 bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-1 px-1 rounded-lg text-[8px] outline-none border border-indigo-500/30 hover:border-indigo-400/50 transition-all cursor-pointer font-bold text-center appearance-none"
-                          >
-                            <option value="chords" className="bg-[#0a0b16]">Chords</option>
-                            <option value="numbers" className="bg-[#0a0b16]">Numbers</option>
-                            <option value="both" className="bg-[#0a0b16]">Both</option>
-                          </select>
-                          <button
-                            onClick={() => setShowLyrics((prev) => !prev)}
-                            className={`col-span-1 text-[8px] uppercase font-bold tracking-wider px-1 py-1 rounded transition-all flex items-center justify-center gap-0.5 active:scale-90 border cursor-pointer ${
-                              showLyrics
-                                ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30 hover:bg-indigo-500/30'
-                                : 'bg-white/5 text-gray-400 border-white/5 hover:bg-white/10 hover:text-white'
-                            }`}
-                          >
-                            {showLyrics ? 'Lyrics On' : 'Lyrics Off'}
-                          </button>
-                          <button
-                            onClick={() => setSheetLayoutMode((prev) => (prev === 'sequence' ? 'compact' : 'sequence'))}
-                            className={`col-span-1 text-[8px] uppercase font-bold tracking-wider px-1 py-1 rounded transition-all flex items-center justify-center gap-0.5 active:scale-90 border cursor-pointer ${
-                              sheetLayoutMode === 'compact'
-                                ? 'bg-amber-500/15 text-amber-300 border-amber-500/25 hover:bg-amber-500/25 shadow-sm'
-                                : 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20 hover:bg-indigo-500/20 shadow-sm'
-                            }`}
-                          >
-                            {sheetLayoutMode === 'compact' ? 'Show Flow' : 'Show Compact'}
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Widget 3: Autoscroll */}
-                      <div className="col-span-12 sm:col-span-6 lg:col-span-2 flex flex-col justify-between gap-1 bg-black/20 border border-white/5 rounded-lg px-2.5 py-1.5 shadow-inner">
-                        <span className="text-[7.5px] text-indigo-300/80 uppercase tracking-widest font-black font-mono">Autoscroll</span>
-                        <div className="flex items-center justify-center gap-1.5 mt-1">
-                          <button
-                            onClick={() => setIsScrollingActive((prev) => !prev)}
-                            className={`text-[8px] uppercase font-bold tracking-wider px-2 py-1 rounded transition-all flex items-center gap-1 active:scale-90 shadow-sm whitespace-nowrap cursor-pointer ${
-                              isScrollingActive
-                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
-                            }`}
-                          >
-                            {isScrollingActive ? '⏸️ Stop' : '▶️ Play'}
-                          </button>
-                          
-                          <div className="flex items-center justify-center gap-1 bg-black/40 rounded px-1 py-0.5 border border-white/5 shadow-inner">
-                            <button
-                              onClick={() => setScrollSpeed((prev) => Math.max(0.1, prev - 0.2))}
-                              className="w-5 h-5 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded text-gray-300 font-bold active:scale-90 cursor-pointer select-none transition-colors"
-                            >
-                              -
-                            </button>
-                            <span className="text-[9px] font-mono font-bold text-gray-300 w-5 text-center select-none">
-                              {scrollSpeed.toFixed(1)}
-                            </span>
-                            <button
-                              onClick={() => setScrollSpeed((prev) => Math.min(10, prev + 0.2))}
-                              className="w-5 h-5 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded text-gray-300 font-bold active:scale-90 cursor-pointer select-none transition-colors"
-                            >
-                              +
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Widget 4: Metronome & Tempo */}
-                      <div className="col-span-12 sm:col-span-6 lg:col-span-3 flex flex-col justify-between gap-1 bg-black/20 border border-white/5 rounded-lg px-2.5 py-1.5 shadow-inner">
-                        <span className="text-[7.5px] text-indigo-300/80 uppercase tracking-widest font-black font-mono">Metronome & Tempo</span>
-                        <div className="flex items-center justify-center gap-1.5 mt-0.5">
-                          <button
-                            onClick={() => setIsMetronomeActive((prev) => !prev)}
-                            className={`text-[8px] uppercase font-bold tracking-wider px-2 py-1 rounded transition-all flex items-center gap-1 active:scale-90 border shadow-sm whitespace-nowrap cursor-pointer ${
-                              isMetronomeActive
-                                ? 'bg-rose-500/20 text-rose-300 border-rose-500/30 shadow-inner'
-                                : 'bg-white/5 text-gray-400 border-white/5 hover:text-white'
-                            }`}
-                          >
-                            <span
-                              className={`w-1.5 h-1.5 rounded-full bg-rose-500 scale-90 transition-all duration-100 ${isMetronomeActive ? 'opacity-100 animate-pulse' : 'opacity-20'}`}
-                            />
-                            Metro
-                          </button>
-                          <button
-                            onClick={handleTapTempo}
-                            className="text-[8px] uppercase font-bold tracking-wider px-2 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 transition-all active:scale-90 border border-rose-500/20 shadow-sm cursor-pointer"
-                          >
-                            TAP
-                          </button>
-                          <input
-                            type="number"
-                            min="40"
-                            max="250"
-                            value={bpm}
-                            onChange={(e) => setBpm(Math.max(40, Math.min(250, parseInt(e.target.value) || 120)))}
-                            className="w-10 bg-black/40 text-center rounded p-1 text-[9px] font-mono font-bold text-rose-300 outline-none focus:ring-1 focus:ring-rose-500/30 border border-white/5 shadow-inner"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* 3. Collapsible Family Chords */}
-              <div className="border-b border-white/5 last:border-0 pb-1.5 last:pb-0">
-                <div
-                  onClick={() => setIsFamilyChordsCollapsed(!isFamilyChordsCollapsed)}
-                  className="flex items-center justify-between cursor-pointer select-none text-[9px] sm:text-[10px] text-indigo-300 font-extrabold uppercase tracking-widest px-1 py-0.5 hover:text-white transition-colors"
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span>🎸</span> Family Chords
-                  </span>
-                  <span className="text-[10px] font-mono font-black text-indigo-400">
-                    {isFamilyChordsCollapsed ? '▼' : '▲'}
-                  </span>
-                </div>
-                <div className={`panel-wrap ${!isFamilyChordsCollapsed ? 'is-open' : ''}`}>
-                  <div className="panel-inner pt-1.5 px-1">
-                    {renderFamilyChordsList(true)}
-                  </div>
-                </div>
-              </div>
-
-            </div>
-
-            {/* Chords & Lyrics Sheet Main Body Panel */}
-            <div id="lyricsFullscreenWrap" className="mt-2.5 flex flex-col relative bg-transparent transition-all">
-              <div className="flex justify-between items-center mb-1.5 pr-1 sm:pr-2">
-                <span className="text-[9px] sm:text-[10px] text-indigo-400 uppercase tracking-widest font-extrabold select-none flex-shrink-0">
-                  Sheet View
-                </span>
-              </div>
-
-              {/* Scrollable song sheet grid - styled beautifully as a white physical binder sheet */}
-              <div
-                className={`p-4 sm:p-6 md:p-8 pb-20 song-scroll-container w-full sheet-white rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.3)] ${
-                  focusedLineId ? 'focused-parent' : ''
-                } mt-1.5`}
-              >
-                {activeRoadmap.map((block, idx) => {
-                  let blockDisplayName = block.name;
-
-                  // In compact mode, only render the first occurrence of unique sections.
-                  if (sheetLayoutMode === 'compact') {
-                    if (!showLyrics) {
-                      // Merge by identical chord progression
-                      const firstIdx = activeRoadmap.findIndex(b => areBlocksChordsIdentical(b, block, sectionTemplates));
-                      if (firstIdx !== idx) {
-                        return null;
-                      }
-                      // Find all unique section names with identical chords/keys in the roadmap to merge their names
-                      const identicalBlocks = activeRoadmap.filter(b => areBlocksChordsIdentical(b, block, sectionTemplates));
-                      const uniqueNames = Array.from(new Set(identicalBlocks.map(b => b.name)));
-                      blockDisplayName = uniqueNames.join(' / ');
-                    } else {
-                      // Standard compact mode by name
-                      const firstIdx = activeRoadmap.findIndex(b => b.name === block.name);
-                      if (firstIdx !== idx) {
-                        return null;
-                      }
-                    }
-                  }
-
-                  const blockRep = repInfo[idx];
-                  
-                   // Reveal consecutive repeating sections fully as requested
-                   // if (sheetLayoutMode === 'sequence' && blockRep?.isRepeat) {
-                   //   return null;
-                   // }
-
-                  const templateLines = sectionTemplates[block.name] || [];
-                  const blockOffset = block.keyOffset || 0;
-                  const blockKeyName = getModulatedKeyName(currentKey, blockOffset);
-                  const isSectionCollapsed = sectionCollapsedStates[idx] === true;
-
-                  const originalIdx = NOTE_TO_INDEX[currentSong.OriginalKey || 'C'] || 0;
-                  const currentIdx = NOTE_TO_INDEX[currentKey] || 0;
-                  const totalSemitonesOffset = currentIdx - originalIdx + blockOffset;
-
-                  let textColor = 'text-indigo-400';
-                  let lineColor = 'bg-indigo-500/20';
-                  const nameLower = block.name.toLowerCase();
-                  if (nameLower.includes('chorus')) {
-                    textColor = 'text-amber-400';
-                    lineColor = 'bg-amber-500/20';
-                  } else if (nameLower.includes('verse')) {
-                    textColor = 'text-emerald-400';
-                    lineColor = 'bg-emerald-500/20';
-                  } else if (nameLower.includes('bridge')) {
-                    textColor = 'text-purple-400';
-                    lineColor = 'bg-purple-500/20';
-                  } else if (nameLower.includes('intro') || nameLower.includes('outro')) {
-                    textColor = 'text-sky-400';
-                    lineColor = 'bg-sky-500/20';
-                  }
-
-                  // Non-consecutive duplicates: Check if this block is an identical repetition of a PREVIOUS block in the flow
-                  if (sheetLayoutMode === 'sequence') {
-                    const firstIdenticalIdx = activeRoadmap.findIndex((b, bIdx) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, sectionTemplates));
-                    if (firstIdenticalIdx !== -1) {
-                      // Skip rendering full chords/lyrics, instead render a beautiful compact repeat card!
-                      return (
-                        <div
-                          key={block.id}
-                          id={`sec-wrapper-${idx}`}
-                          className="group mb-2 bg-white/[0.02] border border-dashed border-indigo-500/20 hover:border-indigo-400/40 rounded-xl px-2.5 py-1.5 flex items-center justify-between transition-all select-none shadow-[0_2px_8px_rgba(0,0,0,0.2)] animate-fadeIn"
-                        >
-                          <div className="flex items-center gap-2 overflow-hidden">
-                            <span className="text-[8px] font-mono font-black uppercase tracking-wider text-indigo-300 bg-indigo-500/15 border border-indigo-500/25 rounded px-1.5 py-0.5 shadow-sm animate-pulse flex items-center gap-1 shrink-0">
-                              <span>🔁</span> REPLAY
-                            </span>
-                            <span className={`text-[11px] font-bold ${textColor} truncate`}>
-                              {block.name}
-                            </span>
-                            <span className="text-[8px] text-gray-400 font-mono hidden sm:inline truncate">
-                              (Identical chords & lyrics as Section #{firstIdenticalIdx + 1} - {activeRoadmap[firstIdenticalIdx].name})
-                            </span>
-                          </div>
-                          <button
-                            onClick={() => {
-                              const element = document.getElementById(`sec-wrapper-${firstIdenticalIdx}`);
-                              if (element) {
-                                element.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                element.classList.add('ring-2', 'ring-indigo-500/50', 'rounded-xl');
-                                setTimeout(() => {
-                                  element.classList.remove('ring-2', 'ring-indigo-500/50');
-                                }, 1500);
-                              }
-                            }}
-                            className="text-[8px] text-indigo-300 hover:text-indigo-200 bg-indigo-500/10 border border-indigo-500/20 rounded px-2 py-0.5 font-bold transition-all active:scale-95 cursor-pointer flex items-center gap-1 shadow-sm shrink-0"
-                            title="Scroll up to the original section chords and lyrics"
-                          >
-                            <span>👁️ View Original</span>
-                          </button>
-                        </div>
-                      );
-                    }
-                  }
-
-                  return (
-                    <div
-                      key={block.id}
-                      id={`sec-wrapper-${idx}`}
-                      className="group mb-2 transition-all"
-                    >
-                      {/* Section header minimal bar */}
-                      <div
-                        onClick={() =>
-                          setSectionCollapsedStates((prev) => ({ ...prev, [idx]: !prev[idx] }))
-                        }
-                        className="cursor-pointer py-0.5 flex items-center justify-between select-none hover:opacity-85 active:scale-[0.99] transition-all"
-                      >
-                        <div className="flex items-center gap-2.5 overflow-hidden flex-1 min-w-0 pr-2">
-                          <span 
-                            className={`font-mono uppercase tracking-widest font-black ${textColor} shrink-0 flex items-center gap-1.5`}
-                            style={{ fontSize: `${Math.max(12, 14 * lyricZoom)}px` }}
-                          >
-                            {blockDisplayName.toUpperCase()}
-                            {blockRep && blockRep.totalInRun > 1 && (
-                              <span className="text-[8px] bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded-md px-1.5 py-0.5 font-mono font-black select-none animate-pulse">
-                                {blockRep.totalInRun}x
-                              </span>
-                            )}
-                          </span>
-                          
-                          {/* Elegant thin horizontal line */}
-                          <div className={`h-[1px] flex-1 ${lineColor} opacity-70`} />
-
-                          {blockOffset !== 0 && (
-                            <span className="text-[9px] bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-md px-1.5 py-0.5 font-mono uppercase whitespace-nowrap shrink-0">
-                              Key: {blockKeyName} ({blockOffset >= 0 ? '+' : ''}{blockOffset})
-                            </span>
-                          )}
-                        </div>
-                        <span
-                          className="chevron-icon text-indigo-400/40 text-[9px] flex-shrink-0 ml-1"
-                          style={{ transform: isSectionCollapsed ? 'rotate(0deg)' : 'rotate(180deg)' }}
-                        >
-                          ▼
-                        </span>
-                      </div>
-
-                      {/* Embedded Lyric Hint when lyrics are hidden */}
-                      {!showLyrics && !isSectionCollapsed && (
-                        <div className="mt-1 mb-2.5 flex flex-col gap-1 text-[11px] text-gray-400 italic font-medium pl-3 sm:pl-4 select-none animate-fadeIn">
-                          {(() => {
-                            if (sheetLayoutMode === 'compact') {
-                              const identicalBlocks = activeRoadmap.filter(b => areBlocksChordsIdentical(b, block, sectionTemplates));
-                              const renderedHints: any[] = [];
-                              const seenNames = new Set();
-                              
-                              identicalBlocks.forEach(b => {
-                                if (seenNames.has(b.name)) return;
-                                seenNames.add(b.name);
-                                const lines = sectionTemplates[b.name] || [];
-                                const firstLyric = lines.find(l => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
-                                if (firstLyric) {
-                                  renderedHints.push({ name: b.name, lyric: firstLyric });
-                                }
-                              });
-
-                              if (renderedHints.length > 0) {
-                                // Group by lyric
-                                const groups: { lyric: string; names: string[] }[] = [];
-                                renderedHints.forEach(h => {
-                                  const normLyric = h.lyric.trim();
-                                  const existingGroup = groups.find(g => g.lyric.trim().toLowerCase() === normLyric.toLowerCase());
-                                  if (existingGroup) {
-                                    existingGroup.names.push(h.name);
-                                  } else {
-                                    groups.push({ lyric: h.lyric, names: [h.name] });
-                                  }
-                                });
-
-                                return groups.map((g, gIdx) => (
-                                  <div key={gIdx} className="flex items-center gap-2 flex-wrap">
-                                    <span className="text-[8px] font-black uppercase tracking-wider text-indigo-400/80 not-italic bg-indigo-500/10 px-1.5 py-0.5 border border-indigo-500/20 rounded-md shrink-0">
-                                      {g.names.map(n => n.toUpperCase()).join(' & ')}
-                                    </span>
-                                    <span className="truncate text-gray-300">“{g.lyric}”</span>
-                                    {g.names.length > 1 && (
-                                      <span className="text-[7.5px] font-bold text-emerald-400 uppercase tracking-widest bg-emerald-500/10 border border-emerald-500/20 px-1 py-0.5 rounded">
-                                        Shared 1st line
-                                      </span>
-                                    )}
-                                  </div>
-                                ));
-                              }
-                            } else {
-                              const lines = sectionTemplates[block.name] || [];
-                              const firstLyric = lines.find(l => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
-                              if (firstLyric) {
-                                return (
-                                  <div className="flex items-center gap-1.5 text-gray-300">
-                                    <span className="text-indigo-400/60 not-italic font-bold text-[9px] uppercase tracking-wider bg-indigo-500/10 px-1.5 py-0.5 border border-indigo-500/20 rounded-md shrink-0">HINT</span>
-                                    <span className="truncate">“{firstLyric}”</span>
-                                  </div>
-                                );
-                              }
-                            }
-                            return null;
-                          })()}
-                        </div>
-                      )}
-
-                      {/* Lines view body */}
-                      <div className={`panel-wrap ${!isSectionCollapsed ? 'is-open' : ''}`}>
-                        <div className="panel-inner">
-                          <div className="py-0.5 pl-3 sm:pl-4 space-y-0.5 bg-transparent">
-                            {(() => {
-                              // 1. Get only enabled lines
-                              const enabledLinesList = templateLines
-                                .map((l, lIdx) => ({ l, lIdx }))
-                                .filter(({ lIdx }) => (block.enabledLines || []).includes(lIdx));
-
-                              // 2. Pre-process and resolve chords, numbers, and lyrics
-                              const processedLines = enabledLinesList.map(({ l, lIdx }) => {
-                                const transposed = transposeChord(l.Chords || '', totalSemitonesOffset);
-                                const numbers = getNumberForChord(transposed, blockKeyName, currentKey);
-                                const lyrics = l.Lyrics || '';
-                                return {
-                                  l,
-                                  lIdx,
-                                  transposed,
-                                  numbers,
-                                  lyrics,
-                                };
-                              });
-
-                              // 3. Find the best multi-line chord progression loop (pattern length L, repeat count K)
-                              let bestL = -1;
-                              let bestK = -1;
-                              const N = processedLines.length;
-
-                              if (!showLyrics && N >= 4) {
-                                for (let L = 2; L <= Math.floor(N / 2); L++) {
-                                  let K = 1;
-                                  while ((K + 1) * L <= N) {
-                                    let matches = true;
-                                    for (let offset = 0; offset < L; offset++) {
-                                      const originalChord = processedLines[offset].transposed;
-                                      const nextChord = processedLines[K * L + offset].transposed;
-                                      if (originalChord !== nextChord) {
-                                        matches = false;
-                                        break;
-                                      }
-                                    }
-                                    if (matches) {
-                                      K++;
-                                    } else {
-                                      break;
-                                    }
-                                  }
-
-                                  if (K >= 2) {
-                                    // Make sure at least one line in the pattern has non-empty chords
-                                    let hasChords = false;
-                                    for (let offset = 0; offset < L; offset++) {
-                                      if (processedLines[offset].transposed && processedLines[offset].transposed.trim() !== '') {
-                                        hasChords = true;
-                                        break;
-                                      }
-                                    }
-
-                                    if (hasChords) {
-                                      // Pick the loop that covers the most lines (K * L).
-                                      // If there is a tie, we prefer the smaller L (the fundamental loop).
-                                      if (bestL === -1 || (K * L > bestK * bestL) || (K * L === bestK * bestL && L < bestL)) {
-                                        bestL = L;
-                                        bestK = K;
-                                      }
-                                    }
-                                  }
-                                }
-                              }
-
-                              // 4. Render with Loop-Grouping if a pattern is detected
-                              if (bestL >= 2 && bestK >= 2) {
-                                const loopLength = bestL;
-                                const repeatCount = bestK;
-                                const loopedLinesCount = loopLength * repeatCount;
-
-                                // Check if lyrics are identical across all rounds or are hidden/disabled
-                                const lyricsAreIdenticalOrHidden = !showLyrics || (() => {
-                                  for (let r = 1; r < repeatCount; r++) {
-                                    for (let offset = 0; offset < loopLength; offset++) {
-                                      const lineA = processedLines[offset];
-                                      const lineB = processedLines[r * loopLength + offset];
-                                      if ((lineA.lyrics || '') !== (lineB.lyrics || '')) {
-                                        return false;
-                                      }
-                                    }
-                                  }
-                                  return true;
-                                })();
-
-                                const loopContainers = [];
-
-                                if (lyricsAreIdenticalOrHidden) {
-                                  // Render only the first round with a repeat badge, hiding duplicate rounds completely!
-                                  const runLines = processedLines.slice(0, loopLength);
-                                  loopContainers.push(
-                                    <div
-                                      key="loop-run-single"
-                                      className="border-l border-amber-500/30 bg-amber-500/5 hover:bg-amber-500/[0.08] hover:border-amber-500/50 rounded-r-xl px-2 py-1.5 my-1.5 space-y-1 transition-all"
-                                    >
-                                      <div className="flex items-center gap-2 mb-1 select-none">
-                                        <span className="text-[9px] font-mono font-black uppercase tracking-wider text-amber-400 bg-amber-500/15 border border-amber-500/25 rounded px-2 py-0.5 flex items-center gap-1.5 shadow-sm animate-pulse">
-                                          <span>🔁</span> Play {repeatCount}x
-                                        </span>
-                                        <span className="text-[8px] text-amber-300 font-mono tracking-wide">
-                                          (chords progression repeats)
-                                        </span>
-                                      </div>
-
-                                      <div className="space-y-1">
-                                        {runLines.map((lineData) => {
-                                          const { lIdx, transposed, numbers, lyrics } = lineData;
-                                          const lineUniqueId = `line-block-${idx}-${lIdx}`;
-
-                                          return (
-                                            <div
-                                              key={lIdx}
-                                              onClick={() =>
-                                                setFocusedLineId((prev) => (prev === lineUniqueId ? null : lineUniqueId))
-                                              }
-                                              className={`line-block animate-fadeIn ${
-                                                focusedLineId === lineUniqueId ? 'focused' : ''
-                                              }`}
-                                            >
-                                              {displayMode !== 'numbers' && transposed && (
-                                                <div
-                                                  className="chord-line mb-0.5"
-                                                  style={{ fontSize: `${lyricZoom * 1.05}rem` }}
-                                                >
-                                                  {parseClickableChords(transposed, blockKeyName)}
-                                                </div>
-                                              )}
-                                              {displayMode !== 'chords' && numbers && (
-                                                <div
-                                                  className="num-line mb-0.5"
-                                                  style={{ fontSize: `${lyricZoom * 0.9}rem` }}
-                                                >
-                                                  {numbers}
-                                                </div>
-                                              )}
-                                              {showLyrics && lyrics && (
-                                                <div
-                                                  className="lyric-line text-gray-200"
-                                                  style={{ fontSize: `${lyricZoom}rem` }}
-                                                >
-                                                  {lyrics}
-                                                </div>
-                                              )}
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    </div>
-                                  );
-                                } else {
-                                  // Lyrics are shown and are different: render all rounds so the user can read the lyrics
-                                  for (let r = 0; r < repeatCount; r++) {
-                                    const runLines = processedLines.slice(r * loopLength, (r + 1) * loopLength);
-                                    loopContainers.push(
-                                      <div
-                                        key={`loop-run-${r}`}
-                                        className="border-l border-indigo-500/25 bg-indigo-500/5 hover:bg-indigo-500/[0.08] hover:border-indigo-500/50 rounded-r-xl px-2 py-1.5 my-1.5 space-y-1 transition-all"
-                                      >
-                                        <div className="flex items-center gap-2 mb-1 select-none">
-                                          {r === 0 ? (
-                                            <>
-                                              <span className="text-[9px] font-mono font-black uppercase tracking-wider text-amber-400 bg-amber-500/15 border border-amber-500/25 rounded px-2 py-0.5 flex items-center gap-1.5 shadow-sm">
-                                                <span>🔁</span> Chord Loop ({repeatCount}x) — Round 1
-                                              </span>
-                                              <span className="text-[8px] text-indigo-300 font-mono tracking-wide">
-                                                (chords progression pattern repeats)
-                                              </span>
-                                            </>
-                                          ) : (
-                                            <>
-                                              <span className="text-[9px] font-mono font-black uppercase tracking-wider text-indigo-300 bg-indigo-500/15 border border-indigo-500/25 rounded px-2 py-0.5 flex items-center gap-1.5 shadow-sm">
-                                                <span>🔁</span> Round {r + 1}
-                                              </span>
-                                              <span className="text-[8px] text-gray-400 font-mono tracking-wide">
-                                                (identical chords as Round 1)
-                                              </span>
-                                            </>
-                                          )}
-                                        </div>
-
-                                        <div className="space-y-1">
-                                          {runLines.map((lineData) => {
-                                            const { lIdx, transposed, numbers, lyrics } = lineData;
-                                            const lineUniqueId = `line-block-${idx}-${lIdx}`;
-
-                                            return (
-                                              <div
-                                                key={lIdx}
-                                                onClick={() =>
-                                                  setFocusedLineId((prev) => (prev === lineUniqueId ? null : lineUniqueId))
-                                                }
-                                                className={`line-block animate-fadeIn ${
-                                                  focusedLineId === lineUniqueId ? 'focused' : ''
-                                                }`}
-                                              >
-                                                {displayMode !== 'numbers' && transposed && (
-                                                  <div
-                                                    className="chord-line mb-0.5"
-                                                    style={{ fontSize: `${lyricZoom * 1.05}rem` }}
-                                                  >
-                                                    {parseClickableChords(transposed, blockKeyName)}
-                                                  </div>
-                                                )}
-                                                {displayMode !== 'chords' && numbers && (
-                                                  <div
-                                                    className="num-line mb-0.5"
-                                                    style={{ fontSize: `${lyricZoom * 0.9}rem` }}
-                                                  >
-                                                    {numbers}
-                                                  </div>
-                                                )}
-                                                {showLyrics && lyrics && (
-                                                  <div
-                                                    className="lyric-line text-gray-200"
-                                                    style={{ fontSize: `${lyricZoom}rem` }}
-                                                  >
-                                                    {lyrics}
-                                                  </div>
-                                                )}
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
-                                      </div>
-                                    );
-                                  }
-                                }
-
-                                const remainingLines = processedLines.slice(loopedLinesCount);
-
-                                return (
-                                  <div className="space-y-1">
-                                    {loopContainers}
-                                    {remainingLines.length > 0 && (
-                                      <div className="pt-1.5 space-y-1 border-t border-gray-800/25">
-                                        {remainingLines.map((lineData) => {
-                                          const { lIdx, transposed, numbers, lyrics } = lineData;
-                                          const lineUniqueId = `line-block-${idx}-${lIdx}`;
-
-                                          return (
-                                            <div
-                                              key={lIdx}
-                                              onClick={() =>
-                                                setFocusedLineId((prev) => (prev === lineUniqueId ? null : lineUniqueId))
-                                              }
-                                              className={`line-block animate-fadeIn ${
-                                                focusedLineId === lineUniqueId ? 'focused' : ''
-                                              }`}
-                                            >
-                                              {displayMode !== 'numbers' && transposed && (
-                                                <div
-                                                  className="chord-line mb-0.5"
-                                                  style={{ fontSize: `${lyricZoom * 1.05}rem` }}
-                                                >
-                                                  {parseClickableChords(transposed, blockKeyName)}
-                                                </div>
-                                              )}
-                                              {displayMode !== 'chords' && numbers && (
-                                                <div
-                                                  className="num-line mb-0.5"
-                                                  style={{ fontSize: `${lyricZoom * 0.9}rem` }}
-                                                >
-                                                  {numbers}
-                                                </div>
-                                              )}
-                                              {showLyrics && lyrics && (
-                                                <div
-                                                  className="lyric-line text-gray-200"
-                                                  style={{ fontSize: `${lyricZoom}rem` }}
-                                                >
-                                                  {lyrics}
-                                                </div>
-                                              )}
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              }
-
-                              // 5. Compute consecutive runs of identical lines (Fallback)
-                              interface LineRun {
-                                startIndex: number;
-                                endIndex: number;
-                                count: number;
-                              }
-
-                              const lineRuns: LineRun[] = [];
-                              let i = 0;
-                              while (i < processedLines.length) {
-                                let j = i + 1;
-                                while (j < processedLines.length) {
-                                  const lineA = processedLines[i];
-                                  const lineB = processedLines[j];
-
-                                  const chordsIdentical = lineA.transposed === lineB.transposed;
-                                  const lyricsIdentical = !showLyrics || lineA.lyrics === lineB.lyrics;
-
-                                  if (chordsIdentical && lyricsIdentical) {
-                                    j++;
-                                  } else {
-                                    break;
-                                  }
-                                }
-
-                                lineRuns.push({
-                                  startIndex: i,
-                                  endIndex: j - 1,
-                                  count: j - i,
-                                });
-
-                                i = j;
-                              }
-
-                              // 6. Render grouped lines (Fallback)
-                              return lineRuns.map((run) => {
-                                const firstLine = processedLines[run.startIndex];
-                                const { lIdx, transposed, numbers, lyrics } = firstLine;
-                                const lineUniqueId = `line-block-${idx}-${lIdx}`;
-
-                                return (
-                                  <div
-                                    key={lIdx}
-                                    onClick={() =>
-                                      setFocusedLineId((prev) => (prev === lineUniqueId ? null : lineUniqueId))
-                                    }
-                                    className={`line-block animate-fadeIn ${
-                                      focusedLineId === lineUniqueId ? 'focused' : ''
-                                    }`}
-                                  >
-                                    {displayMode !== 'numbers' && transposed && (
-                                      <div
-                                        className="chord-line mb-0.5 flex items-center gap-2 flex-wrap"
-                                        style={{ fontSize: `${lyricZoom * 1.05}rem` }}
-                                      >
-                                        <span>{parseClickableChords(transposed, blockKeyName)}</span>
-                                        {run.count > 1 && (
-                                          <span className="text-[7.5px] bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded px-1.5 py-0.5 font-mono font-black select-none tracking-wide">
-                                            {run.count}x
-                                          </span>
-                                        )}
-                                      </div>
-                                    )}
-                                    {displayMode !== 'chords' && numbers && (
-                                      <div
-                                        className="num-line mb-0.5 flex items-center gap-2 flex-wrap"
-                                        style={{ fontSize: `${lyricZoom * 0.9}rem` }}
-                                      >
-                                        <span>{numbers}</span>
-                                        {run.count > 1 && displayMode === 'numbers' && (
-                                          <span className="text-[7.5px] bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded px-1.5 py-0.5 font-mono font-black select-none tracking-wide">
-                                            {run.count}x
-                                          </span>
-                                        )}
-                                      </div>
-                                    )}
-                                    {showLyrics && lyrics && (
-                                      <div
-                                        className="lyric-line text-gray-200 flex items-center gap-2 flex-wrap"
-                                        style={{ fontSize: `${lyricZoom}rem` }}
-                                      >
-                                        <span>{lyrics}</span>
-                                        {run.count > 1 && !transposed && !numbers && (
-                                          <span className="text-[7.5px] bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded px-1.5 py-0.5 font-mono font-black select-none tracking-wide">
-                                            {run.count}x
-                                          </span>
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              });
-                            })()}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {/* Next Song Transition Banner */}
-                {(() => {
-                  const currentIndexInSet = setlists.indexOf(String(currentSong.SongID));
-                  if (currentIndexInSet !== -1 && currentIndexInSet < setlists.length - 1) {
-                    const nextSongID = setlists[currentIndexInSet + 1];
-                    const nextSong = songs.find((s) => String(s.SongID) === nextSongID);
-                    if (nextSong) {
-                      return (
-                        <div className="mt-12 pt-8 border-t border-indigo-100/10">
-                          <button
-                            onClick={() => executeSongLoad(nextSong)}
-                            className="w-full text-left p-5 rounded-2xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white shadow-lg shadow-indigo-600/25 transition-all hover:shadow-xl hover:shadow-indigo-600/35 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.99] group cursor-pointer"
-                          >
-                            <div className="flex items-center justify-between gap-4">
-                              <div className="min-w-0">
-                                <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-200/90 block mb-1">
-                                  Up Next in Setlist
-                                </span>
-                                <h3 className="text-base sm:text-lg font-black tracking-tight leading-snug truncate text-white">
-                                  {nextSong.Title}
-                                </h3>
-                                <span className="text-xs text-indigo-100/80 truncate block mt-0.5 font-medium">
-                                  by {nextSong.Artist || 'Unknown Artist'}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-2 bg-white/10 group-hover:bg-white/20 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold uppercase tracking-wider transition-colors shrink-0">
-                                <span>Next</span>
-                                <span className="text-base sm:text-lg group-hover:translate-x-1 transition-transform duration-200 inline-block">⏭️</span>
-                              </div>
-                            </div>
-                          </button>
-                        </div>
-                      );
-                    }
-                  }
-                  return null;
-                })()}
-              </div>
-            </div>
-          </div>
-        )}
-      </main>
-
-      {/* Floating back-to-top button */}
-      <button
-        onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-        className={`fixed bottom-6 left-4 sm:left-6 z-50 p-3 btn-5d-primary text-white rounded-full transition-all duration-300 cursor-pointer ${
-          showScrollTop ? 'opacity-100 scale-100' : 'opacity-0 scale-75 pointer-events-none'
-        }`}
-      >
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 15l7-7 7 7" />
-        </svg>
-      </button>
-
-      {/* Sidebar Navigation Catalog */}
-      <SidebarCatalog
-        isOpen={isNavOpen}
-        onClose={() => setIsNavOpen(false)}
-        songs={songs}
-        favorites={favorites}
-        setlists={setlists}
-        currentTab={currentTab}
-        onSetTab={setCurrentTab}
-        currentSong={currentSong}
-        onChangeSong={changeSong}
-        onOpenAddSongForm={() => {
-          setFormEditingSong(null);
-          setIsFormModalOpen(true);
-        }}
-        isAdmin={!!(appUser && appSecret)}
-        onToggleAdmin={handleAdminLockToggle}
-        onOpenShortcuts={() => setIsShortcutsOpen(true)}
-        onToggleFullScreen={toggleFullScreen}
-        triggerCapability={handleTriggerCapability}
-        onRunDiagnostics={() => setIsDiagnosticModalOpen(true)}
-        allSharedSetlists={allSharedSetlists}
-        onSaveSetlistOrder={saveSetlistOrder}
-        onDeleteSetlist={deleteSetlistFolder}
-        onRemoveSongFromSetlist={removeSongFromSetlist}
-        onSelectSongFromSetlist={selectSongFromSetlist}
-        onCreateSetlist={createNewSetlistFolder}
-        onToggleSetlistLock={toggleSetlistLock}
-        activeSetlistFolder={activeSetlistFolder}
-        onDownloadManual={exportManualToPDF}
-        onOpenInstallGuide={() => setIsInstallModalOpen(true)}
-      />
-
-      {/* Shortcuts Modal dialog */}
-      <ShortcutsModal isOpen={isShortcutsOpen} onClose={() => setIsShortcutsOpen(false)} />
-
-      {/* Setlist Selector Dialog */}
-      {currentSong && (
-        <SetlistSelectorDialog
-          isOpen={isSetlistManagerOpen}
-          onClose={() => setIsSetlistManagerOpen(false)}
-          currentSong={currentSong}
-          allSharedSetlists={allSharedSetlists}
-          onAddSongToSet={saveSongToSetlist}
-          onRemoveSongFromSet={removeSongFromSetlist}
-          onCreateNewSetlist={createNewSetlistFolder}
-          isAdmin={!!(appUser && appSecret)}
-        />
-      )}
-
-      {/* Admin lock password dialog */}
-      {isAdminModalOpen && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-[600] flex items-center justify-center p-4 animate-fadeIn">
-          <div className="bg-gradient-to-br from-indigo-950/95 via-[#0a0b16]/95 to-[#05060a]/95 backdrop-blur-3xl p-6 rounded-3xl w-full max-w-sm shadow-[0_20px_50px_rgba(49,46,129,0.5)] border border-indigo-500/20">
-            <div className="flex justify-center mb-4">
-              <svg
-                className="w-14 h-14 animate-music-float drop-shadow-[0_10px_20px_rgba(99,102,241,0.5)]"
-                viewBox="0 0 120 120"
-                fill="none"
-                xmlns="http://www.w3.org/2000/svg"
-              >
-                <defs>
-                  <linearGradient id="admin-grad1" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stopColor="#818cf8" />
-                    <stop offset="100%" stopColor="#312e81" />
-                  </linearGradient>
-                  <linearGradient id="admin-shine" x1="0%" y1="0%" x2="0%" y2="100%">
-                    <stop offset="0%" stopColor="#ffffff" stopOpacity="0.7" />
-                    <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-                  </linearGradient>
-                </defs>
-                <rect x="10" y="10" width="100" height="100" rx="30" fill="url(#admin-grad1)" />
-                <rect x="10" y="10" width="100" height="100" rx="30" fill="url(#admin-shine)" opacity="0.6" />
-                <path
-                  d="M45 80 v-40 l35 -10 v40"
-                  fill="none"
-                  stroke="#ffffff"
-                  strokeWidth="8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  filter="drop-shadow(0 4px 8px rgba(0,0,0,0.5))"
-                />
-                <circle cx="35" cy="80" r="12" fill="#ffffff" filter="drop-shadow(0 4px 8px rgba(0,0,0,0.5))" />
-                <circle cx="70" cy="70" r="12" fill="#ffffff" filter="drop-shadow(0 4px 8px rgba(0,0,0,0.5))" />
-              </svg>
-            </div>
-            <h3 className="text-lg font-bold mb-4 text-white text-center tracking-wide select-none">
-              Admin Authentication
-            </h3>
-            <input
-              type="text"
-              placeholder="Username"
-              value={adminUsernameInput}
-              onChange={(e) => setAdminUsernameInput(e.target.value)}
-              className="w-full bg-indigo-900/30 text-indigo-100 p-3.5 rounded-xl text-sm text-center outline-none focus:ring-2 focus:ring-indigo-400/60 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] placeholder-indigo-300/50 transition-all border border-indigo-500/30 mb-3"
-            />
-            <input
-              type="password"
-              placeholder="Passkey"
-              value={adminPasswordInput}
-              onChange={(e) => setAdminPasswordInput(e.target.value)}
-              className="w-full bg-indigo-900/30 text-indigo-100 p-3.5 rounded-xl text-sm text-center outline-none focus:ring-2 focus:ring-indigo-400/60 shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)] placeholder-indigo-300/50 transition-all border border-indigo-500/30 mb-4"
-            />
-            <div className="flex gap-3">
-              <button
-                onClick={() => setIsAdminModalOpen(false)}
-                className="flex-1 py-3 bg-white/5 hover:bg-white/10 text-gray-400 text-xs font-bold rounded-xl active:scale-95 transition-all cursor-pointer"
-              >
-                CANCEL
-              </button>
-              <button
-                onClick={handleVerifyAdmin}
-                className="flex-1 py-3 btn-5d-primary text-white text-xs font-bold rounded-xl shadow-lg active:scale-95 transition-all cursor-pointer"
-              >
-                UNLOCK
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Musician interactive intelligence dialog */}
-      <MusicianModal
-        isOpen={isMusicianModalOpen}
-        onClose={() => setIsMusicianModalOpen(false)}
-        chordName={selectedChord}
-        songKey={currentSong ? currentKey : 'C'}
-        onOpenFretboardHelp={() => {}}
-        onOpenKeysHelp={() => {}}
-      />
-
-      {/* Add / Edit Song Sheet Dialog */}
-      <SongEditModal
-        isOpen={isFormModalOpen}
-        onClose={() => setIsFormModalOpen(false)}
-        editingSong={formEditingSong}
-        songLines={formEditingSong ? songLines : []}
-        appUser={appUser}
-        appSecret={appSecret}
-        scriptUrl={SCRIPT_URL}
-        onSubmitSuccess={fetchCatalog}
-        showToast={showToast}
-        setLoading={setIsLoading}
-      />
-
-      {/* Global loading indicator overlay */}
-      {isLoading && (
-        <div className="fixed inset-0 bg-[#07080e]/95 backdrop-blur-xl z-[900] flex flex-col items-center justify-center transition-opacity duration-300 select-none">
-          <div className="relative flex items-center justify-center w-28 h-28">
-            <div className="absolute inset-0 bg-indigo-500/20 blur-[40px] rounded-full" />
-            <div className="ripple-ring" />
-            <div className="ripple-ring" />
-            <div className="ripple-ring" />
-            <svg
-              className="w-16 h-16 animate-music-float relative z-10 drop-shadow-[0_10px_25px_rgba(99,102,241,0.7)]"
-              viewBox="0 0 120 120"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <defs>
-                <linearGradient id="load-grad1" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" stopColor="#818cf8" />
-                  <stop offset="100%" stopColor="#312e81" />
-                </linearGradient>
-                <linearGradient id="load-shine" x1="0%" y1="0%" x2="0%" y2="100%">
-                  <stop offset="0%" stopColor="#ffffff" stopOpacity="0.7" />
-                  <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-                </linearGradient>
-              </defs>
-              <rect x="10" y="10" width="100" height="100" rx="30" fill="url(#load-grad1)" />
-              <rect x="10" y="10" width="100" height="100" rx="30" fill="url(#load-shine)" opacity="0.6" />
-              <path
-                d="M45 80 v-40 l35 -10 v40"
-                fill="none"
-                stroke="#ffffff"
-                strokeWidth="8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                filter="drop-shadow(0 4px 8px rgba(0,0,0,0.5))"
-              />
-              <circle cx="35" cy="80" r="12" fill="#ffffff" filter="drop-shadow(0 4px 8px rgba(0,0,0,0.5))" />
-              <circle cx="70" cy="70" r="12" fill="#ffffff" filter="drop-shadow(0 4px 8px rgba(0,0,0,0.5))" />
-            </svg>
-          </div>
-          <div className="mt-10 text-transparent bg-clip-text bg-gradient-to-r from-indigo-300 to-sky-300 text-[11px] font-extrabold tracking-[0.3em] uppercase animate-pulse drop-shadow-lg">
-            Loading Catalog...
-          </div>
-        </div>
-      )}
-
-      {/* Pre-load View & Layout Settings Modal */}
-      {pendingSong && (
-        <div className="fixed inset-0 bg-[#020205]/85 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn">
-          <div className="w-full max-w-sm bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-5 select-none flex flex-col space-y-4">
-            
-            {/* Header */}
-            <div className="flex justify-between items-start">
-              <div>
-                <h3 className="text-sm font-bold text-indigo-200 tracking-wider uppercase font-sans">
-                  Load & Configure
-                </h3>
-                <p className="text-[11px] text-gray-400 mt-0.5 line-clamp-1 font-mono">
-                  {pendingSong.Title}
-                </p>
-              </div>
-              <button
-                onClick={() => setPendingSong(null)}
-                className="w-6 h-6 rounded-full bg-white/5 hover:bg-white/10 active:scale-90 flex items-center justify-center text-gray-400 hover:text-white transition-all cursor-pointer font-bold text-xs"
-              >
-                ✕
-              </button>
-            </div>
-
-            {/* Content Form */}
-            <div className="space-y-3.5">
-              
-              {/* Option 1: Display Mode */}
-              <div className="space-y-1.5">
-                <label className="text-[9px] text-indigo-400 font-extrabold uppercase tracking-widest font-mono">
-                  Display Mode
-                </label>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {(['chords', 'numbers', 'both'] as const).map((mode) => (
-                    <button
-                      key={mode}
-                      onClick={() => setModalDisplayMode(mode)}
-                      className={`px-2 py-1.5 rounded-lg text-[9.5px] uppercase tracking-wider font-bold border transition-all active:scale-95 cursor-pointer ${
-                        modalDisplayMode === mode
-                          ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 shadow-inner'
-                          : 'bg-white/5 text-gray-400 border-white/5 hover:text-gray-200'
-                      }`}
-                    >
-                      {mode}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Option 2: Lyrics Toggle */}
-              <div className="flex items-center justify-between py-1 border-t border-b border-white/5">
-                <div className="flex flex-col">
-                  <span className="text-[10.5px] text-gray-300 font-bold font-sans">Show Lyrics</span>
-                  <span className="text-[8.5px] text-gray-500 font-mono">Display text sheet with chords</span>
-                </div>
-                <button
-                  onClick={() => setModalShowLyrics(!modalShowLyrics)}
-                  className={`px-3 py-1 rounded-lg text-[9.5px] uppercase font-bold border tracking-wider transition-all active:scale-90 cursor-pointer ${
-                    modalShowLyrics
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
-                      : 'bg-white/5 text-gray-400 border-white/5 hover:text-white'
-                  }`}
-                >
-                  {modalShowLyrics ? 'ON' : 'OFF'}
-                </button>
-              </div>
-
-              {/* Option 3: Sheet Layout Mode */}
-              <div className="flex items-center justify-between py-1">
-                <div className="flex flex-col">
-                  <span className="text-[10.5px] text-gray-300 font-bold font-sans">Sheet Layout</span>
-                  <span className="text-[8.5px] text-gray-500 font-mono">Flow/Sequence vs Compact View</span>
-                </div>
-                <div className="flex gap-1 bg-black/40 p-0.5 rounded-lg border border-white/5 shadow-inner">
-                  <button
-                    onClick={() => setModalSheetLayoutMode('sequence')}
-                    className={`px-2 py-1 rounded-md text-[8.5px] uppercase font-black transition-all cursor-pointer ${
-                      modalSheetLayoutMode === 'sequence'
-                        ? 'bg-indigo-500/20 text-indigo-300'
-                        : 'text-gray-400 hover:text-gray-200'
-                    }`}
-                  >
-                    Flow
-                  </button>
-                  <button
-                    onClick={() => setModalSheetLayoutMode('compact')}
-                    className={`px-2 py-1 rounded-md text-[8.5px] uppercase font-black transition-all cursor-pointer ${
-                      modalSheetLayoutMode === 'compact'
-                        ? 'bg-amber-500/20 text-amber-300'
-                        : 'text-gray-400 hover:text-gray-200'
-                    }`}
-                  >
-                    Compact
-                  </button>
-                </div>
-              </div>
-
-            </div>
-
-            {/* Action Buttons */}
-            <div className="flex gap-2 pt-2 border-t border-white/5">
-              <button
-                onClick={() => {
-                  setPendingSong(null);
-                  setPendingSetlistName('');
-                }}
-                className="flex-1 py-2 rounded-xl text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 active:scale-95 transition-all font-bold text-[10px] uppercase tracking-wider cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  setDisplayMode(modalDisplayMode);
-                  setShowLyrics(modalShowLyrics);
-                  setSheetLayoutMode(modalSheetLayoutMode);
-                  if (pendingSetlistName) {
-                    setActiveSetlistFolder(pendingSetlistName);
-                    executeSongLoad(pendingSong, false, pendingSetlistName);
-                    showToast(`Loaded "${pendingSong.Title}" with arrangement for "${pendingSetlistName}"`, 'success');
-                    setPendingSetlistName('');
-                  } else {
-                    setActiveSetlistFolder('');
-                    executeSongLoad(pendingSong, true, '');
-                  }
-                  setPendingSong(null);
-                }}
-                className="flex-1 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white active:scale-95 transition-all font-bold text-[10px] uppercase tracking-wider shadow-md shadow-indigo-500/10 cursor-pointer"
-              >
-                Generate
-              </button>
-            </div>
-
-          </div>
-        </div>
-      )}
-
-      {/* Database Diagnostic Modal */}
-      <DatabaseDiagnosticModal
-        isOpen={isDiagnosticModalOpen}
-        onClose={() => setIsDiagnosticModalOpen(false)}
-        scriptUrl={SCRIPT_URL}
-      />
-
-      {/* PWA Installation Guide & Quick Setup Modal */}
-      {isInstallModalOpen && (
-        <div className="fixed inset-0 bg-[#020205]/90 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn select-none">
-          <div className="w-full max-w-md bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.6)] p-5 sm:p-6 flex flex-col space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
-            
-            {/* Header */}
-            <div className="flex items-center justify-between border-b border-white/5 pb-3">
-              <div className="flex items-center gap-2.5">
-                <span className="text-xl">📱</span>
-                <div>
-                  <h3 className="text-white font-black text-xs uppercase tracking-wider">Install Mobile App</h3>
-                  <p className="text-[9px] text-indigo-400 font-semibold uppercase tracking-widest mt-0.5">ChordSheet Live Flow</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setIsInstallModalOpen(false)}
-                className="text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 p-1.5 rounded-lg active:scale-95 transition-all cursor-pointer"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-
-            {/* Direct PWA Install Trigger if Supported by Browser */}
-            {deferredInstallPrompt ? (
-              <div className="p-4 bg-indigo-500/10 border border-indigo-500/30 rounded-xl flex flex-col items-center text-center space-y-3">
-                <div className="text-2xl animate-bounce">⚡</div>
-                <div className="space-y-1">
-                  <h4 className="text-xs font-bold text-white uppercase tracking-wide">Direct Install Available!</h4>
-                  <p className="text-[10px] text-gray-300">Click the button below to install directly to your device home screen.</p>
-                </div>
-                <button
-                  onClick={async () => {
-                    if (deferredInstallPrompt) {
-                      deferredInstallPrompt.prompt();
-                      const { outcome } = await deferredInstallPrompt.userChoice;
-                      if (outcome === 'accepted') {
-                        setDeferredInstallPrompt(null);
-                        setIsInstallModalOpen(false);
-                        showToast('Thank you for installing ChordSheet Live Flow!', 'success');
-                      }
-                    }
-                  }}
-                  className="w-full py-2.5 bg-indigo-500 hover:bg-indigo-400 text-white font-black uppercase text-[10px] tracking-wider rounded-xl transition-all active:scale-[0.98] cursor-pointer shadow-lg shadow-indigo-500/20"
-                >
-                  Install Now
-                </button>
-              </div>
-            ) : (
-              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-center">
-                <p className="text-[10.5px] text-emerald-400 font-medium">
-                  📶 <strong>Fully offline pre-cached</strong>. Once added to home screen, you can run the app offline on stage with zero load delay!
-                </p>
-              </div>
-            )}
-
-            {/* Detailed Mobile OS Installation Instructions */}
-            <div className="space-y-4">
-              
-              {/* iOS Safari Guide */}
-              <div className="p-3.5 bg-white/[0.02] border border-white/5 rounded-xl space-y-2.5">
-                <div className="flex items-center gap-2 text-white font-bold text-[11px] uppercase tracking-wide">
-                  <span>🍏</span>
-                  <span>iOS Safari Installation</span>
-                </div>
-                <ol className="text-[10px] text-gray-300 space-y-2 list-decimal pl-4 leading-relaxed">
-                  <li>Open this website inside the native <strong>Safari browser</strong>.</li>
-                  <li>Tap the <strong>Share</strong> icon <span className="inline-block bg-white/10 px-1 py-0.5 rounded text-[9px] font-semibold text-white">⎋</span> (rectangle with an arrow pointing up).</li>
-                  <li>Scroll down the menu and choose <strong>Add to Home Screen</strong>.</li>
-                  <li>Tap <strong>Add</strong> in the top-right corner to complete.</li>
-                </ol>
-              </div>
-
-              {/* Android Chrome Guide */}
-              <div className="p-3.5 bg-white/[0.02] border border-white/5 rounded-xl space-y-2.5">
-                <div className="flex items-center gap-2 text-white font-bold text-[11px] uppercase tracking-wide">
-                  <span>🤖</span>
-                  <span>Android Chrome / Edge</span>
-                </div>
-                <ol className="text-[10px] text-gray-300 space-y-2 list-decimal pl-4 leading-relaxed">
-                  <li>Open this website inside <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong>.</li>
-                  <li>Tap the menu button <span className="inline-block bg-white/10 px-1 py-0.5 rounded text-[9px] font-semibold text-white">⋮</span> (three vertical dots) in the top right.</li>
-                  <li>Select <strong>Install App</strong> or <strong>Add to Home screen</strong>.</li>
-                  <li>Confirm by tapping <strong>Install</strong>.</li>
-                </ol>
-              </div>
-
-              {/* Benefits Badge */}
-              <div className="grid grid-cols-2 gap-2 text-center text-[9px] font-bold text-gray-400 uppercase tracking-wider">
-                <div className="p-2 bg-white/5 rounded-lg border border-white/5 flex flex-col items-center gap-1">
-                  <span>📴 Offline Ready</span>
-                </div>
-                <div className="p-2 bg-white/5 rounded-lg border border-white/5 flex flex-col items-center gap-1">
-                  <span>🚀 Fast Performance</span>
-                </div>
-                <div className="p-2 bg-white/5 rounded-lg border border-white/5 flex flex-col items-center gap-1">
-                  <span>🎨 Fullscreen Stage</span>
-                </div>
-                <div className="p-2 bg-white/5 rounded-lg border border-white/5 flex flex-col items-center gap-1">
-                  <span>🔋 Battery Optimized</span>
-                </div>
-              </div>
-
-            </div>
-
-            {/* Footer */}
-            <button
-              onClick={() => setIsInstallModalOpen(false)}
-              className="w-full py-2.5 bg-white/5 hover:bg-white/10 text-gray-300 text-[10px] font-bold uppercase tracking-wider rounded-xl transition-all cursor-pointer text-center"
-            >
-              Done / Close
-            </button>
-
-          </div>
-        </div>
-      )}
-
-      {/* Setlist Arrangement Change Confirmation Modal */}
-      {pendingArrangementToLoad && (
-        <div className="fixed inset-0 bg-[#020205]/85 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn select-none">
-          <div className="w-full max-w-sm bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-5 flex flex-col space-y-4">
-            <div className="flex items-center gap-2 text-indigo-300 font-bold text-xs uppercase tracking-wider">
-              <span>📋</span>
-              <span>Confirm Arrangement Change</span>
-            </div>
-            
-            <div className="space-y-1.5 text-xs text-gray-300 leading-relaxed">
-              <p>
-                You are loading a different arrangement for <strong className="text-white">"{currentSong?.Title}"</strong>:
-              </p>
-              <div className="p-2.5 bg-indigo-500/10 border border-indigo-500/20 text-emerald-400 font-black tracking-wide rounded-xl text-center uppercase text-[11px]">
-                {getPresetInputDisplayName(pendingArrangementToLoad)}
-              </div>
-              <p className="text-[10.5px] text-gray-400 mt-2">
-                Would you like to also update the active set list <strong className="text-indigo-400">"{activeSetlistFolder}"</strong> to use this arrangement, or keep the original set list arrangement and load it locally?
-              </p>
-            </div>
-
-            <div className="flex flex-col gap-2 pt-1.5">
-              <button
-                onClick={async () => {
-                  const nameToLoad = pendingArrangementToLoad;
-                  setPendingArrangementToLoad(null);
-                  
-                  // 1. Load the arrangement
-                  loadPresetArrangement(nameToLoad);
-                  setCurrentArrangementName(nameToLoad);
-                  
-                  // 2. Find and extract the roadmap
-                  const presets = getPresets();
-                  const presetData = presets[nameToLoad];
-                  const isObject = presetData && typeof presetData === 'object' && !Array.isArray(presetData);
-                  const blocksArray = isObject ? (presetData.roadmap || []) : presetData;
-                  const newRoadmap = Array.isArray(blocksArray) ? blocksArray : [];
-                  const newKey = (isObject && presetData.key) ? presetData.key : (currentSong?.OriginalKey || 'C');
-                  
-                  // 3. Update active setlist with this roadmap
-                  if (currentSong) {
-                    await updateSetlistArrangementDirectly(String(currentSong.SongID), newRoadmap, newKey);
-                  }
-                }}
-                className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
-              >
-                Update Setlist & Load
-              </button>
-
-              <button
-                onClick={() => {
-                  const nameToLoad = pendingArrangementToLoad;
-                  setPendingArrangementToLoad(null);
-                  
-                  // Load preset arrangement locally
-                  loadPresetArrangement(nameToLoad);
-                  setCurrentArrangementName(nameToLoad);
-                  
-                  showToast('Arrangement loaded temporarily. Setlist remains unchanged.', 'info');
-                }}
-                className="w-full py-2.5 bg-white/5 hover:bg-white/10 text-gray-300 border border-white/5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
-              >
-                Keep Original Setlist / Load Locally Only
-              </button>
-
-              <button
-                onClick={() => {
-                  setPendingArrangementToLoad(null);
-                }}
-                className="w-full py-2 bg-transparent hover:bg-white/5 text-gray-400 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Save / Overwrite / Apply to Setlist Confirmation Modal */}
-      {saveArrangementConfirmation && (
-        <div className="fixed inset-0 bg-[#020205]/85 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn select-none">
-          <div className="w-full max-w-sm bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-5 flex flex-col space-y-4">
-            <div className={`flex items-center gap-2 font-bold text-xs uppercase tracking-wider ${
-              saveArrangementConfirmation.isOverwrite ? 'text-amber-400' : 'text-emerald-400'
-            }`}>
-              <span>{saveArrangementConfirmation.isOverwrite ? '⚠️' : '📋'}</span>
-              <span>{saveArrangementConfirmation.isOverwrite ? 'Confirm Arrangement Update' : 'New Arrangement Added'}</span>
-            </div>
-
-            <div className="space-y-2.5 text-xs text-gray-300 leading-relaxed">
-              {saveArrangementConfirmation.isOverwrite ? (
-                <div className="space-y-2">
-                  <p className="text-[10.5px]">
-                    You are modifying an existing arrangement:
-                  </p>
-                  <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-300 font-black tracking-wide rounded-xl text-center uppercase text-[11px]">
-                    {getPresetInputDisplayName(saveArrangementConfirmation.name)}
-                  </div>
-                  {!(appUser && appSecret) && (
-                    <div className="p-2 bg-indigo-500/15 border border-indigo-500/20 text-indigo-300 rounded-lg text-[9px] leading-relaxed select-none">
-                      💡 <strong>Tip for Viewers:</strong> To keep the default shared arrangement intact, you can cancel and enter a custom name to save as a new arrangement preset instead.
-                    </div>
-                  )}
-                  <p className="text-[10.5px] text-gray-400 mt-2 font-bold">
-                    Do you want to confirm?
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <p className="text-[10.5px]">
-                    This new arrangement will be added:
-                  </p>
-                  <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-black tracking-wide rounded-xl text-center uppercase text-[11px]">
-                    {getPresetInputDisplayName(saveArrangementConfirmation.name)}
-                  </div>
-                  <p className="text-[10.5px] text-gray-400 mt-2">
-                    Do you want to load this for this song in your current set list or just keep the original arrangement and just save this new arrangement?
-                  </p>
-                </div>
-              )}
-            </div>
-
-            <div className="flex flex-col gap-2 pt-1.5">
-              {saveArrangementConfirmation.isOverwrite ? (
-                <button
-                  onClick={async () => {
-                    const { name, roadmap } = saveArrangementConfirmation;
-                    setSaveArrangementConfirmation(null);
-                    await executeSaveArrangement(name, !!activeSetlistFolder, roadmap);
-                  }}
-                  className="w-full py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
-                >
-                  Confirm & Save
-                </button>
-              ) : (
-                <>
-                  <button
-                    onClick={async () => {
-                      const { name, roadmap } = saveArrangementConfirmation;
-                      setSaveArrangementConfirmation(null);
-                      await executeSaveArrangement(name, true, roadmap);
-                    }}
-                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
-                  >
-                    Load & Update Setlist
-                  </button>
-                  <button
-                    onClick={async () => {
-                      const { name, roadmap } = saveArrangementConfirmation;
-                      setSaveArrangementConfirmation(null);
-                      await executeSaveArrangement(name, false, roadmap);
-                    }}
-                    className="w-full py-2.5 bg-white/5 hover:bg-white/10 text-gray-300 border border-white/5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
-                  >
-                    Save to Catalog Only (Keep Original)
-                  </button>
-                </>
-              )}
-
-              <button
-                onClick={() => {
-                  setSaveArrangementConfirmation(null);
-                }}
-                className="w-full py-2 bg-transparent hover:bg-white/5 text-gray-400 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Delete Arrangement Confirmation Modal */}
-      {deleteArrangementConfirmation && (
-        <div className="fixed inset-0 bg-[#020205]/85 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn select-none">
-          <div className="w-full max-w-sm bg-[#0c0d1b] border border-rose-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-5 flex flex-col space-y-4">
-            <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider text-rose-400">
-              <span>⚠️</span>
-              <span>Confirm Deletion</span>
-            </div>
-
-            <div className="space-y-2 text-xs text-gray-300 leading-relaxed">
-              <p className="text-[10.5px]">
-                Are you sure you want to permanently delete the arrangement:
-              </p>
-              <div className="p-2.5 bg-rose-500/10 border border-rose-500/20 text-rose-400 font-black tracking-wide rounded-xl text-center uppercase text-[11px]">
-                {getPresetInputDisplayName(deleteArrangementConfirmation.name)}
-              </div>
-              
-              {deleteArrangementConfirmation.isActive && (
-                <div className="p-3 bg-amber-500/15 border border-amber-500/20 rounded-xl space-y-1.5 mt-2">
-                  <p className="text-[10px] text-amber-300 font-black uppercase tracking-wider flex items-center gap-1">
-                    <span>🚨 Critical Warning:</span>
-                  </p>
-                  <p className="text-[9.5px] text-gray-400 leading-normal font-medium">
-                    This arrangement is currently active on screen! If deleted, the song will reset to its default arrangement, and you will be asked to choose a replacement to update your setlist mapping.
-                  </p>
-                </div>
-              )}
-            </div>
-
-            <div className="flex flex-col gap-2 pt-1.5">
-              <button
-                onClick={async () => {
-                  const { name, isActive } = deleteArrangementConfirmation;
-                  setDeleteArrangementConfirmation(null);
-                  await deletePresetArrangement(name, isActive);
-                }}
-                className="w-full py-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
-              >
-                Yes, Delete Permanently
-              </button>
-              <button
-                onClick={() => {
-                  setDeleteArrangementConfirmation(null);
-                }}
-                className="w-full py-2 bg-transparent hover:bg-white/5 text-gray-400 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Arrangement Replacement Selection Modal */}
-      {arrangementReplacementModal && (
-        <div className="fixed inset-0 bg-[#020205]/90 backdrop-blur-md z-[900] flex items-center justify-center p-4 animate-fadeIn select-none">
-          <div className="w-full max-w-sm bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-5 flex flex-col space-y-4">
-            <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider text-indigo-400">
-              <span>🔄</span>
-              <span>Choose Replacement</span>
-            </div>
-
-            <div className="space-y-2 text-xs text-gray-300 leading-relaxed">
-              <p className="text-[10.5px]">
-                The arrangement <span className="text-rose-400 font-bold uppercase">"{arrangementReplacementModal.deletedName}"</span> has been deleted and no longer exists.
-              </p>
-              <p className="text-[10.5px] text-gray-400">
-                Choose a replacement arrangement for this song in the current setlist:
-              </p>
-
-              <div className="space-y-1.5 max-h-[160px] overflow-y-auto pr-1 custom-scrollbar">
-                {arrangementReplacementModal.availablePresets.length > 0 ? (
-                  arrangementReplacementModal.availablePresets.map((preset) => (
-                    <button
-                      key={preset.name}
-                      onClick={async () => {
-                        setArrangementReplacementModal(null);
-                        const friendlyName = parsePresetDate(preset.name).baseName;
-                        
-                        // If inside a setlist context, map this replacement arrangement to the setlist permanently
-                        if (activeSetlistFolder && currentSong) {
-                          await updateSetlistArrangementDirectly(
-                            String(currentSong.SongID),
-                            preset.roadmap,
-                            preset.key,
-                            preset.name
-                          );
-                          // Reload song with the new arrangement
-                          await executeSongLoad(currentSong, false);
-                          showToast(`Setlist arrangement replaced with: ${friendlyName}`, 'success');
-                        } else {
-                          // Just load it on screen
-                          loadPresetArrangement(preset.name);
-                          setCurrentArrangementName(preset.name);
-                          showToast(`Loaded arrangement: ${friendlyName}`, 'success');
-                        }
-                      }}
-                      className="w-full flex items-center justify-between p-2 bg-indigo-950/20 hover:bg-indigo-950/40 border border-indigo-500/10 hover:border-indigo-500/30 rounded-xl text-[10px] text-indigo-300 hover:text-white text-left font-black uppercase transition-all cursor-pointer"
-                    >
-                      <span>{parsePresetDate(preset.name).baseName}</span>
-                      <span className="text-[7.5px] bg-indigo-500/10 px-1.5 py-0.5 rounded text-indigo-400 font-mono font-bold">LOAD & UPDATE</span>
-                    </button>
-                  ))
-                ) : (
-                  <div className="text-center py-4 text-[9px] text-gray-500 italic">
-                    No other saved arrangements found for this song.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-2 pt-1.5">
-              <button
-                onClick={async () => {
-                  setArrangementReplacementModal(null);
-                  if (currentSong) {
-                    // Clear any setlist mapping to restore the default arrangement mapping
-                    if (activeSetlistFolder) {
-                      try {
-                        const payloadSet = {
-                          action: 'deleteArrangement',
-                          songId: String(currentSong.SongID),
-                          name: `Set: ${activeSetlistFolder}`,
-                        };
-                        await fetch(SCRIPT_URL, {
-                          method: 'POST',
-                          body: JSON.stringify(payloadSet),
-                        });
-                      } catch {}
-                    }
-                    await executeSongLoad(currentSong, true);
-                    showToast('Restored default song arrangement mapping.', 'info');
-                  }
-                }}
-                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all active:scale-[0.98] cursor-pointer"
-              >
-                Restore Default Song Structure
-              </button>
-              
-              <button
-                onClick={() => {
-                  setArrangementReplacementModal(null);
-                  showToast('Dismissed. Temporary default arrangement loaded on screen.', 'info');
-                }}
-                className="w-full py-2 bg-transparent hover:bg-white/5 text-gray-400 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer"
-              >
-                Keep Empty / Dismiss
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
+    <div className="min-h-screen bg-gradient-to-br from-indigo-950 via-[#0a0b16] to-[#05060a] text-white relative overflow-x-hidden font-sans selection:bg-indigo-500/30">
       {/* Interactive A4 PDF Print Preview Modal */}
       {isPDFPreviewOpen && currentSong && (() => {
         // Compute preview songs data dynamically inside a scoped render block to stay robust and responsive
@@ -6896,6 +3241,32 @@ export default function App() {
                       </select>
                     </div>
 
+                    {/* Show Song Sheet Title & Artist */}
+                    <div className="flex items-center justify-between select-none py-1 border-t border-white/5 pt-3 mt-1">
+                      <span className="text-[10px] font-bold text-gray-300 uppercase tracking-wider">
+                        Show Title & Artist
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={pdfShowHeaders}
+                        onChange={(e) => setPdfShowHeaders(e.target.checked)}
+                        className="accent-indigo-500 rounded border-white/10 cursor-pointer h-4 w-4"
+                      />
+                    </div>
+
+                    {/* Show Sheet Metadata (Key, Tempo, Scroll, Concert Time) */}
+                    <div className="flex items-center justify-between select-none py-1 border-b border-white/5 pb-3">
+                      <span className="text-[10px] font-bold text-gray-300 uppercase tracking-wider">
+                        Show Key, Tempo, Scroll
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={pdfShowMetadata}
+                        onChange={(e) => setPdfShowMetadata(e.target.checked)}
+                        className="accent-indigo-500 rounded border-white/10 cursor-pointer h-4 w-4"
+                      />
+                    </div>
+
                     {/* Active Key Quick Selector */}
                     <div className="space-y-2">
                       <label className="text-[10px] font-bold text-gray-300 uppercase tracking-wider block">
@@ -6939,7 +3310,7 @@ export default function App() {
                         <div className="space-y-2 bg-[#020205]/40 p-2.5 rounded-xl border border-indigo-500/10 max-h-[220px] overflow-y-auto custom-scrollbar">
                           {previewSongsData.map((songData, sIdx) => {
                             const songIdStr = String(songData.song.SongID);
-                            const resolvedKey = pdfSongKeys[songIdStr] || songData.key;
+                            const resolvedKey = pdfSongKeys[songIdStr] || songData.activeKey;
                             return (
                               <div key={songIdStr} className="flex items-center justify-between gap-2 border-b border-white/5 pb-2 last:border-0 last:pb-0">
                                 <div className="min-w-0 flex-1">
@@ -6991,97 +3362,134 @@ export default function App() {
                 <div className="flex-1 bg-black/45 p-4 sm:p-6 overflow-visible md:overflow-y-auto flex items-start justify-center custom-scrollbar select-text">
                   
                   {/* Physical A4 Sheet Container */}
-                  <div className="w-full max-w-[210mm] bg-white text-slate-900 shadow-2xl rounded-lg p-6 sm:p-10 font-sans border border-slate-200 space-y-12">
+                  <div className="print-document-container w-full max-w-[210mm] bg-white text-slate-900 shadow-2xl rounded-lg p-6 sm:p-10 font-sans border border-slate-200 space-y-12">
                     
+                    {/* Optional Setlist Cover Page */}
+                    {previewSongsData.length > 1 && pdfScope === 'all' && (
+                      <div className="print-cover-page break-after-page flex flex-col justify-between h-[270mm] border-4 border-double border-slate-900 p-12 text-center select-none mb-16 relative">
+                        <div className="my-auto space-y-6">
+                          <span className="text-5xl">📁</span>
+                          <h1 className="text-3xl font-black text-slate-900 uppercase tracking-widest leading-none mt-2">
+                            {activeSetlistFolder || 'Setlist'}
+                          </h1>
+                          <div className="w-24 h-1 bg-slate-900 mx-auto" />
+                          <p className="text-sm text-slate-600 font-bold tracking-wider uppercase">
+                            Complete Gig Song Sheet Collection
+                          </p>
+                        </div>
+                        
+                        <div className="space-y-4">
+                          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 max-w-sm mx-auto text-left">
+                            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Setlist Index</span>
+                            <div className="mt-2 space-y-1">
+                              {previewSongsData.map((songData, idxVal) => {
+                                const songIdStr = String(songData.song.SongID);
+                                const resolvedKey = pdfSongKeys[songIdStr] || songData.activeKey;
+                                return (
+                                  <div key={songData.song.SongID} className="flex justify-between items-center text-xs font-semibold text-slate-700">
+                                    <span className="truncate max-w-[200px]">{idxVal + 1}. {songData.song.Title}</span>
+                                    <span className="font-mono text-slate-400 text-[10px]">{resolvedKey}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          
+                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                            Generated on {new Date().toLocaleDateString()} • {previewSongsData.length} Songs Total
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
                     {previewSongsData.map((songData, sIdx) => {
-                      const { key: songKey, roadmap: songRoadmap, sectionTemplates: songTemplates, title, artist, song } = songData;
+                      const { activeKey: songKey, activeRoadmapToUse: songRoadmap, templates: songTemplates, song } = songData;
+                      const title = song.Title;
+                      const artist = song.Artist;
                       const repInfo = getRoadmapRepetitionInfo(songRoadmap);
+                      const isMerged = previewSongsData.length > 1 && pdfScope === 'all';
                       return (
-                        <div key={song.SongID} className={`print-song-page-preview ${sIdx > 0 ? 'border-t-2 border-slate-200 pt-10 mt-10' : ''}`}>
-                          {/* Header Container */}
-                          <div className="border-b-2 border-slate-900 pb-2 mb-4 flex justify-between items-end">
-                            <div>
-                              <h1 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight leading-none uppercase flex items-center gap-2">
-                                {setlists.length > 1 && pdfScope !== 'current' && (
-                                  <span className="text-[11px] bg-slate-900 text-white font-extrabold px-1.5 py-0.5 rounded">
-                                    #{setlists.indexOf(String(song.SongID)) + 1}
-                                  </span>
-                                )}
-                                <span>{title}</span>
-                              </h1>
-                              <h2 className="text-[10px] font-bold text-slate-500 mt-1 uppercase">
-                                BY {artist}
-                              </h2>
-                            </div>
-                            <div className="text-xs font-black text-indigo-600 border border-indigo-600 px-2 py-0.5 rounded-md font-mono select-none">
-                              KEY: {songKey.toUpperCase()}
-                            </div>
-                          </div>
-
-                          {/* Flow Roadmap Box */}
-                          <div className="bg-slate-50 border border-slate-200 rounded-md p-2.5 mb-5 select-none">
-                            <div className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">
-                              FLOW ROADMAP (TRANSPOSED SEQUENCE)
-                            </div>
-                            <div className="text-[9.5px] font-bold text-slate-800 leading-normal">
-                              {(() => {
-                                const renderedRoadmap: any[] = [];
-                                songRoadmap.forEach((block: any, idx: number) => {
-                                  const isDuplicate = songRoadmap.findIndex((b: any, bIdx: number) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, songTemplates)) !== -1;
-                                  if (isDuplicate) return;
-                                  renderedRoadmap.push({ block, originalIdx: idx });
-                                });
-
-                                return renderedRoadmap.map(({ block, originalIdx: idx }, rIdx) => {
-                                  const blockOffset = block.keyOffset || 0;
-                                  const blockKeyName = getModulatedKeyName(songKey, blockOffset);
-                                  return (
-                                    <span key={block.id}>
-                                      {rIdx > 0 && <span className="text-slate-400 mx-1">➔</span>}
-                                      <span className="uppercase text-indigo-900 font-bold">
-                                        {block.name} <span className="text-[8.5px] text-indigo-600 font-extrabold">({blockKeyName})</span>
+                        <div 
+                          key={song.SongID} 
+                          className={`print-song-page-preview ${
+                            isMerged 
+                              ? 'break-before-page pt-0 mt-0 flex flex-col justify-between' 
+                              : sIdx > 0 
+                                ? 'border-t-2 border-slate-200 pt-10 mt-10' 
+                                : ''
+                          }`}
+                        >
+                          {/* Header Container - Shown conditionally based on customization toggles */}
+                          {(pdfShowHeaders || pdfShowMetadata) && (
+                            <div className="border-b-2 border-slate-900 pb-2 mb-4 flex flex-col sm:flex-row sm:items-end justify-between gap-2">
+                              {pdfShowHeaders ? (
+                                <div>
+                                  <h1 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight leading-none uppercase flex items-center gap-2">
+                                    {setlists.length > 1 && pdfScope !== 'current' && (
+                                      <span className="text-[11px] bg-slate-900 text-white font-extrabold px-1.5 py-0.5 rounded">
+                                        #{setlists.indexOf(String(song.SongID)) + 1}
                                       </span>
+                                    )}
+                                    <span>{title}</span>
+                                  </h1>
+                                  <h2 className="text-[10px] font-bold text-slate-500 mt-1 uppercase">
+                                    BY {artist}
+                                  </h2>
+                                </div>
+                              ) : (
+                                <div />
+                              )}
+                              {pdfShowMetadata && (
+                                <div className="flex flex-wrap items-center gap-2 text-[9px] font-bold text-slate-600 font-mono select-none">
+                                  <span className="text-xs font-black text-indigo-600 border border-indigo-600 px-2 py-0.5 rounded-md uppercase">
+                                    KEY: {songKey.toUpperCase()}
+                                  </span>
+                                  {song.BPM && (
+                                    <span className="bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
+                                      TEMPO: {song.BPM} BPM
                                     </span>
-                                  );
-                                });
-                              })()}
+                                  )}
+                                  <span className="bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
+                                    SCROLL: {scrollSpeed}x
+                                  </span>
+                                  <span className="bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200 text-rose-600">
+                                    CLOCK: {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
+                                  </span>
+                                </div>
+                              )}
                             </div>
-                          </div>
+                          )}
+
+                          {/* Live Sheet Render */}
+                          <div className="space-y-4">
+                              {songRoadmap.map((block: any, idx: number) => {
+                                const blockRep = repInfo[idx];
+                                let blockDisplayName = block.name;
+  
+                                if (sheetLayoutMode === 'sequence') {
+                                  if (blockRep && blockRep.isRepeat) {
+                                    return null;
+                                  }
+                                  if (blockRep && blockRep.totalInRun > 1) {
+                                    blockDisplayName = `${block.name} (${blockRep.totalInRun}x)`;
+                                  }
+                                }
  
-                           {/* Live Sheet Render */}
-                           <div className="space-y-4">
-                             {songRoadmap.map((block: any, idx: number) => {
-                               let blockDisplayName = block.name;
- 
-                               if (sheetLayoutMode === 'sequence') {
-                                 const firstIdenticalIdx = songRoadmap.findIndex((b: any, bIdx: number) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, songTemplates));
-                                 if (firstIdenticalIdx !== -1) {
-                                   return (
-                                     <div
-                                       key={block.id}
-                                       className="p-2 mb-2 bg-slate-50 border border-dashed border-indigo-200 rounded text-[10px] font-bold text-indigo-600 flex items-center justify-between select-none"
-                                     >
-                                       <span>🔁 REPLAY: {block.name.toUpperCase()} (Same chords & lyrics as section #{firstIdenticalIdx + 1} - {songRoadmap[firstIdenticalIdx].name})</span>
-                                     </div>
-                                   );
+                                if (sheetLayoutMode === 'compact') {
+                                 if (!showLyrics) {
+                                   const firstIdx = songRoadmap.findIndex((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
+                                   if (firstIdx !== idx) return null;
+                                   const identicalBlocks = songRoadmap.filter((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
+                                   const uniqueNames = Array.from(new Set(identicalBlocks.map((b: any) => b.name)));
+                                   blockDisplayName = `${uniqueNames.join(' / ')}`;
+                                 } else {
+                                   const firstIdx = songRoadmap.findIndex((b: any) => b.name === block.name);
+                                   if (firstIdx !== idx) return null;
+                                   blockDisplayName = `${block.name}`;
                                  }
                                }
 
-                               if (sheetLayoutMode === 'compact') {
-                                if (!showLyrics) {
-                                  const firstIdx = songRoadmap.findIndex((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
-                                  if (firstIdx !== idx) return null;
-                                  const identicalBlocks = songRoadmap.filter((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
-                                  const uniqueNames = Array.from(new Set(identicalBlocks.map((b: any) => b.name)));
-                                  blockDisplayName = uniqueNames.join(' / ');
-                                } else {
-                                  const firstIdx = songRoadmap.findIndex((b: any) => b.name === block.name);
-                                  if (firstIdx !== idx) return null;
-                                }
-                              }
-
-                              const blockRep = repInfo[idx];
-                              const templateLines = songTemplates[block.name] || [];
+                               const templateLines = songTemplates[block.name] || [];
                               const blockOffset = block.keyOffset || 0;
                               const blockKeyName = getModulatedKeyName(songKey, blockOffset);
 
@@ -7135,15 +3543,23 @@ export default function App() {
                                               }
                                             });
 
+                                            const totalTimes = identicalBlocks.length;
                                             return groups.map((g, gIdx) => (
-                                              <div key={gIdx} className="flex items-center gap-1.5 flex-wrap">
-                                                <span className="text-[8px] font-black uppercase bg-indigo-50 text-indigo-600 px-1 rounded border border-indigo-100 not-italic">
-                                                  {g.names.map(n => n.toUpperCase()).join(' & ')}
-                                                </span>
-                                                <span className="truncate">“{g.lyric}”</span>
-                                                {g.names.length > 1 && (
-                                                  <span className="text-[7px] font-bold text-emerald-600 uppercase bg-emerald-50 px-1 rounded border border-emerald-100">
-                                                    Shared 1st line
+                                              <div key={gIdx} className="flex items-center justify-between gap-1.5 flex-wrap w-full">
+                                                <div className="flex items-center gap-1.5">
+                                                  <span className="text-[8px] font-black uppercase bg-indigo-50 text-indigo-600 px-1 rounded border border-indigo-100 not-italic">
+                                                    {g.names.map(n => n.toUpperCase()).join(' & ')}
+                                                  </span>
+                                                  <span className="truncate">“{g.lyric}”</span>
+                                                  {g.names.length > 1 && (
+                                                    <span className="text-[7px] font-bold text-emerald-600 uppercase bg-emerald-50 px-1 rounded border border-emerald-100">
+                                                      Shared 1st line
+                                                    </span>
+                                                  )}
+                                                </div>
+                                                {totalTimes > 1 && gIdx === 0 && (
+                                                  <span className="text-[8px] font-bold font-mono text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-300">
+                                                    {totalTimes}x Repeat
                                                   </span>
                                                 )}
                                               </div>
@@ -7174,8 +3590,11 @@ export default function App() {
                                         .filter(({ lIdx }: any) => (block.enabledLines || []).includes(lIdx));
 
                                       const processedLines = enabledLinesList.map(({ l, lIdx }: any) => {
-                                        const transposed = transposeChord(l.Chords || '', totalSemitonesOffset);
-                                        const numbers = getNumberForChord(transposed, blockKeyName, songKey);
+                                        const lineOffset = block.lineOffsets?.[lIdx] || 0;
+                                        const lineTotalSemitonesOffset = totalSemitonesOffset + lineOffset;
+                                        const transposed = transposeChord(l.Chords || '', lineTotalSemitonesOffset);
+                                        const lineBlockKeyName = getModulatedKeyName(songKey, blockOffset + lineOffset);
+                                        const numbers = getNumberForChord(transposed, lineBlockKeyName, songKey);
                                         const lyrics = l.Lyrics || '';
                                         return {
                                           l,
@@ -7464,6 +3883,15 @@ export default function App() {
                               );
                             })}
                           </div>
+
+                          {/* Printable page numbering footer */}
+                          {previewSongsData.length > 1 && pdfScope === 'all' && (
+                            <div className="print-footer mt-auto pt-4 border-t border-slate-200/60 flex justify-between items-center text-[9px] font-bold text-slate-400 font-mono select-none">
+                              <div>SETLIST: {activeSetlistFolder || 'Setlist'}</div>
+                              <div>SONG {sIdx + 1} OF {previewSongsData.length}</div>
+                              <div>PAGE {sIdx + 2}</div>
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -7482,7 +3910,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => {
-                    exportToPDF();
+                    (window as any).exportToPDF();
                     setIsPDFPreviewOpen(false);
                   }}
                   className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-xl text-xs uppercase tracking-wider transition-all active:scale-95 shadow-md shadow-indigo-500/10 cursor-pointer flex items-center gap-1.5"
@@ -7496,6 +3924,2693 @@ export default function App() {
           </div>
         );
       })()}
+
+      {/* Main Layout Screen when PDF Preview is closed */}
+      {!isPDFPreviewOpen && (
+        <div className="flex flex-col min-h-screen pt-14">
+          {/* Header */}
+          <header
+            id="stageHeader"
+            className="fixed top-0 left-0 right-0 z-[100] bg-indigo-950/90 backdrop-blur-md border-b border-indigo-500/20 px-4 py-3 flex items-center justify-between transition-all select-none h-14"
+          >
+            {/* Header Left: Menu, Home, and Brand */}
+            <div className="flex items-center gap-2 sm:gap-3">
+              <button
+                id="menuButton"
+                onClick={() => setIsNavOpen(true)}
+                className="px-3 py-1.5 bg-indigo-950/60 hover:bg-indigo-900/55 border border-indigo-500/20 hover:border-indigo-400/40 rounded-xl transition-all cursor-pointer text-white flex items-center gap-1.5 font-black uppercase text-[10px] tracking-wider shrink-0"
+              >
+                <span className="text-sm">☰</span>
+                <span>MENU</span>
+              </button>
+
+              <button
+                onClick={() => setCurrentSong(null)}
+                className={`p-2 border rounded-xl transition-all cursor-pointer flex items-center justify-center shrink-0 ${
+                  !currentSong
+                    ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.15)]'
+                    : 'bg-indigo-950/60 border-indigo-500/20 text-slate-400 hover:text-white hover:bg-indigo-900/55 hover:border-indigo-400/40'
+                }`}
+                title="Go to Home"
+              >
+                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z" />
+                </svg>
+              </button>
+
+              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-950/60 border border-indigo-500/20 rounded-xl shrink-0">
+                <span className="text-xs">🎵</span>
+                <span className="font-sans font-black text-[11px] text-white tracking-tight">worshipchordbook</span>
+              </div>
+            </div>
+
+            {/* Header Middle: Empty spacer (Title removed as requested) */}
+            <div className="flex-1 max-w-md mx-4" />
+
+            {/* Header Right: Controls & Global Indicators */}
+            <div className="flex items-center gap-2">
+
+              {/* LIVE / OFFLINE Status Button */}
+              <button
+                onClick={() => {
+                  showToast(isOfflineMode ? 'Using offline cached database.' : 'Connected to Live Google Sheet Database.', isOfflineMode ? 'warning' : 'success');
+                }}
+                className={`px-2.5 py-1.5 rounded-xl border text-[10px] font-bold flex items-center gap-1.5 transition-all cursor-pointer select-none ${
+                  isOfflineMode
+                    ? 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+                    : 'bg-[#0f211b] border-[#10b981]/20 text-[#10b981] shadow-[0_0_15px_rgba(16,185,129,0.05)]'
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full ${isOfflineMode ? 'bg-amber-400 animate-pulse' : 'bg-[#10b981] animate-pulse'}`} />
+                <span className="font-mono uppercase tracking-wider text-[10px] font-black">{isOfflineMode ? 'OFFLINE' : 'LIVE'}</span>
+              </button>
+
+              {/* Fullscreen Button */}
+              <button
+                onClick={toggleFullScreen}
+                className="p-2 bg-indigo-950/60 hover:bg-indigo-900/55 border border-indigo-500/20 hover:border-indigo-400/40 rounded-xl transition-all cursor-pointer text-indigo-200 hover:text-white flex items-center justify-center shrink-0"
+                title="Toggle Fullscreen"
+              >
+                <span className="text-sm">⛶</span>
+              </button>
+
+              {/* Shortcuts Help Button */}
+              <button
+                onClick={() => setIsShortcutsOpen(true)}
+                className="p-2 bg-indigo-950/60 hover:bg-indigo-900/55 border border-indigo-500/20 hover:border-indigo-400/40 rounded-xl transition-all cursor-pointer text-indigo-200 hover:text-white flex items-center justify-center shrink-0"
+                title="Keyboard Shortcuts"
+              >
+                <span className="text-sm">⌨</span>
+              </button>
+
+              {/* View / Admin Mode Button */}
+              <button
+                onClick={handleAdminLockToggle}
+                className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer active:scale-95 flex items-center gap-1 shrink-0 ${
+                  appUser && appSecret
+                    ? 'bg-emerald-600/20 border border-emerald-500/40 text-emerald-300'
+                    : 'bg-[#f59e0b] hover:bg-[#d97706] text-[#020205] border border-amber-500/40 font-black shadow-md shadow-amber-500/5'
+                }`}
+              >
+                <span>{appUser && appSecret ? '🔓 ADMIN' : '🔒 VIEW ONLY'}</span>
+              </button>
+            </div>
+          </header>
+
+          {/* Main Layout Area */}
+          <div className="flex-1 flex overflow-hidden relative">
+            
+            {/* Main Content Pane */}
+            <main className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-8 flex flex-col items-center song-scroll-container pb-28 lg:pb-8">
+              
+              {!currentSong ? (
+                <div className="w-full max-w-5xl flex flex-col gap-6 select-none animate-fadeIn my-auto">
+                  {/* Bento Header */}
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-indigo-950/20 border border-indigo-500/15 p-6 rounded-3xl backdrop-blur-md">
+                    <div className="flex items-center gap-4">
+                      <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-indigo-600 to-indigo-500 border border-indigo-400/30 flex items-center justify-center shadow-lg shadow-indigo-600/20">
+                        <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
+                        </svg>
+                      </div>
+                      <div className="flex flex-col text-left">
+                        <span className="text-[9px] font-mono font-black text-indigo-400 uppercase tracking-widest">Worship Director Command Deck</span>
+                        <h1 className="text-2xl font-black text-white tracking-tight leading-none uppercase">worshipchordbook</h1>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400 text-[9px] font-mono font-black tracking-wider uppercase flex items-center gap-1">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                        Ready for Stage
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Bento Grid */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full">
+                    
+                    {/* BENTO CARD 1: Session Controller (Spans 2 columns on desktop) */}
+                    <div className="md:col-span-2 bg-[#080918]/90 border border-[#1e1f38] p-6.5 rounded-3xl flex flex-col justify-between text-left relative overflow-hidden group shadow-xl">
+                      <div className="absolute top-0 right-0 w-36 h-36 bg-indigo-500/5 rounded-full blur-3xl -mr-10 -mt-10 group-hover:bg-indigo-500/10 transition-all duration-300"></div>
+                      <div>
+                        <div className="flex items-center gap-2 mb-3">
+                          <span className="text-xs">🧭</span>
+                          <span className="text-[9px] font-mono font-black text-indigo-400 uppercase tracking-widest">Active Session</span>
+                        </div>
+                        <h2 className="text-xl font-black text-white uppercase tracking-tight mb-2">
+                          {activeSetlistFolder ? `Conducting: ${activeSetlistFolder}` : 'No Active Setlist Folder'}
+                        </h2>
+                        <p className="text-xs text-gray-400 max-w-md leading-relaxed">
+                          {activeSetlistFolder 
+                            ? "Your active setlist is loaded and synched across local backup storages. Click below to launch the first song or select another setlist from the library."
+                            : "Launch a live worship setlist folder or browse individual songs to activate the digital stage chart and configuration flow."
+                          }
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2.5 mt-6">
+                        {activeSetlistFolder ? (
+                          <button
+                            onClick={() => {
+                              const setMeta = allSharedSetlists.find(sl => sl.PresetName === activeSetlistFolder);
+                              if (setMeta) {
+                                try {
+                                  const parsed = JSON.parse(setMeta.RoadmapJSON);
+                                  const songIds = parsed.songIds || [];
+                                  if (songIds.length > 0) {
+                                    const firstSong = songs.find(s => String(s.SongID) === String(songIds[0]));
+                                    if (firstSong) {
+                                      executeSongLoad(firstSong, false, activeSetlistFolder);
+                                    }
+                                  }
+                                } catch {}
+                              }
+                            }}
+                            className="px-4.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-xl text-[10px] uppercase tracking-widest transition-all active:scale-95 cursor-pointer shadow-md shadow-indigo-600/20"
+                          >
+                            ▶ Launch Set
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              setCurrentTab('songs');
+                              setIsNavOpen(true);
+                            }}
+                            className="px-4.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-xl text-[10px] uppercase tracking-widest transition-all active:scale-95 cursor-pointer shadow-md shadow-indigo-600/20"
+                          >
+                            📂 Open Song Catalog
+                          </button>
+                        )}
+                        <button
+                          onClick={() => {
+                            setCurrentTab('setlists');
+                            setIsNavOpen(true);
+                          }}
+                          className="px-4.5 py-2 bg-[#161a3c]/40 hover:bg-[#1f2554] border border-indigo-500/15 text-indigo-300 hover:text-white rounded-xl font-black text-[10px] uppercase tracking-widest transition-all cursor-pointer"
+                        >
+                          📋 Browse Setlists
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* BENTO CARD 2: Quick Stats Deck */}
+                    <div className="bg-[#080918]/90 border border-[#1e1f38] p-6.5 rounded-3xl flex flex-col justify-between text-left shadow-xl group">
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className="text-xs">📊</span>
+                        <span className="text-[9px] font-mono font-black text-indigo-400 uppercase tracking-widest">Library metrics</span>
+                      </div>
+                      
+                      <div className="flex flex-col gap-4 my-auto">
+                        <div className="flex items-center justify-between border-b border-[#1e1f38] pb-2">
+                          <span className="text-xs text-gray-400 font-medium">Total Catalog Songs</span>
+                          <span className="font-mono font-black text-lg text-cyan-400">{songs.length}</span>
+                        </div>
+                        <div className="flex items-center justify-between border-b border-[#1e1f38] pb-2">
+                          <span className="text-xs text-gray-400 font-medium">Setlist Folders</span>
+                          <span className="font-mono font-black text-lg text-purple-400">{allSharedSetlists.length}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-gray-400 font-medium">Starred Favorites</span>
+                          <span className="font-mono font-black text-lg text-amber-400">{favorites.length}</span>
+                        </div>
+                      </div>
+
+                      <div className="text-[9px] text-indigo-400/50 font-mono italic mt-4 group-hover:text-indigo-400/80 transition-colors">
+                        Auto-synchronized with cloud database
+                      </div>
+                    </div>
+
+                    {/* BENTO CARD 3: Interactive Setlists (Spans 2 columns on desktop) */}
+                    <div className="md:col-span-2 bg-[#080918]/90 border border-[#1e1f38] p-6.5 rounded-3xl flex flex-col text-left shadow-xl h-[280px]">
+                      <div className="flex items-center gap-2 mb-4 shrink-0">
+                        <span className="text-xs">📋</span>
+                        <span className="text-[9px] font-mono font-black text-indigo-400 uppercase tracking-widest">Stage-Ready Setlist Folders</span>
+                      </div>
+
+                      <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-2">
+                        {allSharedSetlists.length === 0 ? (
+                          <div className="h-full flex flex-col items-center justify-center text-center text-gray-500 py-8">
+                            <span className="text-2xl mb-1">🗂️</span>
+                            <p className="text-xs">No setlist folders created yet</p>
+                            <p className="text-[10px] text-gray-600 mt-0.5">Use the Library Menu in the sidebar to create one!</p>
+                          </div>
+                        ) : (
+                          allSharedSetlists.map((sl) => {
+                            let count = 0;
+                            try {
+                              const parsed = JSON.parse(sl.RoadmapJSON);
+                              count = (parsed.songIds || []).length;
+                            } catch {}
+                            return (
+                              <div
+                                key={sl.PresetName}
+                                onClick={() => {
+                                  setActiveSetlistFolder(sl.PresetName);
+                                  setCurrentTab('setlists');
+                                  showToast(`Setlist "${sl.PresetName}" loaded!`, 'success');
+                                  
+                                  // Attempt to load the first song in that setlist
+                                  try {
+                                    const parsed = JSON.parse(sl.RoadmapJSON);
+                                    const songIds = parsed.songIds || [];
+                                    if (songIds.length > 0) {
+                                      const firstSong = songs.find(s => String(s.SongID) === String(songIds[0]));
+                                      if (firstSong) {
+                                        executeSongLoad(firstSong, false, sl.PresetName);
+                                      }
+                                    }
+                                  } catch {}
+                                }}
+                                className="p-3 bg-indigo-950/20 hover:bg-indigo-900/30 border border-indigo-500/10 hover:border-indigo-400/30 rounded-xl flex items-center justify-between cursor-pointer transition-all active:scale-99"
+                              >
+                                <div className="flex items-center gap-3">
+                                  <div className="w-8 h-8 rounded-lg bg-indigo-500/10 flex items-center justify-center border border-indigo-500/25 text-indigo-400 text-xs">
+                                    📂
+                                  </div>
+                                  <div className="flex flex-col">
+                                    <span className="text-xs font-black text-white uppercase tracking-wide">{sl.PresetName}</span>
+                                    <span className="text-[9px] text-gray-400 uppercase tracking-wider font-mono font-bold mt-0.5">{count} songs queued</span>
+                                  </div>
+                                </div>
+                                <span className="text-[10px] text-indigo-400 font-mono font-black uppercase tracking-wider bg-indigo-500/10 border border-indigo-500/20 px-2 py-0.5 rounded-md">
+                                  Select Set ➔
+                                </span>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+
+                    {/* BENTO CARD 4: Quick Favorites */}
+                    <div className="bg-[#080918]/90 border border-[#1e1f38] p-6.5 rounded-3xl flex flex-col text-left shadow-xl h-[280px]">
+                      <div className="flex items-center gap-2 mb-4 shrink-0">
+                        <span className="text-xs">★</span>
+                        <span className="text-[9px] font-mono font-black text-indigo-400 uppercase tracking-widest">Starred Charts</span>
+                      </div>
+
+                      <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-2">
+                        {favorites.length === 0 ? (
+                          <div className="h-full flex flex-col items-center justify-center text-center text-gray-500 py-8">
+                            <span className="text-xl mb-1">☆</span>
+                            <p className="text-xs">No starred charts yet</p>
+                            <p className="text-[10px] text-gray-600 mt-0.5">Star songs during performance to bookmark them!</p>
+                          </div>
+                        ) : (
+                          favorites.map((songId) => {
+                            const fSong = songs.find((s) => String(s.SongID) === String(songId));
+                            if (!fSong) return null;
+                            return (
+                              <div
+                                key={songId}
+                                onClick={() => executeSongLoad(fSong)}
+                                className="p-3 bg-[#1d1406] hover:bg-[#2b1f09] border border-amber-500/10 hover:border-amber-400/30 rounded-xl flex items-center justify-between cursor-pointer transition-all active:scale-99"
+                              >
+                                <div className="flex flex-col">
+                                  <span className="text-xs font-bold text-white uppercase tracking-wide truncate max-w-[150px]">{fSong.Title}</span>
+                                  <span className="text-[9px] text-amber-400/80 uppercase font-mono font-bold mt-0.5">{fSong.Artist || 'Artist'}</span>
+                                </div>
+                                <span className="text-[10px] font-mono font-black text-amber-400 bg-amber-500/15 border border-amber-500/25 w-6 h-6 rounded-lg flex items-center justify-center">
+                                  {fSong.OriginalKey || 'C'}
+                                </span>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+
+                  </div>
+                </div>
+              ) : (
+                <div className="w-full max-w-5xl mx-auto flex flex-col gap-6 animate-fadeIn pb-24">
+                  
+                  {/* Song Header & Actions row */}
+                  <div className="w-full flex flex-col md:flex-row items-start md:items-center justify-between gap-4 select-none bg-indigo-950/45 border border-indigo-500/20 rounded-2xl p-4.5 backdrop-blur-sm shadow-md">
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2.5">
+                      <div>
+                        <h1 className="text-2xl sm:text-3xl font-sans font-black text-white tracking-tight leading-none uppercase">
+                          {currentSong.Title}
+                        </h1>
+                        <p className="text-xs text-indigo-400/80 font-bold uppercase tracking-wider mt-1.5">
+                          by {currentSong.Artist || 'Unknown'}
+                        </p>
+                      </div>
+                      <span className="px-2.5 py-1 bg-indigo-500/10 border border-indigo-500/25 text-indigo-300 rounded-lg font-sans font-black text-[9px] uppercase tracking-widest shrink-0 self-start sm:self-auto mt-2 sm:mt-0 flex items-center gap-1">
+                        👤 {activeSetlistFolder ? `Set: ${activeSetlistFolder}` : 'Standalone Song'}
+                      </span>
+                    </div>
+
+                    {/* Top Actions Pills */}
+                    <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-start md:justify-end">
+                      {/* Favorite */}
+                      <button
+                        onClick={() => toggleFav(currentSong.SongID)}
+                        className={`px-3.5 py-1.5 h-9 rounded-xl border font-bold text-xs uppercase tracking-wider transition-all cursor-pointer flex items-center gap-1.5 ${
+                          favorites.includes(String(currentSong.SongID))
+                            ? 'bg-amber-500/20 border-amber-500/40 text-amber-400 shadow-lg shadow-amber-500/5'
+                            : 'bg-[#161a3c]/30 hover:bg-[#1f2554] border-indigo-500/15 text-indigo-300 hover:text-white'
+                        }`}
+                      >
+                        <span>{favorites.includes(String(currentSong.SongID)) ? '★' : '☆'}</span>
+                        <span>Fav</span>
+                      </button>
+
+                      {/* Setlist */}
+                      <button
+                        onClick={() => setIsSetlistManagerOpen(true)}
+                        className="px-3.5 py-1.5 h-9 bg-[#161a3c]/30 hover:bg-[#1f2554] border border-indigo-500/15 text-indigo-300 hover:text-white rounded-xl font-bold text-xs uppercase tracking-wider transition-all cursor-pointer flex items-center gap-1.5"
+                      >
+                        <span>⚡</span>
+                        <span>Set</span>
+                      </button>
+
+
+
+                      {/* PDF/Print */}
+                      <button
+                        onClick={() => setIsPDFPreviewOpen(true)}
+                        className="px-3.5 py-1.5 h-9 bg-[#161a3c]/30 hover:bg-[#1f2554] border border-indigo-500/15 text-indigo-300 hover:text-white rounded-xl font-bold text-xs uppercase tracking-wider transition-all cursor-pointer flex items-center gap-1.5"
+                      >
+                        <span>📄</span>
+                        <span>PDF</span>
+                      </button>
+
+                      {/* Edit Catalog */}
+                      <button
+                        onClick={() => {
+                          if (appUser && appSecret) {
+                            setFormEditingSong(currentSong);
+                            setIsFormModalOpen(true);
+                          } else {
+                            showToast('Authentication required to edit catalog. Opening login...', 'info');
+                            setIsAdminModalOpen(true);
+                          }
+                        }}
+                        className="px-3.5 py-1.5 h-9 bg-[#161a3c]/30 hover:bg-[#1f2554] border border-indigo-500/15 text-indigo-300 hover:text-white rounded-xl font-bold text-xs uppercase tracking-wider transition-all cursor-pointer flex items-center gap-1.5"
+                      >
+                        <span>✏️</span>
+                        <span>Edit</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Collaborative Banners & Synced Alerts */}
+                  {cloudArrangementUpdateNotice && (
+                    <div className="w-full bg-indigo-950/80 border border-indigo-500/30 rounded-2xl p-4 flex items-center justify-between gap-4 animate-fadeIn backdrop-blur-sm select-none">
+                      <div className="flex items-center gap-3">
+                        <span className="text-xl">🔄</span>
+                        <div>
+                          <p className="text-xs font-bold text-indigo-200">
+                            Arrangement Update Detected on Cloud!
+                          </p>
+                          <p className="text-[10px] text-gray-400">
+                            A bandmate has updated the arrangement preset "{parsePresetDate(cloudArrangementUpdateNotice.name).baseName}".
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setActiveRoadmap(cloudArrangementUpdateNotice.newRoadmap);
+                          if (cloudArrangementUpdateNotice.newKey) {
+                            setCurrentKey(cloudArrangementUpdateNotice.newKey);
+                          }
+                          setCloudArrangementUpdateNotice(null);
+                          showToast('Cloud arrangement applied successfully!', 'success');
+                        }}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-xl text-[10px] uppercase tracking-wider transition-all active:scale-95 cursor-pointer shrink-0 shadow-sm shadow-indigo-600/20"
+                      >
+                        Apply Sync
+                      </button>
+                    </div>
+                  )}
+
+                  {cloudArrangementDeletionNotice && (
+                    <div className="w-full bg-rose-950/80 border border-rose-500/30 rounded-2xl p-4 flex items-center justify-between gap-4 animate-fadeIn backdrop-blur-sm select-none">
+                      <div className="flex items-center gap-3">
+                        <span className="text-xl">⚠️</span>
+                        <div>
+                          <p className="text-xs font-bold text-rose-200">
+                            Active Arrangement Presets Cleaned on Cloud!
+                          </p>
+                          <p className="text-[10px] text-gray-400">
+                            The remote preset "{parsePresetDate(cloudArrangementDeletionNotice.name).baseName}" was deleted. Click to safely revert.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          handleApplyArrangementDeletion(
+                            cloudArrangementDeletionNotice.name,
+                            cloudArrangementDeletionNotice.newSongArrangements,
+                            cloudArrangementDeletionNotice.allArrs
+                          );
+                        }}
+                        className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white font-black rounded-xl text-[10px] uppercase tracking-wider transition-all active:scale-95 cursor-pointer shrink-0 shadow-sm shadow-rose-600/20"
+                      >
+                        Safe Revert
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Active Arrangement Live Designer (Moved to top-level viewport modals) */}
+                  {false && arrangerOpen && (
+                    <div className="fixed inset-0 bg-[#020205]/85 backdrop-blur-md z-[850] flex items-center justify-center p-4 animate-fadeIn overflow-y-auto">
+                      <div className="w-full max-w-4xl bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_25px_60px_rgba(0,0,0,0.8)] p-5 sm:p-6 flex flex-col gap-5 animate-scaleIn max-h-[90vh] overflow-y-auto custom-scrollbar relative">
+                        
+                        {/* Close Button */}
+                        <button
+                          onClick={() => setArrangerOpen(false)}
+                          className="absolute right-5 top-5 text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 w-8 h-8 rounded-full flex items-center justify-center cursor-pointer transition-all text-sm font-bold z-10"
+                          title="Close panel"
+                        >
+                          ✕
+                        </button>
+
+                        {/* Modal Header */}
+                        <div className="flex items-center gap-3 border-b border-indigo-500/15 pb-4 select-none pr-8">
+                          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600/20 to-indigo-500/30 border border-indigo-500/30 flex items-center justify-center text-lg shrink-0">
+                            🧭
+                          </div>
+                          <div className="text-left">
+                            <h2 className="text-sm sm:text-base font-black uppercase tracking-wider text-indigo-300">
+                              Song Roadmap & Sequence Designer
+                            </h2>
+                            <p className="text-[10px] sm:text-xs text-gray-400 font-medium">
+                              Reorder, modulate, or insert blocks to customize the song roadmap sequence.
+                            </p>
+                          </div>
+                        </div>
+                        
+                        {/* Top Presets Area */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-2 text-left">
+                          {/* Left Side: Shared Band Presets */}
+                          <div className="flex flex-col gap-2">
+                            <div className="flex items-center justify-between border-b border-indigo-500/10 pb-2">
+                              <span className="text-[10px] font-black uppercase tracking-wider text-indigo-300">
+                                Shared Band Presets
+                              </span>
+                              <button
+                                onClick={async () => {
+                                  setIsLoading(true);
+                                  try {
+                                    await fetchCatalog();
+                                    showToast('Catalog synced with shared Google Sheet!', 'success');
+                                  } catch (e) {
+                                    showToast('Catalog sync failed.', 'error');
+                                  } finally {
+                                    setIsLoading(false);
+                                  }
+                                }}
+                                className="px-2.5 py-1 border border-emerald-500/30 hover:bg-emerald-950/40 text-emerald-300 rounded-lg text-[9px] font-black uppercase tracking-widest flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                              >
+                                <span>☁</span>
+                                <span>Cloud Sync</span>
+                              </button>
+                            </div>
+                            
+                            {(() => {
+                              const presets = getPresets();
+                              const presetNames = Object.keys(presets).filter(name => !name.startsWith('Set:'));
+                              if (presetNames.length === 0) {
+                                return (
+                                  <div className="text-gray-400 italic text-xs py-5 text-center bg-indigo-950/5 rounded-xl border border-dashed border-indigo-500/10 mt-1">
+                                    No arrangements saved yet...
+                                  </div>
+                                );
+                              }
+                              return (
+                                <div className="flex flex-col gap-2 max-h-[140px] overflow-y-auto custom-scrollbar pr-1 mt-1">
+                                  {presetNames.map((name) => {
+                                    const isCurrentlyActive = currentArrangementName === name;
+                                    return (
+                                      <div
+                                        key={name}
+                                        className={`flex items-center justify-between p-2 rounded-xl border transition-all ${
+                                          isCurrentlyActive
+                                            ? 'bg-indigo-900/40 border-indigo-500/40 text-white'
+                                            : 'bg-indigo-950/20 border-indigo-500/5 text-indigo-200 hover:bg-[#12142d]'
+                                        }`}
+                                      >
+                                        <button
+                                          onClick={() => loadPresetArrangement(name)}
+                                          className="flex-1 text-left font-sans font-bold text-xs truncate py-1 cursor-pointer"
+                                          title="Click to load arrangement"
+                                        >
+                                          {name}
+                                        </button>
+                                        <button
+                                          onClick={() => deletePresetArrangement(name, isCurrentlyActive)}
+                                          className="p-1 hover:text-rose-400 text-gray-500 transition-colors ml-2 cursor-pointer"
+                                          title="Delete arrangement"
+                                        >
+                                          ✕
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              );
+                            })()}
+                          </div>
+
+                          {/* Right Side: Save New Arrangement */}
+                          <div className="flex flex-col gap-2">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-indigo-300 border-b border-indigo-500/10 pb-2">
+                              Save New Arrangement
+                            </span>
+                            <div className="flex flex-col gap-3 mt-1">
+                              <input
+                                type="text"
+                                placeholder="Preset name (e.g. Acoustic)"
+                                value={currentArrangementName}
+                                onChange={(e) => setCurrentArrangementName(e.target.value)}
+                                className="w-full bg-indigo-950/60 border border-indigo-500/20 rounded-xl px-3 py-2.5 text-xs text-indigo-100 placeholder-indigo-400/50 focus:outline-none focus:border-indigo-400"
+                              />
+                              <button
+                                onClick={async () => {
+                                  if (!currentArrangementName.trim()) {
+                                    showToast('Please enter an arrangement name first!', 'warning');
+                                    return;
+                                  }
+                                  setIsLoading(true);
+                                  try {
+                                    await executeSaveArrangement(currentArrangementName.trim(), false, activeRoadmap);
+                                    fetchCatalog();
+                                  } catch (e) {
+                                    showToast('Error saving arrangement', 'error');
+                                  } finally {
+                                    setIsLoading(false);
+                                  }
+                                }}
+                                className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-xl text-xs uppercase tracking-widest transition-all active:scale-95 shadow-md shadow-indigo-600/20 cursor-pointer"
+                              >
+                                Save Active Flow
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Active Editing Mode Green Status Banner */}
+                        <div className="w-full bg-[#0e2723] border border-emerald-500/25 rounded-xl p-3.5 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-md">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span className="text-sm animate-pulse">🟢</span>
+                            <div className="text-left">
+                              <p className="text-xs font-black uppercase tracking-wider text-emerald-400">
+                                Active Editing Mode
+                              </p>
+                              <p className="text-[10px] text-emerald-300/70 font-medium">
+                                Esc or Cancel button to revert/cancel edit attempt.
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              onClick={cancelArrangementEdit}
+                              className="px-4 py-1.5 border border-rose-500/30 hover:bg-rose-950/50 text-rose-300 font-bold rounded-lg text-[10px] uppercase tracking-wider transition-all cursor-pointer active:scale-95"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => setIsArrangementLocked(!isArrangementLocked)}
+                              className={`px-4 py-1.5 border font-bold rounded-lg text-[10px] uppercase tracking-wider transition-all cursor-pointer active:scale-95 ${
+                                isArrangementLocked
+                                  ? 'bg-amber-950/40 border-amber-500/40 text-amber-300'
+                                  : 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
+                              }`}
+                            >
+                              {isArrangementLocked ? 'Locked' : 'Unlocked'}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Append Blocks bottom controls */}
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between bg-indigo-950/20 border border-indigo-500/5 rounded-xl p-3.5 gap-3 text-left">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-indigo-400 select-none">
+                              Inject Block:
+                            </span>
+                            {Object.keys(effectiveSectionTemplates).map((secName) => (
+                              <button
+                                key={secName}
+                                onClick={() => addRoadmapBlock(secName)}
+                                className="px-2.5 py-1.5 bg-indigo-600/10 border border-indigo-500/20 hover:bg-indigo-600 hover:border-indigo-500 hover:text-white text-indigo-200 rounded-lg text-[10px] font-black transition-all cursor-pointer uppercase tracking-wider active:scale-95"
+                              >
+                                + {secName}
+                              </button>
+                            ))}
+                          </div>
+                          <button
+                            onClick={resetRoadmapBlocks}
+                            className="px-4 py-2 border border-rose-500/25 hover:bg-rose-950/50 text-rose-400 font-bold rounded-lg text-[10px] uppercase tracking-wider transition-all cursor-pointer self-end sm:self-auto shrink-0 active:scale-95"
+                          >
+                            Reset Default
+                          </button>
+                        </div>
+
+                        {/* Active Roadmap Cards Row */}
+                        <div className="flex flex-col gap-2.5 text-left">
+                          <span className="text-[10px] font-black uppercase tracking-widest text-indigo-400 select-none">
+                            Configure Sequence Flow (Click Block to Edit Lines • Drag or Tap Arrows to Reorder)
+                          </span>
+                          <div className="flex flex-wrap gap-3 pb-3 pt-1 justify-start">
+                            {activeRoadmap.map((block, bIdx) => {
+                              const blockOffset = block.keyOffset || 0;
+                              const blockKeyName = getModulatedKeyName(currentKey, blockOffset);
+                              const enabledCount = (block.enabledLines || []).length;
+                              const totalCount = (effectiveSectionTemplates[block.name] || []).length;
+                              const isSelected = editingBlockId === block.id || (!editingBlockId && bIdx === 0);
+
+                              return (
+                                <div
+                                  key={block.id}
+                                  draggable
+                                  onDragStart={() => handleDragStart(bIdx)}
+                                  onDragOver={(e) => e.preventDefault()}
+                                  onDrop={() => handleDrop(bIdx)}
+                                  onClick={() => setEditingBlockId(block.id)}
+                                  className={`flex flex-col gap-3 rounded-xl p-3.5 min-w-[155px] max-w-[155px] shrink-0 text-center select-none shadow-lg transition-all duration-200 hover:-translate-y-0.5 cursor-pointer border ${
+                                    isSelected
+                                      ? 'border-indigo-400 ring-2 ring-indigo-500/40 bg-[#121435]/95 shadow-indigo-500/10'
+                                      : 'bg-[#080918]/95 border-indigo-500/15 hover:border-indigo-400/35'
+                                  }`}
+                                >
+                                  {/* Card header count */}
+                                  <div className="flex items-center justify-between font-mono text-[9px] text-indigo-400/70">
+                                    <span className="font-bold">#{bIdx + 1}</span>
+                                    <span className={isSelected ? 'text-indigo-300 font-bold' : ''}>
+                                      {enabledCount}/{totalCount} lines
+                                    </span>
+                                  </div>
+
+                                  {/* Section title */}
+                                  <h4 className="font-sans font-black text-sm uppercase tracking-wider text-white truncate flex items-center justify-center gap-1">
+                                    {block.name}
+                                    {isSelected && <span className="text-[10px]" title="Currently selected for dissection">📝</span>}
+                                  </h4>
+
+                                  {/* Transpose Controls */}
+                                  <div className="flex items-center justify-between bg-indigo-950/40 px-2 py-1.5 rounded-lg border border-indigo-500/5">
+                                    <span className="font-mono font-black text-xs text-amber-400 w-5 text-left truncate">
+                                      {blockKeyName}
+                                    </span>
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          adjustBlockModulation(block.id, -1);
+                                        }}
+                                        className="w-7 h-7 flex items-center justify-center bg-indigo-900/40 rounded hover:bg-indigo-900/80 text-xs font-black text-indigo-200 cursor-pointer active:scale-95 transition-all"
+                                        title="Trans Down"
+                                      >
+                                        -
+                                      </button>
+                                      <span className="text-[10px] font-mono font-bold text-indigo-300 w-5 text-center">
+                                        {blockOffset >= 0 ? `+${blockOffset}` : blockOffset}
+                                      </span>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          adjustBlockModulation(block.id, 1);
+                                        }}
+                                        className="w-7 h-7 flex items-center justify-center bg-indigo-900/40 rounded hover:bg-indigo-900/80 text-xs font-black text-indigo-200 cursor-pointer active:scale-95 transition-all"
+                                        title="Trans Up"
+                                      >
+                                        +
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {/* Bottom Actions Row */}
+                                  <div className="flex items-center justify-between border-t border-indigo-500/10 pt-2.5 gap-2" onClick={(e) => e.stopPropagation()}>
+                                    <button
+                                      onClick={() => {
+                                        if (bIdx > 0) {
+                                          const next = [...activeRoadmap];
+                                          const [item] = next.splice(bIdx, 1);
+                                          next.splice(bIdx - 1, 0, item);
+                                          setActiveRoadmap(next);
+                                        }
+                                      }}
+                                      disabled={bIdx === 0}
+                                      className="w-8 h-8 flex items-center justify-center bg-indigo-900/20 border border-indigo-500/10 hover:bg-indigo-900/50 rounded-lg text-xs text-indigo-300 disabled:opacity-20 cursor-pointer active:scale-95 transition-all"
+                                    >
+                                      ◀
+                                    </button>
+                                    <button
+                                      onClick={() => deleteRoadmapBlock(bIdx)}
+                                      className="flex-1 h-8 flex items-center justify-center bg-rose-950/30 border border-rose-500/25 hover:bg-rose-600 rounded-lg text-rose-400 hover:text-white text-[11px] font-black cursor-pointer active:scale-95 transition-all"
+                                      title="Delete section block"
+                                    >
+                                      ✕
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        if (bIdx < activeRoadmap.length - 1) {
+                                          const next = [...activeRoadmap];
+                                          const [item] = next.splice(bIdx, 1);
+                                          next.splice(bIdx + 1, 0, item);
+                                          setActiveRoadmap(next);
+                                        }
+                                      }}
+                                      disabled={bIdx === activeRoadmap.length - 1}
+                                      className="w-8 h-8 flex items-center justify-center bg-indigo-900/20 border border-indigo-500/10 hover:bg-indigo-900/50 rounded-lg text-xs text-indigo-300 disabled:opacity-20 cursor-pointer active:scale-95 transition-all"
+                                    >
+                                      ▶
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {/* Section Dissection & Line Editor Panel */}
+                        {(() => {
+                          const selectedBlock = activeRoadmap.find((b) => b.id === editingBlockId) || activeRoadmap[0];
+                          if (!selectedBlock) return null;
+
+                          const templateLines = effectiveSectionTemplates[selectedBlock.name] || [];
+
+                          return (
+                            <div className="bg-[#080918]/90 border border-indigo-500/25 rounded-2xl p-4.5 flex flex-col gap-4 text-left shadow-2xl animate-fadeIn">
+                              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b border-indigo-500/15 pb-3 gap-2">
+                                <div>
+                                  <span className="text-[9px] font-mono font-black uppercase tracking-widest text-indigo-400">
+                                    Section Dissection & Line Editor
+                                  </span>
+                                  <h3 className="font-sans font-black text-sm uppercase tracking-wider text-indigo-300 flex items-center gap-2">
+                                    <span>{selectedBlock.name}</span>
+                                    <span className="text-[10px] font-mono px-2 py-0.5 bg-indigo-500/10 border border-indigo-500/30 text-indigo-200 rounded">
+                                      {(selectedBlock.enabledLines || []).length} of {templateLines.length} Lines Included
+                                    </span>
+                                  </h3>
+                                </div>
+                                <span className="text-[10px] text-gray-400 font-medium bg-[#131526] px-2.5 py-1 rounded-md border border-[#222440]">
+                                  Select/deselect lines for this sequence block. Edits to chords and lyrics sync live.
+                                </span>
+                              </div>
+
+                              <div className="flex flex-col gap-2 max-h-[300px] overflow-y-auto custom-scrollbar pr-1">
+                                {templateLines.length === 0 ? (
+                                  <div className="text-gray-500 italic text-xs py-8 text-center bg-black/10 rounded-xl border border-dashed border-indigo-500/10">
+                                    No lines defined in this section. Add one to start.
+                                  </div>
+                                ) : (
+                                  templateLines.map((line, lIdx) => {
+                                    const isLineEnabled = (selectedBlock.enabledLines || []).includes(lIdx);
+                                    return (
+                                      <div
+                                        key={lIdx}
+                                        className={`flex items-start gap-3.5 p-3 rounded-xl border transition-all ${
+                                          isLineEnabled
+                                            ? 'bg-indigo-950/20 border-indigo-500/35 shadow-inner'
+                                            : 'bg-black/20 border-indigo-500/5 opacity-55 hover:opacity-85'
+                                        }`}
+                                      >
+                                        {/* Toggle Active Line Checkbox */}
+                                        <button
+                                          onClick={() => {
+                                            const newRoadmap = activeRoadmap.map((b) => {
+                                              if (b.id === selectedBlock.id) {
+                                                const currentEnabled = b.enabledLines || [];
+                                                const isEnabled = currentEnabled.includes(lIdx);
+                                                const nextEnabled = isEnabled
+                                                  ? currentEnabled.filter((idx) => idx !== lIdx)
+                                                  : [...currentEnabled, lIdx].sort((a, b) => a - b);
+                                                return { ...b, enabledLines: nextEnabled };
+                                              }
+                                              return b;
+                                            });
+                                            setActiveRoadmap(newRoadmap);
+                                          }}
+                                          className={`w-5.5 h-5.5 shrink-0 rounded-md flex items-center justify-center border cursor-pointer select-none text-xs font-black transition-all ${
+                                            isLineEnabled
+                                              ? 'bg-indigo-600 border-indigo-500 text-white shadow-md shadow-indigo-600/20'
+                                              : 'bg-[#131526]/80 border-gray-600 text-transparent'
+                                          }`}
+                                          title={isLineEnabled ? "De-select line from this section run" : "Select line for this section run"}
+                                        >
+                                          ✓
+                                        </button>
+
+                                        {/* Inputs Row */}
+                                        <div className="flex-1 grid grid-cols-1 md:grid-cols-12 gap-3">
+                                          {/* Chords input */}
+                                          <div className="flex flex-col gap-1 md:col-span-4">
+                                            <span className="text-[8px] font-mono font-black tracking-wider text-amber-500/90 uppercase">Chords</span>
+                                            <input
+                                              type="text"
+                                              value={line.Chords || ''}
+                                              onChange={(e) => {
+                                                const updatedLines = [...(effectiveSectionTemplates[selectedBlock.name] || [])];
+                                                if (updatedLines[lIdx]) {
+                                                  updatedLines[lIdx] = {
+                                                    ...updatedLines[lIdx],
+                                                    Chords: e.target.value,
+                                                  };
+                                                  setSectionTemplates(prev => ({
+                                                    ...prev,
+                                                    [selectedBlock.name]: updatedLines
+                                                  }));
+                                                  if (loadedSnapshotSections) {
+                                                    setLoadedSnapshotSections(prev => {
+                                                      if (!prev) return null;
+                                                      return {
+                                                        ...prev,
+                                                        [selectedBlock.name]: updatedLines
+                                                      };
+                                                    });
+                                                  }
+                                                }
+                                              }}
+                                              placeholder="Chords (e.g., C G Am F)"
+                                              className="w-full bg-[#0a0c24] border border-indigo-500/15 rounded-lg px-2.5 py-1.5 text-xs font-mono text-amber-400 focus:outline-none focus:border-amber-400"
+                                            />
+                                          </div>
+
+                                          {/* Line Transposition Offset Select */}
+                                          <div className="flex flex-col gap-1 md:col-span-3">
+                                            <span className="text-[8px] font-mono font-black tracking-wider text-emerald-400 uppercase">Line Mod</span>
+                                            <select
+                                              value={(selectedBlock.lineOffsets?.[lIdx] || 0).toString()}
+                                              onChange={(e) => {
+                                                const val = parseInt(e.target.value, 10);
+                                                const currentOffsets = selectedBlock.lineOffsets || {};
+                                                const newRoadmap = activeRoadmap.map((b) => {
+                                                  if (b.id === selectedBlock.id) {
+                                                    return {
+                                                      ...b,
+                                                      lineOffsets: {
+                                                        ...currentOffsets,
+                                                        [lIdx]: val,
+                                                      }
+                                                    };
+                                                  }
+                                                  return b;
+                                                });
+                                                setActiveRoadmap(newRoadmap);
+                                                showToast(`Modulated line to ${val > 0 ? '+' : ''}${val} semitones`, 'info');
+                                              }}
+                                              className="w-full bg-[#0a0c24] border border-indigo-500/15 rounded-lg px-2 py-1.5 text-xs text-emerald-300 font-extrabold focus:outline-none focus:border-emerald-400 cursor-pointer shadow-inner"
+                                            >
+                                              {Array.from({ length: 25 }, (_, idx) => idx - 12).map((val) => (
+                                                <option key={val} value={val} className="bg-[#0c0d1b] text-emerald-300 font-bold">
+                                                  {val > 0 ? `+${val}` : val} {val === 0 ? 'None' : 'st'}
+                                                </option>
+                                              ))}
+                                            </select>
+                                          </div>
+
+                                          {/* Lyrics input */}
+                                          <div className="flex flex-col gap-1 md:col-span-5">
+                                            <span className="text-[8px] font-mono font-black tracking-wider text-indigo-400 uppercase">Lyrics</span>
+                                            <input
+                                              type="text"
+                                              value={line.Lyrics || ''}
+                                              onChange={(e) => {
+                                                const updatedLines = [...(effectiveSectionTemplates[selectedBlock.name] || [])];
+                                                if (updatedLines[lIdx]) {
+                                                  updatedLines[lIdx] = {
+                                                    ...updatedLines[lIdx],
+                                                    Lyrics: e.target.value,
+                                                  };
+                                                  setSectionTemplates(prev => ({
+                                                    ...prev,
+                                                    [selectedBlock.name]: updatedLines
+                                                  }));
+                                                  if (loadedSnapshotSections) {
+                                                    setLoadedSnapshotSections(prev => {
+                                                      if (!prev) return null;
+                                                      return {
+                                                        ...prev,
+                                                        [selectedBlock.name]: updatedLines
+                                                      };
+                                                    });
+                                                  }
+                                                }
+                                              }}
+                                              placeholder="Lyrics"
+                                              className="w-full bg-[#0a0c24] border border-indigo-500/15 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-400"
+                                            />
+                                          </div>
+                                        </div>
+
+                                        {/* Delete Line Button */}
+                                        <button
+                                          onClick={() => {
+                                            const updatedLines = (effectiveSectionTemplates[selectedBlock.name] || []).filter((_, idx) => idx !== lIdx);
+                                            setSectionTemplates(prev => ({
+                                              ...prev,
+                                              [selectedBlock.name]: updatedLines
+                                            }));
+                                            if (loadedSnapshotSections) {
+                                              setLoadedSnapshotSections(prev => {
+                                                if (!prev) return null;
+                                                return {
+                                                  ...prev,
+                                                  [selectedBlock.name]: updatedLines
+                                                };
+                                              });
+                                            }
+
+                                            // Re-map active roadmap blocks to prevent out-of-bound indexes
+                                            const newRoadmap = activeRoadmap.map((b) => {
+                                              if (b.name === selectedBlock.name) {
+                                                const currentEnabled = b.enabledLines || [];
+                                                const nextEnabled = currentEnabled
+                                                  .filter((idx) => idx !== lIdx)
+                                                  .map((idx) => (idx > lIdx ? idx - 1 : idx));
+                                                return { ...b, enabledLines: nextEnabled };
+                                              }
+                                              return b;
+                                            });
+                                            setActiveRoadmap(newRoadmap);
+                                          }}
+                                          className="p-1.5 hover:text-rose-400 text-gray-500 transition-colors mt-4 self-center cursor-pointer select-none active:scale-90"
+                                          title="Delete line"
+                                        >
+                                          ✕
+                                        </button>
+                                      </div>
+                                    );
+                                  })
+                                )}
+                              </div>
+
+                              <div className="flex items-center justify-between border-t border-indigo-500/10 pt-3">
+                                <span className="text-[10px] text-indigo-400/70 italic">
+                                  Lines edited here can be saved securely to custom JSON presets.
+                                </span>
+                                <button
+                                  onClick={() => {
+                                    const currentLines = effectiveSectionTemplates[selectedBlock.name] || [];
+                                    const newLine = {
+                                      SongID: currentSong?.SongID || '',
+                                      SectionName: selectedBlock.name,
+                                      Section: selectedBlock.name,
+                                      section: selectedBlock.name,
+                                      Order: currentLines.length + 1,
+                                      Chords: '',
+                                      Lyrics: '',
+                                    };
+                                    const updatedLines = [...currentLines, newLine];
+
+                                    setSectionTemplates(prev => ({
+                                      ...prev,
+                                      [selectedBlock.name]: updatedLines
+                                    }));
+                                    if (loadedSnapshotSections) {
+                                      setLoadedSnapshotSections(prev => {
+                                        if (!prev) return null;
+                                        return {
+                                          ...prev,
+                                          [selectedBlock.name]: updatedLines
+                                        };
+                                      });
+                                    }
+
+                                    // Enable the new line for this block
+                                    const newRoadmap = activeRoadmap.map((b) => {
+                                      if (b.id === selectedBlock.id) {
+                                        const currentEnabled = b.enabledLines || [];
+                                        return {
+                                          ...b,
+                                          enabledLines: [...currentEnabled, updatedLines.length - 1],
+                                        };
+                                      }
+                                      return b;
+                                    });
+                                    setActiveRoadmap(newRoadmap);
+                                  }}
+                                  className="px-4 py-2 bg-emerald-600/20 hover:bg-emerald-600 border border-emerald-500/35 text-emerald-300 hover:text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer active:scale-95"
+                                >
+                                  + Add Line to Section
+                                </button>
+                              </div>
+
+                              {/* Pull Portion of Other Song UI block */}
+                              <div className="mt-3">
+                                {!isPullingFromOtherSong ? (
+                                  <div className="flex justify-end">
+                                    <button
+                                      onClick={() => setIsPullingFromOtherSong(true)}
+                                      className="px-3.5 py-1.5 bg-indigo-600/20 hover:bg-indigo-600 border border-indigo-500/35 text-indigo-300 hover:text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer active:scale-95 flex items-center gap-1.5 shadow-sm"
+                                    >
+                                      <span>📥</span> Pull Portion of Other Song
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex flex-col gap-2 bg-[#050614] border border-indigo-500/20 p-4 rounded-xl space-y-2 text-left">
+                                    <div className="flex justify-between items-center pb-1 border-b border-indigo-500/10">
+                                      <h4 className="text-[10px] font-black uppercase text-indigo-300 tracking-wider flex items-center gap-1">
+                                        <span>📥</span> Pull Portion of Other Songs
+                                      </h4>
+                                      <button
+                                        onClick={() => {
+                                          setIsPullingFromOtherSong(false);
+                                          setPullSourceSongId('');
+                                          setPullSourceSectionName('');
+                                        }}
+                                        className="text-gray-400 hover:text-white text-[9px] uppercase font-bold cursor-pointer transition-colors animate-pulse"
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                      <div className="flex flex-col gap-1">
+                                        <span className="text-[7px] font-mono font-black tracking-wider text-indigo-400 uppercase">1. Select Source Song</span>
+                                        <select
+                                          value={pullSourceSongId}
+                                          onChange={(e) => {
+                                            setPullSourceSongId(e.target.value);
+                                            setPullSourceSectionName('');
+                                          }}
+                                          className="w-full bg-[#0a0c24] border border-indigo-500/15 rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none focus:border-indigo-400 cursor-pointer"
+                                        >
+                                          <option value="">-- Choose a song --</option>
+                                          {songs
+                                            .filter(s => String(s.SongID) !== String(currentSong?.SongID))
+                                            .map(s => (
+                                              <option key={s.SongID} value={s.SongID}>
+                                                {s.Title} {s.Artist ? `(by ${s.Artist})` : ''}
+                                              </option>
+                                            ))
+                                          }
+                                        </select>
+                                      </div>
+
+                                      {pullSourceSongId && (
+                                        <div className="flex flex-col gap-1">
+                                          <span className="text-[7px] font-mono font-black tracking-wider text-indigo-400 uppercase">2. Select Section</span>
+                                          <select
+                                            value={pullSourceSectionName}
+                                            onChange={(e) => setPullSourceSectionName(e.target.value)}
+                                            className="w-full bg-[#0a0c24] border border-indigo-500/15 rounded-lg px-2 py-1 text-[11px] text-white focus:outline-none focus:border-indigo-400 cursor-pointer"
+                                          >
+                                            <option value="">-- Choose a section --</option>
+                                            {(() => {
+                                              const sourceLines = songLines.filter(line => String(line.SongID) === String(pullSourceSongId));
+                                              const uniqueSections = Array.from(new Set(sourceLines.map(line => line.SectionName || line.Section || line.section || 'Uncategorized').filter(Boolean)));
+                                              return uniqueSections.map(sec => (
+                                                <option key={sec} value={sec}>{sec}</option>
+                                              ));
+                                            })()}
+                                          </select>
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {pullSourceSongId && pullSourceSectionName && (
+                                      <div className="space-y-1.5 pt-1 border-t border-indigo-500/10">
+                                        <span className="text-[7px] font-mono font-black tracking-wider text-indigo-400 uppercase block">
+                                          3. Select Lines to Pull Into "{selectedBlock.name}"
+                                        </span>
+                                        {(() => {
+                                          const sourceLines = songLines.filter(line => 
+                                            String(line.SongID) === String(pullSourceSongId) && 
+                                            (line.SectionName || line.Section || line.section || 'Uncategorized') === pullSourceSectionName
+                                          );
+
+                                          if (sourceLines.length === 0) {
+                                            return <p className="text-[10px] text-gray-500 italic">No lines found in this section.</p>;
+                                          }
+
+                                          return (
+                                            <div className="space-y-1 max-h-[120px] overflow-y-auto custom-scrollbar pr-1 bg-black/30 p-1.5 rounded-lg border border-indigo-500/5">
+                                              {sourceLines.map((line, idx) => {
+                                                return (
+                                                  <div 
+                                                    key={idx} 
+                                                    onClick={() => {
+                                                      const currentLines = effectiveSectionTemplates[selectedBlock.name] || [];
+                                                      const newLine = {
+                                                        SongID: currentSong?.SongID || '',
+                                                        SectionName: selectedBlock.name,
+                                                        Section: selectedBlock.name,
+                                                        section: selectedBlock.name,
+                                                        Order: currentLines.length + 1,
+                                                        Chords: line.Chords || '',
+                                                        Lyrics: line.Lyrics || '',
+                                                      };
+                                                      const updatedLines = [...currentLines, newLine];
+
+                                                      setSectionTemplates(prev => ({
+                                                        ...prev,
+                                                        [selectedBlock.name]: updatedLines
+                                                      }));
+                                                      if (loadedSnapshotSections) {
+                                                        setLoadedSnapshotSections(prev => {
+                                                          if (!prev) return null;
+                                                          return {
+                                                            ...prev,
+                                                            [selectedBlock.name]: updatedLines
+                                                          };
+                                                        });
+                                                      }
+
+                                                      const newRoadmap = activeRoadmap.map((b) => {
+                                                        if (b.id === selectedBlock.id) {
+                                                          return {
+                                                            ...b,
+                                                            enabledLines: [...(b.enabledLines || []), updatedLines.length - 1],
+                                                          };
+                                                        }
+                                                        return b;
+                                                      });
+                                                      setActiveRoadmap(newRoadmap);
+                                                      showToast(`Pulled line to ${selectedBlock.name}`, 'success');
+                                                    }}
+                                                    className="flex items-center justify-between p-1.5 rounded bg-[#0c0d1b] border border-white/5 hover:border-emerald-500/30 hover:bg-emerald-950/10 cursor-pointer transition-all select-none text-left group"
+                                                  >
+                                                    <div className="min-w-0 flex-1">
+                                                      <div className="text-[9px] font-mono text-amber-400 truncate font-bold">
+                                                        {line.Chords || '(No chords)'}
+                                                      </div>
+                                                      <div className="text-[10px] text-slate-300 truncate">
+                                                        {line.Lyrics || '(No lyrics)'}
+                                                      </div>
+                                                    </div>
+                                                    <span className="text-[8px] bg-emerald-600/20 text-emerald-400 group-hover:bg-emerald-600 group-hover:text-white px-1.5 py-0.5 rounded font-black uppercase tracking-wider transition-all select-none shrink-0">
+                                                      + Pull Line
+                                                    </span>
+                                                  </div>
+                                                );
+                                              })}
+                                            </div>
+                                          );
+                                        })()}
+
+                                        <div className="flex justify-end pt-1">
+                                          <button
+                                            onClick={() => {
+                                              const sourceLines = songLines.filter(line => 
+                                                String(line.SongID) === String(pullSourceSongId) && 
+                                                (line.SectionName || line.Section || line.section || 'Uncategorized') === pullSourceSectionName
+                                              );
+
+                                              if (sourceLines.length > 0) {
+                                                const currentLines = effectiveSectionTemplates[selectedBlock.name] || [];
+                                                const pulledLines = sourceLines.map((line, sIdx) => ({
+                                                  SongID: currentSong?.SongID || '',
+                                                  SectionName: selectedBlock.name,
+                                                  Section: selectedBlock.name,
+                                                  section: selectedBlock.name,
+                                                  Order: currentLines.length + sIdx + 1,
+                                                  Chords: line.Chords || '',
+                                                  Lyrics: line.Lyrics || '',
+                                                }));
+                                                const updatedLines = [...currentLines, ...pulledLines];
+
+                                                setSectionTemplates(prev => ({
+                                                  ...prev,
+                                                  [selectedBlock.name]: updatedLines
+                                                }));
+                                                if (loadedSnapshotSections) {
+                                                  setLoadedSnapshotSections(prev => {
+                                                    if (!prev) return null;
+                                                    return {
+                                                      ...prev,
+                                                      [selectedBlock.name]: updatedLines
+                                                    };
+                                                  });
+                                                }
+
+                                                const startIdx = currentLines.length;
+                                                const newIndices = Array.from({ length: pulledLines.length }, (_, i) => startIdx + i);
+                                                const newRoadmap = activeRoadmap.map((b) => {
+                                                  if (b.id === selectedBlock.id) {
+                                                    return {
+                                                      ...b,
+                                                      enabledLines: [...(b.enabledLines || []), ...newIndices],
+                                                    };
+                                                  }
+                                                  return b;
+                                                });
+                                                setActiveRoadmap(newRoadmap);
+
+                                                showToast(`Pulled all ${sourceLines.length} lines of ${pullSourceSectionName} to ${selectedBlock.name}`, 'success');
+                                                setIsPullingFromOtherSong(false);
+                                                setPullSourceSongId('');
+                                                setPullSourceSectionName('');
+                                              }
+                                            }}
+                                            className="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600 border border-emerald-500/35 text-emerald-300 hover:text-white rounded-lg text-[9px] font-black uppercase tracking-wider transition-all cursor-pointer active:scale-95 flex items-center gap-1"
+                                          >
+                                            <span>📥</span> Pull Entire Section
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+
+
+                        {/* Modal Footer */}
+                        <div className="border-t border-indigo-500/15 pt-4 flex items-center justify-end">
+                          <button
+                            onClick={() => setArrangerOpen(false)}
+                            className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-xl text-xs uppercase tracking-widest transition-all active:scale-95 cursor-pointer shadow-md shadow-indigo-600/20"
+                          >
+                            Close & Apply Flow
+                          </button>
+                        </div>
+
+                      </div>
+                    </div>
+                  )}
+
+                  {/* UNIFIED PERFORMANCE PANEL & SHEET VIEW */}
+                  <div className="w-full max-w-5xl mx-auto bg-[#04050d]/85 border border-[#1b1c35] rounded-3xl p-3.5 sm:p-5 md:p-6 flex flex-col gap-5 shadow-[0_32px_80px_rgba(0,0,0,0.4)] select-none">
+                    
+                    {/* Console Header */}
+                    <div className="flex items-center justify-between border-b border-indigo-500/10 pb-3 pl-1">
+                      <div className="text-left">
+                        <span className="font-sans font-black text-[10px] uppercase tracking-widest text-indigo-400">
+                          🎛️ Performance Console
+                        </span>
+                        <h3 className="text-[11px] text-indigo-200/60 font-medium leading-tight mt-0.5">
+                          Roadmap, settings, chords & sheet in a single unified station
+                        </h3>
+                      </div>
+                      <div className="text-[9px] font-bold text-indigo-400/90 bg-indigo-500/10 border border-indigo-500/25 px-2.5 py-1 rounded-md uppercase tracking-wider select-none shrink-0">
+                        Console Mode
+                      </div>
+                    </div>
+
+                    {/* Collapsible Panel controls inside */}
+                    <div className="flex flex-col gap-3">
+                      
+                      {/* PANEL 1: ROADMAP FLOW */}
+                      <div className="w-full bg-[#080918]/90 border border-[#1e1f38] rounded-2xl p-4.5 flex flex-col gap-3 shadow-lg hover:border-indigo-500/25 transition-all">
+                      <div 
+                        onClick={() => setIsRoadmapFlowCollapsed(!isRoadmapFlowCollapsed)}
+                        className="flex items-center justify-between cursor-pointer select-none py-0.5 group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm">🧭</span>
+                          <h3 className="font-sans font-black text-[11px] uppercase tracking-wider text-indigo-300 group-hover:text-white transition-colors">
+                            Roadmap Flow
+                          </h3>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setArrangerOpen((prev) => !prev);
+                            }}
+                            className={`px-2.5 py-1 rounded-lg border font-sans font-black text-[9px] uppercase tracking-widest transition-all active:scale-95 cursor-pointer flex items-center gap-1 ${
+                              arrangerOpen
+                                ? 'bg-indigo-600 border-indigo-500 text-white shadow-lg shadow-indigo-600/20'
+                                : 'bg-[#161a3c]/30 hover:bg-[#1f2554] border-indigo-500/15 text-indigo-300 hover:text-white'
+                            }`}
+                          >
+                            <span>🎛️</span>
+                            <span>Arrangement</span>
+                          </button>
+                          <span className="text-xs text-indigo-400 font-bold group-hover:text-indigo-300 transition-colors">
+                            {isRoadmapFlowCollapsed ? '▼' : '▲'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {!isRoadmapFlowCollapsed && (
+                        <div
+                          onClick={() => setArrangerOpen(true)}
+                          className="w-full bg-[#0a0c24]/50 hover:bg-[#0f1138]/50 border border-indigo-500/10 hover:border-indigo-400/30 rounded-xl p-3 cursor-pointer transition-all flex flex-col gap-2 group text-left animate-fadeIn"
+                          title="Click to open interactive roadmap designer modal"
+                        >
+                          <div className="flex items-center justify-between font-mono text-[9px] text-indigo-400/70 select-none">
+                            <span className="font-bold uppercase tracking-wider group-hover:text-indigo-300 transition-colors">Active Sequence Flow</span>
+                            <span className="text-indigo-400/90 font-mono font-black group-hover:text-white">Tap to Edit ➔</span>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5 py-0.5">
+                            {activeRoadmap.map((b, idx) => {
+                              const norm = b.name.trim().toLowerCase();
+                              let colorStyles = 'bg-slate-950/40 border border-slate-500/20 text-slate-300';
+                              if (norm.includes('verse')) {
+                                colorStyles = 'bg-emerald-950/40 border border-emerald-500/20 text-emerald-400';
+                              } else if (norm.includes('pre') || norm.includes('pre-chorus') || norm.includes('pre chorus')) {
+                                colorStyles = 'bg-amber-950/40 border border-amber-500/20 text-amber-300';
+                              } else if (norm.includes('chorus')) {
+                                colorStyles = 'bg-orange-950/40 border border-orange-500/20 text-orange-300';
+                              } else if (norm.includes('bridge')) {
+                                colorStyles = 'bg-purple-950/40 border border-purple-500/20 text-purple-300';
+                              } else if (norm.includes('interlude') || norm.includes('solo')) {
+                                colorStyles = 'bg-indigo-950/40 border border-indigo-500/20 text-indigo-300';
+                              }
+                              return (
+                                <React.Fragment key={b.id}>
+                                  {idx > 0 && <span className="text-indigo-500/30 text-[10px] font-black shrink-0">➔</span>}
+                                  <span className={`px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider shrink-0 ${colorStyles}`}>
+                                    {b.name}
+                                  </span>
+                                </React.Fragment>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* PANEL 2: PERFORMANCE SETTINGS */}
+                    <div className="w-full bg-[#080918]/90 border border-[#1e1f38] rounded-2xl p-4.5 flex flex-col gap-3 shadow-lg hover:border-indigo-500/25 transition-all">
+                      <div 
+                        onClick={() => setIsPerformancePanelCollapsed(!isPerformancePanelCollapsed)}
+                        className="flex items-center justify-between cursor-pointer select-none py-0.5 group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm">⚙️</span>
+                          <h3 className="font-sans font-black text-[11px] uppercase tracking-wider text-indigo-300 group-hover:text-white transition-colors">
+                            Performance Settings
+                          </h3>
+                        </div>
+                        <span className="text-xs text-indigo-400 font-bold group-hover:text-indigo-300 transition-colors">
+                          {isPerformancePanelCollapsed ? '▼' : '▲'}
+                        </span>
+                      </div>
+
+                      {!isPerformancePanelCollapsed && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3 animate-fadeIn">
+                          
+                          {/* Transpose Widget */}
+                          <div className="bg-[#0c0d28]/60 border border-[#222440] rounded-xl p-3 flex flex-col gap-2 justify-between items-center text-center">
+                            <span className="text-[9px] font-mono font-bold tracking-wider text-gray-400 uppercase text-center w-full">Transpose</span>
+                            <div className="flex items-center justify-center gap-2.5 w-full">
+                              <button
+                                onClick={() => shiftKey(-1)}
+                                className="w-8 h-8 flex items-center justify-center bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 rounded-lg text-white font-black text-xs cursor-pointer transition-all active:scale-95"
+                              >
+                                -
+                              </button>
+                              <span className="font-mono font-black text-xs text-amber-400 min-w-[24px]">
+                                {currentKey}
+                              </span>
+                              <button
+                                onClick={() => shiftKey(1)}
+                                className="w-8 h-8 flex items-center justify-center bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 rounded-lg text-white font-black text-xs cursor-pointer transition-all active:scale-95"
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Zoom Widget */}
+                          <div className="bg-[#0c0d28]/60 border border-[#222440] rounded-xl p-3 flex flex-col gap-2 justify-between items-center text-center">
+                            <span className="text-[9px] font-mono font-bold tracking-wider text-gray-400 uppercase text-center w-full">Zoom</span>
+                            <div className="flex items-center justify-center gap-2.5 h-8 w-full">
+                              <button
+                                onClick={() => setLyricZoom((prev) => Math.max(0.3, parseFloat((prev - 0.05).toFixed(2))))}
+                                className="w-10 h-full flex items-center justify-center bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 rounded-lg text-white text-[10px] font-black uppercase tracking-wider cursor-pointer transition-all active:scale-95"
+                              >
+                                A-
+                              </button>
+                              <span className="font-mono font-black text-[10px] text-indigo-300 min-w-[34px]">
+                                {Math.round(lyricZoom * 100)}%
+                              </span>
+                              <button
+                                onClick={() => setLyricZoom((prev) => Math.min(1.5, parseFloat((prev + 0.05).toFixed(2))))}
+                                className="w-10 h-full flex items-center justify-center bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 rounded-lg text-white text-[10px] font-black uppercase tracking-wider cursor-pointer transition-all active:scale-95"
+                              >
+                                A+
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* View & Layout Widget */}
+                          <div className="bg-[#0c0d28]/60 border border-[#222440] rounded-xl p-3 flex flex-col gap-1.5 justify-between items-center text-center">
+                            <span className="text-[9px] font-mono font-bold tracking-wider text-gray-400 uppercase text-center w-full">View & Layout</span>
+                            <div className="flex flex-col gap-1.5 w-full items-center justify-center">
+                              {/* Toggle Mode Button: Chords, Numbers, Both */}
+                              <button
+                                onClick={() => {
+                                  const nextModeMap: Record<'chords' | 'numbers' | 'both', 'chords' | 'numbers' | 'both'> = {
+                                    chords: 'numbers',
+                                    numbers: 'both',
+                                    both: 'chords'
+                                  };
+                                  setDisplayMode(nextModeMap[displayMode]);
+                                }}
+                                className="w-full py-1 bg-indigo-600/10 hover:bg-indigo-600 border border-indigo-500/20 text-indigo-200 hover:text-white rounded text-[9px] font-black uppercase tracking-wider transition-all text-center flex items-center justify-center"
+                              >
+                                {displayMode === 'both' ? 'Both' : displayMode === 'chords' ? 'Chords Only' : 'Numbers Only'}
+                              </button>
+
+                              {/* Toggle Lyrics and Layout Mode with elegant individual controls */}
+                              <div className="flex gap-1 w-full items-center justify-center">
+                                {/* Toggle Lyrics Button */}
+                                <button
+                                  onClick={() => setShowLyrics(prev => !prev)}
+                                  className={`flex-1 py-1 rounded text-[9px] font-black uppercase tracking-wider transition-all border text-center flex items-center justify-center ${
+                                    showLyrics
+                                      ? 'bg-indigo-500/10 border-indigo-500/20 text-indigo-200 hover:text-white'
+                                      : 'bg-transparent border-indigo-500/10 text-gray-500 hover:text-gray-400'
+                                  }`}
+                                >
+                                  {showLyrics ? 'Lyrics On' : 'Lyrics Off'}
+                                </button>
+                              </div>
+
+                              {/* Layout Mode Segmented Control: Flow vs Compact */}
+                              <div className="flex items-center bg-[#131526]/80 border border-[#222440] p-0.5 rounded-lg w-full">
+                                <button
+                                  onClick={() => setSheetLayoutMode('sequence')}
+                                  className={`flex-1 py-1 text-[9px] uppercase tracking-wider rounded transition-all cursor-pointer select-none font-bold ${
+                                    sheetLayoutMode === 'sequence'
+                                      ? 'bg-indigo-600 text-white font-black shadow-md shadow-indigo-600/20'
+                                      : 'text-[#7177a6] hover:text-gray-200'
+                                  }`}
+                                >
+                                  Flow
+                                </button>
+                                <button
+                                  onClick={() => setSheetLayoutMode('compact')}
+                                  className={`flex-1 py-1 text-[9px] uppercase tracking-wider rounded transition-all cursor-pointer select-none font-bold ${
+                                    sheetLayoutMode === 'compact'
+                                      ? 'bg-amber-600/20 text-[#f59e0b] border border-amber-600/40 font-black'
+                                      : 'text-[#7177a6] hover:text-gray-200'
+                                  }`}
+                                >
+                                  Compact
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Autoscroll Widget */}
+                          <div className="bg-[#0c0d28]/60 border border-[#222440] rounded-xl p-3 flex flex-col gap-2 justify-between items-center text-center">
+                            <span className="text-[9px] font-mono font-bold tracking-wider text-gray-400 uppercase text-center w-full">Autoscroll</span>
+                            <div className="flex items-center gap-1.5 justify-center w-full">
+                              <button
+                                onClick={toggleAutoscroll}
+                                className={`w-20 h-8 rounded-lg text-[10px] font-black cursor-pointer transition-all active:scale-95 uppercase tracking-wider flex items-center justify-center gap-1 shrink-0 ${
+                                  isScrollingActive
+                                    ? 'bg-indigo-600 text-white shadow-md font-black border border-indigo-500'
+                                    : 'bg-indigo-500/10 border border-indigo-500/20 text-indigo-200 hover:text-white'
+                                }`}
+                              >
+                                {isScrollingActive ? '⏸ Stop' : '▶ Play'}
+                              </button>
+                              <div className="flex items-center gap-1 bg-black/40 border border-indigo-500/15 rounded-lg px-1 h-8 shrink-0">
+                                <button
+                                  onClick={() => setScrollSpeed((prev) => Math.max(0.5, parseFloat((prev - 0.5).toFixed(1))))}
+                                  className="w-4 h-5 flex items-center justify-center text-indigo-300 hover:text-white text-xs font-black cursor-pointer"
+                                >
+                                  -
+                                </button>
+                                <span className="w-6 text-center font-mono font-bold text-[10px] text-white">
+                                  {scrollSpeed}
+                                </span>
+                                <button
+                                  onClick={() => setScrollSpeed((prev) => Math.min(10, parseFloat((prev + 0.5).toFixed(1))))}
+                                  className="w-4 h-5 flex items-center justify-center text-indigo-300 hover:text-white text-xs font-black cursor-pointer"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Metronome Widget */}
+                          <div className="bg-[#0c0d28]/60 border border-[#222440] rounded-xl p-3 flex flex-col gap-2 justify-between items-center text-center">
+                            <span className="text-[9px] font-mono font-bold tracking-wider text-gray-400 uppercase text-center w-full">Metronome & Tempo</span>
+                            <div className="flex items-center gap-1.5 justify-center w-full">
+                              <button
+                                onClick={() => setIsMetronomeActive((prev) => !prev)}
+                                className={`w-16 h-8 px-1.5 rounded-lg text-[9px] font-black cursor-pointer transition-all active:scale-95 uppercase tracking-wider flex items-center justify-center gap-1 shrink-0 ${
+                                  isMetronomeActive
+                                    ? 'bg-rose-600 text-white shadow-md border border-rose-500'
+                                    : 'bg-indigo-500/10 border border-indigo-500/20 text-indigo-200 hover:text-white'
+                                }`}
+                              >
+                                <span className={`w-1.5 h-1.5 rounded-full ${isMetronomeActive ? 'bg-white animate-pulse' : 'bg-rose-500/40'}`}></span>
+                                Metro
+                              </button>
+                              <button
+                                onClick={handleTapTempo}
+                                className="h-8 px-2 bg-indigo-500/10 border border-indigo-500/20 hover:bg-indigo-500/20 text-indigo-200 hover:text-white rounded-lg text-[9px] font-black uppercase tracking-wider transition-all cursor-pointer"
+                              >
+                                Tap
+                              </button>
+                              <span className="h-8 px-1.5 min-w-[32px] flex items-center justify-center font-mono font-black text-[10px] text-white bg-black/40 rounded-lg border border-indigo-500/15">
+                                {bpm}
+                              </span>
+                            </div>
+                          </div>
+
+                        </div>
+                      )}
+                    </div>
+
+                    {/* PANEL 3: FAMILY CHORDS */}
+                    <div className="w-full bg-[#080918]/90 border border-[#1e1f38] rounded-2xl p-4.5 flex flex-col gap-3 shadow-lg hover:border-indigo-500/25 transition-all">
+                      <div 
+                        onClick={() => setIsFamilyChordsCollapsed(!isFamilyChordsCollapsed)}
+                        className="flex items-center justify-between cursor-pointer select-none py-0.5 group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm">🎸</span>
+                          <h3 className="font-sans font-black text-[11px] uppercase tracking-wider text-indigo-300 group-hover:text-white transition-colors">
+                            Family Chords
+                          </h3>
+                        </div>
+                        <span className="text-xs text-indigo-400 font-bold group-hover:text-indigo-300 transition-colors">
+                          {isFamilyChordsCollapsed ? '▼' : '▲'}
+                        </span>
+                      </div>
+
+                      {!isFamilyChordsCollapsed && (
+                        <div className="flex flex-wrap gap-2 animate-fadeIn py-1">
+                          {(() => {
+                            const intervals = [0, 2, 4, 5, 7, 9, 11];
+                            const qualities = ['', 'm', 'm', '', '', 'm', 'dim'];
+                            const degrees = ['1', '2', '3', '4', '5', '6', '7'];
+                            const keyIdx = NOTE_TO_INDEX[currentKey];
+                            if (keyIdx === undefined) return null;
+                            const useSharps = ['G', 'D', 'A', 'E', 'B', 'F#', 'C#'].includes(currentKey);
+                            const scaleNotes = useSharps 
+                              ? ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'] 
+                              : ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+
+                            return degrees.map((deg, i) => {
+                              const noteIdx = (keyIdx + intervals[i]) % 12;
+                              const rawChord = `${scaleNotes[noteIdx]}${qualities[i]}`;
+
+                              return (
+                                <span
+                                  key={deg}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedChord(rawChord);
+                                    setIsMusicianModalOpen(true);
+                                  }}
+                                  className="bg-[#0c0d28]/60 hover:bg-[#12133a]/60 border border-indigo-500/15 hover:border-indigo-500/30 px-3.5 py-2 rounded-xl text-white font-sans font-black text-[11px] transition-all hover:text-cyan-300 hover:scale-[1.03] active:scale-95 cursor-help flex items-center gap-1.5 shadow-sm"
+                                >
+                                  <span className="text-indigo-400 font-mono font-black text-[9px]">{deg}</span>
+                                  <span className="font-extrabold text-xs">{rawChord}</span>
+                                </span>
+                              );
+                            });
+                          })()}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Collapsible Panel controls inside */}
+                    </div>
+
+                    {/* Separator / Divider */}
+                    <div className="flex items-center gap-3 w-full select-none pl-1 mt-2 mb-1">
+                      <span className="font-sans font-black text-[10px] uppercase tracking-widest text-indigo-300 shrink-0">
+                        📄 Interactive Sheet View
+                      </span>
+                      <div className="flex-1 border-b border-indigo-500/10" />
+                    </div>
+
+                    {/* Pro Musician Stage HUD Interactive Sheet View */}
+                    <div className="w-full bg-white text-slate-800 shadow-[0_12px_40px_rgba(0,0,0,0.06)] rounded-2xl p-4 sm:p-6 md:p-8 font-sans border border-slate-200 select-text relative overflow-hidden transition-all duration-300">
+                    
+                    {/* Subtle Light Digital Grid Scanlines and Glow Accents */}
+                    <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(99,102,241,0.015)_1px,transparent_1px),linear-gradient(to_right,rgba(99,102,241,0.015)_1px,transparent_1px)] bg-[size:24px_24px] pointer-events-none rounded-2xl" />
+                    <div className="absolute -left-1/4 -top-1/4 w-96 h-96 bg-indigo-500/3 blur-[120px] rounded-full pointer-events-none" />
+                    <div className="absolute -right-1/4 -bottom-1/4 w-96 h-96 bg-cyan-500/3 blur-[120px] rounded-full pointer-events-none" />
+
+                    {/* Watermark / Digital Stage Stand Logo background */}
+                    <div className="absolute right-8 top-8 text-indigo-500/5 select-none font-mono font-black text-6xl tracking-widest uppercase shrink-0 pointer-events-none animate-pulse">
+                      STAGE
+                    </div>
+
+                    {/* Chords rendering sheet block */}
+                    <div className="space-y-6 relative z-10" style={{ fontSize: `${lyricZoom}rem` }}>
+                      {(() => {
+                        const repInfo = getRoadmapRepetitionInfo(activeRoadmap);
+                        
+                        return activeRoadmap.map((block, idx) => {
+                          const blockRep = repInfo[idx];
+                          let blockDisplayName = block.name;
+
+                          if (sheetLayoutMode === 'sequence') {
+                            if (blockRep && blockRep.isRepeat) {
+                              return null;
+                            }
+                            if (blockRep && blockRep.totalInRun > 1) {
+                              blockDisplayName = `${block.name} (${blockRep.totalInRun}x)`;
+                            }
+                          }
+
+                          if (sheetLayoutMode === 'compact') {
+                            if (!showLyrics) {
+                              const firstIdx = activeRoadmap.findIndex((b) => areBlocksChordsIdentical(b, block, effectiveSectionTemplates));
+                              if (firstIdx !== idx) return null;
+                              const identicalBlocks = activeRoadmap.filter((b) => areBlocksChordsIdentical(b, block, effectiveSectionTemplates));
+                              const uniqueNames = Array.from(new Set(identicalBlocks.map((b) => b.name)));
+                              blockDisplayName = `${uniqueNames.join(' / ')}`;
+                            } else {
+                              const firstIdx = activeRoadmap.findIndex((b) => b.name === block.name);
+                              if (firstIdx !== idx) return null;
+                              blockDisplayName = `${block.name}`;
+                            }
+                          }
+
+                          const templateLines = effectiveSectionTemplates[block.name] || [];
+                          const blockOffset = block.keyOffset || 0;
+                          const blockKeyName = getModulatedKeyName(currentKey, blockOffset);
+
+                          const originalIdx = NOTE_TO_INDEX[currentSong.OriginalKey || 'C'] || 0;
+                          const currentIdx = NOTE_TO_INDEX[currentKey] || 0;
+                          const totalSemitonesOffset = currentIdx - originalIdx + blockOffset;
+
+                          const blockLower = blockDisplayName.toLowerCase();
+                          const isBridge = blockLower.includes('bridge');
+                          const isChorus = blockLower.includes('chorus') && !blockLower.includes('verse');
+                          const isPreChorus = blockLower.includes('pre-chorus') || blockLower.includes('pre chorus') || blockLower.includes('prechorus');
+                          const isVerse = blockLower.includes('verse');
+                          const isIntro = blockLower.includes('intro');
+                          const isOutro = blockLower.includes('outro');
+                          const isSolo = blockLower.includes('solo') || blockLower.includes('interlude');
+
+                          let sectionAccentColor = 'border-indigo-200 text-indigo-700 bg-indigo-50';
+                          let sectionBorderColor = 'border-slate-200';
+                          let sectionLabel = 'IND';
+
+                          if (isVerse) {
+                            sectionAccentColor = 'border-emerald-200 text-emerald-700 bg-emerald-50';
+                            sectionBorderColor = 'border-slate-200';
+                            sectionLabel = 'VRS';
+                          } else if (isChorus) {
+                            sectionAccentColor = 'border-orange-200 text-orange-700 bg-orange-50';
+                            sectionBorderColor = 'border-slate-200';
+                            sectionLabel = 'CHS';
+                          } else if (isPreChorus) {
+                            sectionAccentColor = 'border-amber-200 text-amber-700 bg-amber-50';
+                            sectionBorderColor = 'border-slate-200';
+                            sectionLabel = 'PRE';
+                          } else if (isBridge) {
+                            sectionAccentColor = 'border-fuchsia-200 text-fuchsia-700 bg-fuchsia-50';
+                            sectionBorderColor = 'border-slate-200';
+                            sectionLabel = 'BDG';
+                          } else if (isSolo) {
+                            sectionAccentColor = 'border-cyan-200 text-cyan-700 bg-cyan-50';
+                            sectionBorderColor = 'border-slate-200';
+                            sectionLabel = 'SOL';
+                          } else if (isIntro || isOutro) {
+                            sectionAccentColor = 'border-teal-200 text-teal-700 bg-teal-50';
+                            sectionBorderColor = 'border-slate-200';
+                            sectionLabel = isIntro ? 'INT' : 'OUT';
+                          }
+
+                          return (
+                            <div 
+                              key={block.id} 
+                              className={`mb-4 last:mb-0 p-4 sm:p-5 rounded-xl border ${sectionBorderColor} bg-slate-50/50 select-text break-inside-avoid relative hover:bg-slate-100/50 transition-all duration-200 group/section shadow-sm`}
+                            >
+                              {/* High-tech Corner Accents */}
+                              <div className={`absolute top-0 left-0 w-2 h-2 border-t-2 border-l-2 ${isVerse ? 'border-emerald-600' : isChorus ? 'border-orange-600' : isPreChorus ? 'border-amber-600' : isBridge ? 'border-fuchsia-600' : 'border-indigo-600'} opacity-0 group-hover/section:opacity-100 transition-opacity rounded-tl`} />
+                              <div className={`absolute top-0 right-0 w-2 h-2 border-t-2 border-r-2 ${isVerse ? 'border-emerald-600' : isChorus ? 'border-orange-600' : isPreChorus ? 'border-amber-600' : isBridge ? 'border-fuchsia-600' : 'border-indigo-600'} opacity-0 group-hover/section:opacity-100 transition-opacity rounded-tr`} />
+                              <div className={`absolute bottom-0 left-0 w-2 h-2 border-b-2 border-l-2 ${isVerse ? 'border-emerald-600' : isChorus ? 'border-orange-600' : isPreChorus ? 'border-amber-600' : isBridge ? 'border-fuchsia-600' : 'border-indigo-600'} opacity-0 group-hover/section:opacity-100 transition-opacity rounded-bl`} />
+                              <div className={`absolute bottom-0 right-0 w-2 h-2 border-b-2 border-r-2 ${isVerse ? 'border-emerald-600' : isChorus ? 'border-orange-600' : isPreChorus ? 'border-amber-600' : isBridge ? 'border-fuchsia-600' : 'border-indigo-600'} opacity-0 group-hover/section:opacity-100 transition-opacity rounded-br`} />
+
+                              {/* Section Header */}
+                              <div className="flex items-center justify-between gap-4 w-full select-none mb-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono text-[9px] font-black tracking-widest bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5 text-slate-500">
+                                    {sectionLabel}
+                                  </span>
+                                  <span className={`text-xs sm:text-sm font-sans font-black uppercase tracking-wider ${isVerse ? 'text-emerald-700' : isChorus ? 'text-orange-700' : isPreChorus ? 'text-amber-700' : isBridge ? 'text-fuchsia-700' : 'text-indigo-700'}`}>
+                                    {blockDisplayName} {blockOffset !== 0 ? `[Modulate to ${blockKeyName}]` : ''}
+                                  </span>
+                                </div>
+                                <div className="flex-1 border-b border-slate-200 border-dashed" />
+                                <div className="flex items-center gap-2">
+                                  {blockOffset !== 0 && (
+                                    <span className="text-[9px] font-mono font-black uppercase tracking-wider text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-lg shadow-sm">
+                                      Mod: {blockOffset > 0 ? `+${blockOffset}` : blockOffset}
+                                    </span>
+                                  )}
+                                  {blockRep && blockRep.totalInRun > 1 && (
+                                    <span className="text-[9px] bg-amber-50 text-amber-700 border border-amber-200 rounded-lg px-2.5 py-0.5 font-mono font-black select-none uppercase tracking-wider shadow-sm">
+                                      Loop: {blockRep.totalInRun}x
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Embedded Lyrics Hints if hidden */}
+                              {!showLyrics && (
+                                <div className="mb-2 p-2.5 bg-slate-50 border border-slate-200 border-l-4 border-l-indigo-500 rounded-r-xl text-[11px] sm:text-xs font-semibold text-slate-600 italic select-none">
+                                  {(() => {
+                                    if (sheetLayoutMode === 'compact') {
+                                      const identicalBlocks = activeRoadmap.filter((b) => areBlocksChordsIdentical(b, block, effectiveSectionTemplates));
+                                      const renderedHints: any[] = [];
+                                      const seenNames = new Set();
+                                      
+                                      identicalBlocks.forEach((b) => {
+                                        if (seenNames.has(b.name)) return;
+                                        seenNames.add(b.name);
+                                        const lines = effectiveSectionTemplates[b.name] || [];
+                                        const firstLyric = lines.find((l) => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
+                                        if (firstLyric) {
+                                          renderedHints.push({ name: b.name, lyric: firstLyric });
+                                        }
+                                      });
+
+                                      if (renderedHints.length > 0) {
+                                        const groups: { lyric: string; names: string[] }[] = [];
+                                        renderedHints.forEach(h => {
+                                          const normLyric = h.lyric.trim();
+                                          const existingGroup = groups.find(g => g.lyric.trim().toLowerCase() === normLyric.toLowerCase());
+                                          if (existingGroup) {
+                                            existingGroup.names.push(h.name);
+                                          } else {
+                                            groups.push({ lyric: h.lyric, names: [h.name] });
+                                          }
+                                        });
+
+                                        const totalTimes = identicalBlocks.length;
+                                        return groups.map((g, gIdx) => (
+                                          <div key={gIdx} className="flex items-center justify-between gap-2 flex-wrap w-full">
+                                            <div className="flex items-center gap-2">
+                                              <span className="text-[9px] font-black uppercase bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded border border-indigo-200 not-italic">
+                                                {g.names.map(n => n.toUpperCase()).join(' & ')}
+                                              </span>
+                                              <span className="truncate text-slate-600">“{g.lyric}”</span>
+                                            </div>
+                                            {totalTimes > 1 && gIdx === 0 && (
+                                              <span className="text-[10px] font-mono font-black text-amber-700 bg-amber-100 border border-amber-200 rounded-lg px-2.5 py-0.5 shadow-sm animate-pulse">
+                                                {totalTimes}x Repeat
+                                              </span>
+                                            )}
+                                          </div>
+                                        ));
+                                      }
+                                    } else {
+                                      const lines = effectiveSectionTemplates[block.name] || [];
+                                      const firstLyric = lines.find((l) => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
+                                      if (firstLyric) {
+                                        return (
+                                          <div className="flex items-center gap-2">
+                                            <span className="font-extrabold text-indigo-400 not-italic">Hint:</span>
+                                            <span className="truncate text-slate-300">“{firstLyric}”</span>
+                                          </div>
+                                        );
+                                      }
+                                    }
+                                    return null;
+                                  })()}
+                                </div>
+                              )}
+
+                              {/* Section Lines */}
+                              <div className="pl-1 sm:pl-3 space-y-3">
+                                {(() => {
+                                  const enabledLinesList = templateLines
+                                    .map((l, lIdx) => ({ l, lIdx }))
+                                    .filter(({ lIdx }) => (block.enabledLines || []).includes(lIdx));
+
+                                  const processedLines = enabledLinesList.map(({ l, lIdx }) => {
+                                    const lineOffset = block.lineOffsets?.[lIdx] || 0;
+                                    const lineTotalSemitonesOffset = totalSemitonesOffset + lineOffset;
+                                    const transposed = transposeChord(l.Chords || '', lineTotalSemitonesOffset);
+                                    const lineBlockKeyName = getModulatedKeyName(currentKey, blockOffset + lineOffset);
+                                    const numbers = getNumberForChord(transposed, lineBlockKeyName, currentKey);
+                                    const lyrics = l.Lyrics || '';
+                                    return {
+                                      l,
+                                      lIdx,
+                                      transposed,
+                                      numbers,
+                                      lyrics,
+                                    };
+                                  });
+
+                                  // Loop pattern detection
+                                  let bestL = -1;
+                                  let bestK = -1;
+                                  const N = processedLines.length;
+
+                                  if (!showLyrics && N >= 4) {
+                                    for (let L = 2; L <= Math.floor(N / 2); L++) {
+                                      let K = 1;
+                                      while ((K + 1) * L <= N) {
+                                        let matches = true;
+                                        for (let offset = 0; offset < L; offset++) {
+                                          const originalChord = processedLines[offset].transposed;
+                                          const nextChord = processedLines[K * L + offset].transposed;
+                                          if (originalChord !== nextChord) {
+                                            matches = false;
+                                            break;
+                                          }
+                                        }
+                                        if (matches) {
+                                          K++;
+                                        } else {
+                                          break;
+                                        }
+                                      }
+
+                                      if (K >= 2) {
+                                        let hasChords = false;
+                                        for (let offset = 0; offset < L; offset++) {
+                                          if (processedLines[offset].transposed && processedLines[offset].transposed.trim() !== '') {
+                                            hasChords = true;
+                                            break;
+                                          }
+                                        }
+
+                                        if (hasChords) {
+                                          if (bestL === -1 || (K * L > bestK * bestL) || (K * L === bestK * bestL && L < bestL)) {
+                                            bestL = L;
+                                            bestK = K;
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+
+                                  // Render with Loop-Grouping
+                                  if (bestL >= 2 && bestK >= 2) {
+                                    const loopLength = bestL;
+                                    const repeatCount = bestK;
+                                    const loopedLinesCount = loopLength * repeatCount;
+
+                                    const lyricsAreIdenticalOrHidden = !showLyrics || (() => {
+                                      for (let r = 1; r < repeatCount; r++) {
+                                        for (let offset = 0; offset < loopLength; offset++) {
+                                          const lineA = processedLines[offset];
+                                          const lineB = processedLines[r * loopLength + offset];
+                                          if ((lineA.lyrics || '') !== (lineB.lyrics || '')) {
+                                            return false;
+                                          }
+                                        }
+                                      }
+                                      return true;
+                                    })();
+
+                                    const loopContainers = [];
+
+                                    if (lyricsAreIdenticalOrHidden) {
+                                      const runLines = processedLines.slice(0, loopLength);
+                                      loopContainers.push(
+                                        <div
+                                          key="loop-run-single"
+                                          className="border border-amber-100 border-l-4 border-l-amber-600 bg-amber-50/50 rounded-r-xl px-4 py-3.5 my-4 space-y-3 shadow-md"
+                                        >
+                                          <div className="flex items-center gap-2 mb-1.5 select-none">
+                                            <span className="text-[10px] font-mono font-black uppercase tracking-wider text-amber-700 bg-amber-100 border border-amber-200 rounded-lg px-2.5 py-0.5 flex items-center gap-1.5 shadow-sm">
+                                              <span>🔁</span> PLAY {repeatCount}X
+                                            </span>
+                                            <span className="text-[10px] text-amber-600 font-sans font-semibold tracking-wide uppercase">
+                                              (Chords progression repeats)
+                                            </span>
+                                          </div>
+
+                                          <div className="space-y-3">
+                                            {runLines.map((lineData) => {
+                                              const { lIdx, transposed, numbers, lyrics } = lineData;
+                                              return (
+                                                <div key={lIdx} className="break-inside-avoid">
+                                                  {displayMode !== 'numbers' && transposed && (
+                                                    <div className="font-mono font-black text-xs sm:text-sm text-indigo-700 tracking-[0.25em] leading-normal mb-1">
+                                                      {parseClickableChords(transposed, blockKeyName)}
+                                                    </div>
+                                                  )}
+                                                  {displayMode !== 'chords' && numbers && (
+                                                    <div className="font-mono font-bold text-[11px] sm:text-[12px] text-indigo-600/60 tracking-[0.2em] leading-normal mb-1">
+                                                      {numbers}
+                                                    </div>
+                                                  )}
+                                                  {showLyrics && lyrics && (
+                                                    <div className="text-[13px] sm:text-[14px] text-slate-800 font-sans font-medium leading-relaxed mt-0.5">
+                                                      {lyrics}
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        </div>
+                                      );
+                                    } else {
+                                      for (let r = 0; r < repeatCount; r++) {
+                                        const runLines = processedLines.slice(r * loopLength, (r + 1) * loopLength);
+                                        loopContainers.push(
+                                          <div
+                                            key={`loop-run-${r}`}
+                                            className="border border-indigo-100 border-l-4 border-l-indigo-600 bg-indigo-50/50 rounded-r-xl px-4 py-3.5 my-4 space-y-3 shadow-md"
+                                          >
+                                            <div className="flex items-center gap-2 mb-1.5 select-none">
+                                              {r === 0 ? (
+                                                <>
+                                                  <span className="text-[10px] font-mono font-black uppercase tracking-wider text-amber-700 bg-amber-100 border border-amber-200 rounded-lg px-2.5 py-0.5 flex items-center gap-1.5 shadow-sm">
+                                                    <span>🔁</span> LOOP ({repeatCount}X) — ROUND 1
+                                                  </span>
+                                                  <span className="text-[10px] text-indigo-600/60 font-sans font-semibold tracking-wide uppercase">
+                                                    (Chords progression repeats)
+                                                  </span>
+                                                </>
+                                              ) : (
+                                                <>
+                                                  <span className="text-[10px] font-mono font-black uppercase tracking-wider text-indigo-700 bg-indigo-100 border border-indigo-200 rounded-lg px-2.5 py-0.5 flex items-center gap-1.5 shadow-sm">
+                                                    <span>🔁</span> ROUND {r + 1}
+                                                  </span>
+                                                  <span className="text-[10px] text-slate-600 font-sans font-semibold tracking-wide uppercase">
+                                                    (Identical chords as Round 1)
+                                                  </span>
+                                                </>
+                                              )}
+                                            </div>
+
+                                            <div className="space-y-3">
+                                              {runLines.map((lineData) => {
+                                                const { lIdx, transposed, numbers, lyrics } = lineData;
+                                                return (
+                                                  <div key={lIdx} className="break-inside-avoid">
+                                                    {displayMode !== 'numbers' && transposed && (
+                                                      <div className="font-mono font-black text-xs sm:text-sm text-indigo-700 tracking-[0.25em] leading-normal mb-1">
+                                                        {parseClickableChords(transposed, blockKeyName)}
+                                                      </div>
+                                                    )}
+                                                    {displayMode !== 'chords' && numbers && (
+                                                      <div className="font-mono font-bold text-[11px] sm:text-[12px] text-indigo-600/60 tracking-[0.2em] leading-normal mb-1">
+                                                        {numbers}
+                                                      </div>
+                                                    )}
+                                                    {showLyrics && lyrics && (
+                                                      <div className="text-[13px] sm:text-[14px] text-slate-800 font-sans font-medium leading-relaxed mt-0.5">
+                                                        {lyrics}
+                                                      </div>
+                                                    )}
+                                                  </div>
+                                                );
+                                              })}
+                                            </div>
+                                          </div>
+                                        );
+                                      }
+                                    }
+
+                                    const remainingLines = processedLines.slice(loopedLinesCount);
+
+                                    return (
+                                      <div className="space-y-3">
+                                        {loopContainers}
+                                        {remainingLines.length > 0 && (
+                                          <div className="pt-4 space-y-3 border-t border-dashed border-slate-200">
+                                            {remainingLines.map((lineData) => {
+                                              const { lIdx, transposed, numbers, lyrics } = lineData;
+                                              return (
+                                                <div key={lIdx} className="break-inside-avoid">
+                                                  {displayMode !== 'numbers' && transposed && (
+                                                    <div className="font-mono font-black text-xs sm:text-sm text-indigo-700 tracking-[0.25em] leading-normal mb-1">
+                                                      {parseClickableChords(transposed, blockKeyName)}
+                                                    </div>
+                                                  )}
+                                                  {displayMode !== 'chords' && numbers && (
+                                                    <div className="font-mono font-bold text-[11px] sm:text-[12px] text-indigo-600/60 tracking-[0.2em] leading-normal mb-1">
+                                                      {numbers}
+                                                    </div>
+                                                  )}
+                                                  {showLyrics && lyrics && (
+                                                    <div className="text-[13px] sm:text-[14px] text-slate-800 font-sans font-medium leading-relaxed mt-0.5">
+                                                      {lyrics}
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  }
+
+                                  // Fallback: consecutive runs
+                                  interface LineRun {
+                                    startIndex: number;
+                                    endIndex: number;
+                                    count: number;
+                                  }
+
+                                  const lineRuns: LineRun[] = [];
+                                  let i = 0;
+                                  while (i < processedLines.length) {
+                                    let j = i + 1;
+                                    while (j < processedLines.length) {
+                                      const lineA = processedLines[i];
+                                      const lineB = processedLines[j];
+
+                                      const chordsIdentical = lineA.transposed === lineB.transposed;
+                                      const lyricsIdentical = !showLyrics || lineA.lyrics === lineB.lyrics;
+
+                                      if (chordsIdentical && lyricsIdentical) {
+                                        j++;
+                                      } else {
+                                        break;
+                                      }
+                                    }
+
+                                    lineRuns.push({
+                                      startIndex: i,
+                                      endIndex: j - 1,
+                                      count: j - i,
+                                    });
+
+                                    i = j;
+                                  }
+
+                                  return lineRuns.map((run) => {
+                                    const firstLine = processedLines[run.startIndex];
+                                    const { lIdx, transposed, numbers, lyrics } = firstLine;
+
+                                    return (
+                                      <div key={lIdx} className="break-inside-avoid leading-normal py-1">
+                                        {displayMode !== 'numbers' && transposed && (
+                                          <div className="font-mono font-black text-xs sm:text-sm text-indigo-700 tracking-[0.25em] leading-normal mb-1.5 flex items-center gap-2 flex-wrap">
+                                            <span>{parseClickableChords(transposed, blockKeyName)}</span>
+                                            {run.count > 1 && (
+                                              <span className="text-[9px] bg-amber-100 text-amber-700 border border-amber-200 rounded px-2 py-0.5 font-mono font-black select-none tracking-normal uppercase">
+                                                {run.count}x
+                                              </span>
+                                            )}
+                                          </div>
+                                        )}
+                                        {displayMode !== 'chords' && numbers && (
+                                          <div className="font-mono font-bold text-[11px] sm:text-[12px] text-indigo-600/60 tracking-[0.2em] leading-normal mb-1 flex items-center gap-2 flex-wrap">
+                                            <span>{numbers}</span>
+                                            {run.count > 1 && displayMode === 'numbers' && (
+                                              <span className="text-[9px] bg-amber-100 text-amber-700 border border-amber-200 rounded px-2 py-0.5 font-mono font-black select-none tracking-normal uppercase">
+                                                {run.count}x
+                                              </span>
+                                            )}
+                                          </div>
+                                        )}
+                                        {showLyrics && lyrics && (
+                                          <div className="text-[13px] sm:text-[14px] text-slate-800 font-sans font-medium leading-relaxed mt-0.5">
+                                            {lyrics}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  });
+                                })()}
+                              </div>
+                            </div>
+                          );
+                        });
+                      })()}
+                    </div>
+
+                  </div>
+
+                  {/* Close of UNIFIED PERFORMANCE PANEL */}
+                  </div>
+
+                </div>
+              )}
+
+            </main>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Login Modal */}
+      {isAdminModalOpen && (
+        <div className="fixed inset-0 bg-[#020205]/80 backdrop-blur-md z-[850] flex items-center justify-center p-4 animate-fadeIn">
+          <div className="w-full max-w-sm bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-6 flex flex-col gap-5 animate-scaleIn">
+            <div className="text-center select-none">
+              <span className="text-3xl">🔓</span>
+              <h2 className="text-base font-black uppercase tracking-wider text-indigo-300 mt-2">
+                Admin Authentication
+              </h2>
+              <p className="text-[10px] text-gray-400 font-medium">
+                Enter your Google Sheet Apps Script credentials to unlock master edit rights.
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-3">
+              <div>
+                <label className="text-[10px] font-bold text-indigo-400 uppercase block mb-1">Username</label>
+                <input
+                  type="text"
+                  value={adminUsernameInput}
+                  onChange={(e) => setAdminUsernameInput(e.target.value)}
+                  placeholder="e.g. admin"
+                  className="w-full bg-indigo-950/60 border border-indigo-500/20 rounded-xl px-3 py-2 text-xs text-indigo-100 focus:outline-none focus:border-indigo-400"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-bold text-indigo-400 uppercase block mb-1">Passkey</label>
+                <input
+                  type="password"
+                  value={adminPasswordInput}
+                  onChange={(e) => setAdminPasswordInput(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full bg-indigo-950/60 border border-indigo-500/20 rounded-xl px-3 py-2 text-xs text-indigo-100 focus:outline-none focus:border-indigo-400"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleVerifyAdmin();
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 border-t border-indigo-500/10 pt-4">
+              <button
+                onClick={() => setIsAdminModalOpen(false)}
+                className="flex-1 py-2 bg-white/5 hover:bg-white/10 text-gray-300 font-bold rounded-xl text-xs uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleVerifyAdmin}
+                className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-xl text-xs uppercase tracking-wider transition-all active:scale-95 shadow-md shadow-indigo-600/20 cursor-pointer"
+              >
+                Login
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Song Edit/Add Modal */}
+      <SongEditModal
+        isOpen={isFormModalOpen}
+        onClose={() => setIsFormModalOpen(false)}
+        editingSong={formEditingSong}
+        songLines={formEditingSong ? songLines : []}
+        appUser={appUser}
+        appSecret={appSecret}
+        scriptUrl={SCRIPT_URL}
+        onSubmitSuccess={() => {
+          setIsFormModalOpen(false);
+          fetchCatalog();
+        }}
+        showToast={showToast}
+        setLoading={setIsLoading}
+      />
+
+      {/* Keyboard Shortcuts Help Modal */}
+      <ShortcutsModal
+        isOpen={isShortcutsOpen}
+        onClose={() => setIsShortcutsOpen(false)}
+      />
+
+      {/* Migrated Active Arrangement Live Designer (Global Top-Level Overlay) */}
+      <ArrangementDAWModal
+        arrangerOpen={arrangerOpen}
+        setArrangerOpen={setArrangerOpen}
+        activeRoadmap={activeRoadmap}
+        setActiveRoadmap={setActiveRoadmap}
+        editingBlockId={editingBlockId}
+        setEditingBlockId={setEditingBlockId}
+        isArrangementLocked={isArrangementLocked}
+        setIsArrangementLocked={setIsArrangementLocked}
+        currentArrangementName={currentArrangementName}
+        setCurrentArrangementName={setCurrentArrangementName}
+        sectionTemplates={sectionTemplates}
+        setSectionTemplates={setSectionTemplates}
+        loadedSnapshotSections={loadedSnapshotSections}
+        setLoadedSnapshotSections={setLoadedSnapshotSections}
+        effectiveSectionTemplates={effectiveSectionTemplates}
+        currentSong={currentSong}
+        songs={songs}
+        songLines={songLines}
+        showToast={showToast}
+        adjustBlockModulation={adjustBlockModulation}
+        deleteRoadmapBlock={deleteRoadmapBlock}
+        addRoadmapBlock={addRoadmapBlock}
+        resetRoadmapBlocks={resetRoadmapBlocks}
+        cancelArrangementEdit={cancelArrangementEdit}
+        executeSaveArrangement={executeSaveArrangement}
+        loadPresetArrangement={loadPresetArrangement}
+        deletePresetArrangement={deletePresetArrangement}
+        getPresets={getPresets}
+        fetchCatalog={fetchCatalog}
+        getModulatedKeyName={getModulatedKeyName}
+        currentKey={currentKey}
+      />
+
+      {/* MOBILE BOTTOM NAVIGATION TAB BAR */}
+      <div className="lg:hidden fixed bottom-0 left-0 right-0 h-16 bg-[#04050f]/95 border-t border-indigo-500/15 backdrop-blur-xl z-[910] px-4 flex items-center justify-around text-center shadow-[0_-10px_35px_rgba(0,0,0,0.5)]">
+        {/* Dashboard Tab */}
+        <button
+          onClick={() => {
+            setCurrentSong(null);
+            setIsNavOpen(false);
+          }}
+          className={`flex flex-col items-center justify-center gap-1 cursor-pointer transition-all ${
+            !currentSong 
+              ? 'text-cyan-400 font-extrabold' 
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <span className="text-lg">📊</span>
+          <span className="text-[9px] font-mono font-black uppercase tracking-wider">Dashboard</span>
+        </button>
+
+        {/* Songs List Tab */}
+        <button
+          onClick={() => {
+            setCurrentTab('songs');
+            setIsNavOpen(true);
+          }}
+          className={`flex flex-col items-center justify-center gap-1 cursor-pointer transition-all ${
+            isNavOpen && currentTab === 'songs'
+              ? 'text-indigo-400 font-extrabold'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <span className="text-lg">🎵</span>
+          <span className="text-[9px] font-mono font-black uppercase tracking-wider">Songs</span>
+        </button>
+
+        {/* Setlists Tab */}
+        <button
+          onClick={() => {
+            setCurrentTab('setlists');
+            setIsNavOpen(true);
+          }}
+          className={`flex flex-col items-center justify-center gap-1 cursor-pointer transition-all ${
+            isNavOpen && currentTab === 'setlists'
+              ? 'text-amber-400 font-extrabold'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <span className="text-lg">📂</span>
+          <span className="text-[9px] font-mono font-black uppercase tracking-wider">Setlists</span>
+        </button>
+
+        {/* Favorites Tab */}
+        <button
+          onClick={() => {
+            setCurrentTab('favorites');
+            setIsNavOpen(true);
+          }}
+          className={`flex flex-col items-center justify-center gap-1 cursor-pointer transition-all ${
+            isNavOpen && currentTab === 'favorites'
+              ? 'text-rose-400 font-extrabold'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <span className="text-lg">❤️</span>
+          <span className="text-[9px] font-mono font-black uppercase tracking-wider">Favs</span>
+        </button>
+
+        {/* Active Song Tab (if loaded) */}
+        {currentSong && (
+          <button
+            onClick={() => {
+              setIsNavOpen(false);
+            }}
+            className={`flex flex-col items-center justify-center gap-1 cursor-pointer transition-all ${
+              !isNavOpen 
+                ? 'text-emerald-400 font-extrabold' 
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <span className="text-lg">📄</span>
+            <span className="text-[9px] font-mono font-black uppercase tracking-wider">Active Sheet</span>
+          </button>
+        )}
+      </div>
+
+      {/* MOBILE PERFORMANCE CONTROLS FLOATING DOCK */}
+      {currentSong && !isNavOpen && (
+        <div className="lg:hidden fixed bottom-18 left-2 right-2 bg-indigo-950/75 backdrop-blur-xl border border-indigo-500/25 rounded-2xl p-3 px-4 z-[900] shadow-[0_12px_40px_rgba(0,0,0,0.6)] flex items-center justify-between gap-3 animate-fadeIn">
+          {/* Transpose */}
+          <div className="flex flex-col items-center gap-1">
+            <span className="text-[8px] font-mono font-black tracking-widest text-indigo-400 uppercase">Key</span>
+            <div className="flex items-center gap-1.5 bg-black/40 border border-indigo-500/15 rounded-lg px-1 py-0.5">
+              <button
+                onClick={() => shiftKey(-1)}
+                className="w-5 h-5 flex items-center justify-center bg-indigo-500/10 hover:bg-indigo-500/25 rounded font-black text-xs text-white"
+              >
+                -
+              </button>
+              <span className="font-mono font-black text-[11px] text-amber-400 min-w-[18px] text-center">
+                {currentKey}
+              </span>
+              <button
+                onClick={() => shiftKey(1)}
+                className="w-5 h-5 flex items-center justify-center bg-indigo-500/10 hover:bg-indigo-500/25 rounded font-black text-xs text-white"
+              >
+                +
+              </button>
+            </div>
+          </div>
+
+          {/* Capo */}
+          <div className="flex flex-col items-center gap-1">
+            <span className="text-[8px] font-mono font-black tracking-widest text-indigo-400 uppercase">Capo</span>
+            <div className="flex items-center gap-1.5 bg-black/40 border border-indigo-500/15 rounded-lg px-1 py-0.5">
+              <button
+                onClick={() => setCapo(prev => Math.max(0, prev - 1))}
+                className="w-5 h-5 flex items-center justify-center bg-indigo-500/10 hover:bg-indigo-500/25 rounded font-black text-xs text-white"
+              >
+                -
+              </button>
+              <span className="font-mono font-black text-[11px] text-emerald-400 min-w-[18px] text-center">
+                {capo}
+              </span>
+              <button
+                onClick={() => setCapo(prev => Math.min(12, prev + 1))}
+                className="w-5 h-5 flex items-center justify-center bg-indigo-500/10 hover:bg-indigo-500/25 rounded font-black text-xs text-white"
+              >
+                +
+              </button>
+            </div>
+          </div>
+
+          {/* Autoscroll */}
+          <div className="flex flex-col items-center gap-1">
+            <span className="text-[8px] font-mono font-black tracking-widest text-indigo-400 uppercase">Autoscroll</span>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={toggleAutoscroll}
+                className={`px-2.5 h-6 rounded-lg text-[9px] font-black uppercase tracking-wider flex items-center justify-center gap-1 transition-all ${
+                  isScrollingActive
+                    ? 'bg-indigo-600 text-white border border-indigo-500'
+                    : 'bg-indigo-500/10 border border-indigo-500/20 text-indigo-200'
+                }`}
+              >
+                {isScrollingActive ? '⏸ Stop' : '▶ Play'}
+              </button>
+              <div className="flex items-center bg-black/40 border border-indigo-500/15 rounded-lg px-1 h-6">
+                <button
+                  onClick={() => setScrollSpeed((prev) => Math.max(0.5, parseFloat((prev - 0.5).toFixed(1))))}
+                  className="w-3 text-center text-indigo-300 hover:text-white text-[10px] font-bold"
+                >
+                  -
+                </button>
+                <span className="w-5 text-center font-mono font-black text-[9px] text-white">
+                  {scrollSpeed}
+                </span>
+                <button
+                  onClick={() => setScrollSpeed((prev) => Math.min(10, parseFloat((prev + 0.5).toFixed(1))))}
+                  className="w-3 text-center text-indigo-300 hover:text-white text-[10px] font-bold"
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Zoom */}
+          <div className="flex flex-col items-center gap-1">
+            <span className="text-[8px] font-mono font-black tracking-widest text-indigo-400 uppercase">Zoom</span>
+            <div className="flex items-center gap-1 bg-black/40 border border-indigo-500/15 rounded-lg px-1 h-6">
+              <button
+                onClick={() => setLyricZoom((prev) => Math.max(0.3, parseFloat((prev - 0.05).toFixed(2))))}
+                className="w-4 text-center text-indigo-300 hover:text-white text-[10px] font-bold"
+              >
+                A-
+              </button>
+              <span className="w-8 text-center font-mono font-black text-[9px] text-indigo-200">
+                {Math.round(lyricZoom * 100)}%
+              </span>
+              <button
+                onClick={() => setLyricZoom((prev) => Math.min(1.5, parseFloat((prev + 0.05).toFixed(2))))}
+                className="w-4 text-center text-indigo-300 hover:text-white text-[10px] font-bold"
+              >
+                A+
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Musician Chords/Theory Visualizer Modal */}
+      <MusicianModal
+        isOpen={isMusicianModalOpen}
+        onClose={() => setIsMusicianModalOpen(false)}
+        chordName={selectedChord}
+      />
+
+      {/* Database Connection Diagnostic Modal */}
+      <DatabaseDiagnosticModal
+        isOpen={isDiagnosticModalOpen}
+        onClose={() => setIsDiagnosticModalOpen(false)}
+        scriptUrl={SCRIPT_URL}
+      />
+
+      {/* PWA Installation & Backend Configuration Modal */}
+      <InstallAndConfigureModal
+        isOpen={isInstallModalOpen}
+        onClose={() => setIsInstallModalOpen(false)}
+        scriptUrl={currentScriptUrl}
+        onSaveScriptUrl={handleSaveScriptUrl}
+        onResetScriptUrl={handleResetScriptUrl}
+        deferredInstallPrompt={deferredInstallPrompt}
+        lastSynced={lastSynced}
+        isOffline={isOfflineMode}
+        onForceSync={fetchCatalog}
+        isAdmin={!!(appUser && appSecret)}
+        onOpenAdmin={() => {
+          setIsInstallModalOpen(false);
+          setIsAdminModalOpen(true);
+        }}
+      />
+
+      {/* Setlist Selector Manager Dialog */}
+      {isSetlistManagerOpen && currentSong && (
+        <SetlistSelectorDialog
+          isOpen={isSetlistManagerOpen}
+          onClose={() => setIsSetlistManagerOpen(false)}
+          currentSong={currentSong}
+          allSharedSetlists={allSharedSetlists}
+          onAddSongToSet={async (setName, arrName) => {
+            await saveSongToSetlist(setName, arrName);
+          }}
+          onRemoveSongFromSet={async (setName, sId) => {
+            await removeSongFromSetlist(setName, sId);
+          }}
+          onCreateNewSetlist={async (setName) => {
+            await createNewSetlistFolder(setName);
+          }}
+          isAdmin={!!(appUser && appSecret)}
+        />
+      )}
+
+      {/* LOAD & CONFIGURE MODAL */}
+      {pendingSongLoad && (
+        <div className="fixed inset-0 bg-[#020205]/85 backdrop-blur-sm z-[999] flex items-center justify-center p-4 animate-fadeIn">
+          <div className="w-full max-w-sm bg-[#0a0b16] border border-indigo-500/20 rounded-xl shadow-[0_20px_50px_rgba(0,0,0,0.7)] p-4 sm:p-5 flex flex-col gap-4 animate-scaleIn relative">
+            
+            {/* Close Button */}
+            <button
+              onClick={() => setPendingSongLoad(null)}
+              className="absolute right-4 top-4 text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all text-xs font-bold z-10"
+              title="Close panel"
+            >
+              ✕
+            </button>
+
+            {/* Header */}
+            <div className="text-left select-none pr-8">
+              <h2 className="text-sm font-black uppercase tracking-wider text-indigo-100">
+                Load & Configure
+              </h2>
+              <p className="font-mono text-[11px] text-indigo-400/80 mt-0.5">
+                {pendingSongLoad.song.Title}
+              </p>
+            </div>
+
+            {/* Config Options Body */}
+            <div className="flex flex-col gap-3.5 text-left">
+              
+              {/* Option 1: Display Mode */}
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[9px] font-black uppercase tracking-widest text-indigo-400 select-none">
+                  Display Mode
+                </span>
+                <div className="grid grid-cols-3 gap-1.5 pb-3 border-b border-indigo-500/10">
+                  {(['chords', 'numbers', 'both'] as const).map((mode) => {
+                    const isSelected = loadConfigDisplayMode === mode;
+                    return (
+                      <button
+                        key={mode}
+                        onClick={() => setLoadConfigDisplayMode(mode)}
+                        className={`py-1.5 px-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-center cursor-pointer transition-all border ${
+                          isSelected
+                            ? 'bg-indigo-600/20 border-indigo-500/60 text-indigo-200 font-black shadow-inner shadow-indigo-500/5'
+                            : 'bg-indigo-950/10 border-indigo-500/5 text-gray-500 hover:border-indigo-500/20 hover:text-gray-300'
+                        }`}
+                      >
+                        {mode}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Option 2: Show Lyrics */}
+              <div className="flex items-center justify-between py-0.5 pb-3 border-b border-indigo-500/10 select-none">
+                <div className="flex flex-col">
+                  <span className="text-[11px] font-bold text-gray-200">
+                    Show Lyrics
+                  </span>
+                  <span className="text-[9px] text-gray-400/80 font-medium">
+                    Display text sheet with chords
+                  </span>
+                </div>
+                <button
+                  onClick={() => setLoadConfigShowLyrics(!loadConfigShowLyrics)}
+                  className={`px-3 py-1 font-black text-[9px] uppercase tracking-wider rounded-md border transition-all cursor-pointer ${
+                    loadConfigShowLyrics
+                      ? 'bg-[#18192a] border border-[#2e3150] text-[#7177a6] hover:text-indigo-300'
+                      : 'bg-slate-900/40 border border-slate-800 text-gray-500 hover:text-gray-400'
+                  }`}
+                >
+                  {loadConfigShowLyrics ? 'ON' : 'OFF'}
+                </button>
+              </div>
+
+              {/* Option 3: Sheet Layout */}
+              <div className="flex items-center justify-between py-0.5 select-none">
+                <div className="flex flex-col">
+                  <span className="text-[11px] font-bold text-gray-200">
+                    Sheet Layout
+                  </span>
+                  <span className="text-[9px] text-gray-400/80 font-medium">
+                    Flow/Sequence vs Compact View
+                  </span>
+                </div>
+                
+                <div className="flex items-center bg-[#131526]/80 border border-[#222440] p-0.5 rounded-lg">
+                  <button
+                    onClick={() => setLoadConfigSheetLayoutMode('sequence')}
+                    className={`px-2.5 py-1 text-[9px] uppercase tracking-wider rounded-md transition-all cursor-pointer select-none font-bold ${
+                      loadConfigSheetLayoutMode === 'sequence'
+                        ? 'bg-indigo-600 text-white border border-indigo-500 shadow-sm shadow-indigo-600/20 font-black'
+                        : 'text-[#7177a6] hover:text-gray-200'
+                    }`}
+                  >
+                    Flow
+                  </button>
+                  <button
+                    onClick={() => setLoadConfigSheetLayoutMode('compact')}
+                    className={`px-2.5 py-1 text-[9px] uppercase tracking-wider rounded-md transition-all cursor-pointer select-none font-bold ${
+                      loadConfigSheetLayoutMode === 'compact'
+                        ? 'bg-amber-600/20 text-[#f59e0b] border border-amber-600/40 font-black'
+                        : 'text-[#7177a6] hover:text-gray-200'
+                    }`}
+                  >
+                    Compact
+                  </button>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Bottom Actions Footer */}
+            <div className="flex items-center gap-2 border-t border-indigo-500/10 pt-3.5 mt-1">
+              <button
+                onClick={() => setPendingSongLoad(null)}
+                className="flex-1 py-1.5 bg-[#181a2f] hover:bg-[#1f213b] text-gray-400 hover:text-gray-300 font-bold rounded-lg text-[10px] uppercase tracking-wider transition-all active:scale-95 cursor-pointer text-center border border-[#2e3150]/40"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  setDisplayMode(loadConfigDisplayMode);
+                  setShowLyrics(loadConfigShowLyrics);
+                  setSheetLayoutMode(loadConfigSheetLayoutMode);
+                  
+                  const { song, forceDefaultArrangement, activeFolderOverride, arrsOverride } = pendingSongLoad;
+                  await executeSongLoad(song, forceDefaultArrangement, activeFolderOverride, arrsOverride);
+                  if (activeFolderOverride) {
+                    setActiveSetlistFolder(activeFolderOverride);
+                  }
+                  setPendingSongLoad(null);
+                }}
+                className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-lg text-[10px] uppercase tracking-wider transition-all active:scale-95 cursor-pointer text-center shadow-md shadow-indigo-600/20"
+              >
+                Generate
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* Sidebar Catalog overlay drawer */}
+      <SidebarCatalog
+        isOpen={isNavOpen}
+        onClose={() => setIsNavOpen(false)}
+        songs={songs}
+        favorites={favorites}
+        setlists={setlists}
+        currentTab={currentTab}
+        onSetTab={setCurrentTab}
+        currentSong={currentSong}
+        onChangeSong={(song) => {
+          setLoadConfigDisplayMode(displayMode);
+          setLoadConfigShowLyrics(showLyrics);
+          setLoadConfigSheetLayoutMode(sheetLayoutMode);
+          setPendingSongLoad({
+            song,
+            forceDefaultArrangement: false
+          });
+          setIsNavOpen(false);
+        }}
+        onOpenAddSongForm={() => {
+          setFormEditingSong(null);
+          setIsFormModalOpen(true);
+        }}
+        isAdmin={!!(appUser && appSecret)}
+        onToggleAdmin={() => setIsAdminModalOpen(true)}
+        onOpenShortcuts={() => setIsShortcutsOpen(true)}
+        onToggleFullScreen={toggleFullScreen}
+        triggerCapability={(cap) => {
+          handleTriggerCapability(cap as any);
+        }}
+        onRunDiagnostics={() => setIsDiagnosticModalOpen(true)}
+        allSharedSetlists={allSharedSetlists}
+        onSaveSetlistOrder={async (setName, updatedSongIds) => {
+          await saveSetlistOrder(setName, updatedSongIds);
+        }}
+        onDeleteSetlist={async (setName) => {
+          await deleteSetlistFolder(setName);
+        }}
+        onRemoveSongFromSetlist={async (setName, songId) => {
+          await removeSongFromSetlist(setName, songId);
+        }}
+        onSelectSongFromSetlist={(song, setName) => {
+          setLoadConfigDisplayMode(displayMode);
+          setLoadConfigShowLyrics(showLyrics);
+          setLoadConfigSheetLayoutMode(sheetLayoutMode);
+          setPendingSongLoad({
+            song,
+            forceDefaultArrangement: false,
+            activeFolderOverride: setName
+          });
+          setIsNavOpen(false);
+        }}
+        onCreateSetlist={async (setName) => {
+          await createNewSetlistFolder(setName);
+        }}
+        onToggleSetlistLock={(setName) => {
+          toggleSetlistLock(setName);
+        }}
+        activeSetlistFolder={activeSetlistFolder}
+        onOpenInstallGuide={() => setIsInstallModalOpen(true)}
+        onDownloadManual={() => {
+          showToast('Downloading Worship Chord Book PDF Manual...', 'success');
+          showToast('Tip: Use the "📄 Print" icon in active header to save sheets directly to A4 PDF!', 'info');
+        }}
+        onDownloadSetlistPDF={(setName) => {
+          setActiveSetlistFolder(setName);
+          setPdfScope('all');
+          setIsPDFPreviewOpen(true);
+          setIsNavOpen(false);
+          showToast(`Prepared merged PDF collection for ${setName}!`, 'success');
+        }}
+      />
 
       {/* Real-time Toasts notifications */}
       <div id="toastContainer" className="fixed bottom-6 right-4 sm:right-6 z-[950] flex flex-col gap-2 pointer-events-none w-full max-w-[90vw] sm:max-w-xs">

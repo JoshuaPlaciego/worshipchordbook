@@ -23,6 +23,7 @@ export interface RoadmapBlock {
   name: string;
   enabledLines: number[];
   keyOffset: number;
+  lineOffsets?: { [lineIndex: number]: number };
 }
 
 export interface SectionEdit {

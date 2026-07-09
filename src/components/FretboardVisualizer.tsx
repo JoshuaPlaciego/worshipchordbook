@@ -21,7 +21,7 @@ interface FretboardVisualizerProps {
 export const FretboardVisualizer: React.FC<FretboardVisualizerProps> = ({
   numStrings,
   numFrets,
-  dots,
+  dots = [],
   minFret = 1,
   sequenceLine = false,
   boxName = "",

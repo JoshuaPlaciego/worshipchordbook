@@ -1,0 +1,103 @@
+cat << 'INNER_EOF' > replacement.txt
+  const saveSongToSetlist = async (setName: string, arrangementName: string) => {
+    if (isSetlistLocked(setName) && !(appUser && appSecret)) {
+      showToast(`Setlist "${setName}" is locked by an admin. Modifying is restricted.`, 'error');
+      return;
+    }
+    if (!currentSong) return;
+
+    const isDuplicate = syncedSheetArrangements.some((arr) => {
+      if (String(arr.SongID) !== String(currentSong.SongID)) return false;
+      if (arr.PresetName === arrangementName) return true;
+      try {
+        const parsed = JSON.parse(arr.RoadmapJSON);
+        if (
+          parsed &&
+          parsed.arrangementName &&
+          parsed.arrangementName.trim().toLowerCase() === arrangementName.trim().toLowerCase()
+        ) {
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    });
+
+    if (isDuplicate) {
+      showToast(`Arrangement name "${arrangementName}" already exists for this song.`, 'error');
+      throw new Error(`Duplicate arrangement name`);
+    }
+
+    setIsLoading(true);
+    try {
+      const capturedSettings = {
+        key: currentKey,
+        roadmap: originalRoadmap,
+        arrangementName: arrangementName,
+        snapshotSections: sectionTemplates,
+      };
+
+      const payloadArrangement = {
+        action: 'saveArrangement',
+        songId: String(currentSong.SongID),
+        name: `Set: ${setName}`,
+        roadmap: capturedSettings,
+      };
+
+      const resArr = await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify(payloadArrangement),
+      });
+
+      const resArrJson = await resArr.json();
+      if (resArrJson.status !== 'success') {
+        throw new Error(resArrJson.message || 'Failed to save arrangement');
+      }
+
+      const existingMeta = allSharedSetlists.find(
+        (sl) => sl.PresetName === setName
+      );
+      let songIds: string[] = [];
+      if (existingMeta) {
+        try {
+          const parsed = JSON.parse(existingMeta.RoadmapJSON);
+          songIds = Array.isArray(parsed.songIds) ? parsed.songIds : [];
+        } catch {}
+      }
+
+      const sId = String(currentSong.SongID);
+      if (!songIds.includes(sId)) {
+        songIds.push(sId);
+      }
+
+      const payloadMeta = {
+        action: 'saveSetlist',
+        name: setName,
+        roadmap: { songIds, lastUpdated: Date.now(), locked: isSetlistLocked(setName) },
+      };
+
+      const resMeta = await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify(payloadMeta),
+      });
+
+      const resMetaJson = await resMeta.json();
+      if (resMetaJson.status !== 'success') {
+        throw new Error(resMetaJson.message || 'Failed to save setlist metadata');
+      }
+
+      showToast(`Added to "${setName}" as "${arrangementName}" (using Default flow)`, 'success');
+      setIsSetlistManagerOpen(false);
+      setCurrentTab('songs');
+      await refetchArrangements();
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || 'Failed to save to Setlist', 'error');
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+INNER_EOF
+
+# Replace lines 560 to 630 with the replacement.txt
+sed -i '560,630c\'"$(cat replacement.txt | sed -z 's/\n/\\n/g')" src/App.tsx

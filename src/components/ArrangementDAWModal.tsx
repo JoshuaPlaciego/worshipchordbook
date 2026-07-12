@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Song, SongLine, RoadmapBlock } from '../types';
 import { transposeChord } from '../utils';
+import { MarqueeTitle } from './MarqueeTitle';
 import { 
   Music, Plus, Trash2, Lock, Unlock, Save, RefreshCw, 
   Sparkles, ChevronRight, ChevronLeft, Layers, Grid, Type, 
@@ -33,13 +34,17 @@ interface ArrangementDAWModalProps {
   addRoadmapBlock: (name: string) => void;
   resetRoadmapBlocks: () => void;
   cancelArrangementEdit: () => void;
-  executeSaveArrangement: (name: string, isDefault: boolean, rmap: any[]) => Promise<any>;
-  loadPresetArrangement: (name: string) => void;
-  deletePresetArrangement: (name: string, isActive: boolean) => void;
+  executeSaveArrangement: (name: string, isDefault: boolean, rmap: any[], saveLocallyOnly?: boolean) => Promise<any>;
+  loadPresetArrangement: (name: string, source?: 'online' | 'local') => void;
+  deletePresetArrangement: (name: string, isActive: boolean, source?: 'online' | 'local') => void;
   getPresets: () => any;
   fetchCatalog: () => Promise<void>;
   getModulatedKeyName: (key: string, offset: number) => string;
   currentKey: string;
+  setCurrentKey?: (key: string) => void;
+  isAdmin: boolean;
+  syncedSheetArrangements: any[];
+  activeSetlistFolder?: string;
 }
 
 export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
@@ -74,11 +79,185 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
   fetchCatalog,
   getModulatedKeyName,
   currentKey,
+  setCurrentKey,
+  isAdmin,
+  syncedSheetArrangements,
+  activeSetlistFolder,
 }) => {
   const [isSavingPreset, setIsSavingPreset] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [isDirectorMode, setIsDirectorMode] = useState(true);
+
+  // Global cursor loading state integration
+  useEffect(() => {
+    const incrementProcessing = () => {
+      if (typeof window !== 'undefined') {
+        (window as any).__processingCount = ((window as any).__processingCount || 0) + 1;
+        document.body.classList.add('app-processing');
+      }
+    };
+
+    const decrementProcessing = () => {
+      if (typeof window !== 'undefined') {
+        (window as any).__processingCount = Math.max(0, ((window as any).__processingCount || 0) - 1);
+        if ((window as any).__processingCount === 0) {
+          document.body.classList.remove('app-processing');
+        }
+      }
+    };
+
+    const isProcessing = isSavingPreset || isSyncing;
+
+    if (isProcessing) {
+      incrementProcessing();
+    } else {
+      decrementProcessing();
+    }
+
+    return () => {
+      if (isProcessing) {
+        decrementProcessing();
+      }
+    };
+  }, [isSavingPreset, isSyncing]);
+
+  const isDirectorMode = true;
   const [isManualOpen, setIsManualOpen] = useState(false);
+  const [arrangementsTab, setArrangementsTab] = useState<'online' | 'local'>('local');
+  const [adminSaveTarget, setAdminSaveTarget] = useState<'online' | 'local'>('online');
+  const isSavingLocally = !isAdmin || adminSaveTarget === 'local';
+  const [loadedFromSource, setLoadedFromSource] = useState<'online' | 'local'>('local');
+  const [tickedOnlineArrangements, setTickedOnlineArrangements] = useState<Set<string>>(new Set());
+  const [localRefreshTrigger, setLocalRefreshTrigger] = useState(0);
+  const [showSidebar, setShowSidebar] = useState(false);
+
+  useEffect(() => {
+    const isFallback = String(currentSong?.SongID).startsWith('fallback-');
+    const defaultTab = (isAdmin && !isFallback) ? 'online' : 'local';
+    setArrangementsTab(defaultTab);
+    setLoadedFromSource(defaultTab);
+    if (isFallback) {
+      setAdminSaveTarget('local');
+    } else {
+      setAdminSaveTarget(isAdmin ? 'online' : 'local');
+    }
+  }, [isAdmin, currentSong?.SongID]);
+
+  const onlineArrangementNames = useMemo(() => {
+    const seen = new Set<string>();
+    const names: string[] = [];
+    (syncedSheetArrangements || []).forEach(arr => {
+      if (arr.PresetName && !arr.PresetName.startsWith('Set: ')) {
+        const norm = arr.PresetName.trim().toLowerCase();
+        if (!seen.has(norm)) {
+          seen.add(norm);
+          names.push(arr.PresetName);
+        }
+      }
+    });
+    return names;
+  }, [syncedSheetArrangements]);
+
+  const isOnlineArrNameSelected = useMemo(() => {
+    return onlineArrangementNames.some(name => name.trim().toLowerCase() === currentArrangementName.trim().toLowerCase());
+  }, [onlineArrangementNames, currentArrangementName]);
+
+  const isViewOnlyOnlineSequence = !isAdmin && loadedFromSource === 'online';
+
+  useEffect(() => {
+    if (isViewOnlyOnlineSequence) {
+      setIsArrangementLocked(true);
+    }
+  }, [isViewOnlyOnlineSequence, setIsArrangementLocked]);
+
+  const localArrangementNames = useMemo(() => {
+    const namesSet = new Set<string>();
+    try {
+      const local = localStorage.getItem(`custom_arrangements_${currentSong?.SongID}`);
+      if (local) {
+        const localObj = JSON.parse(local);
+        Object.keys(localObj).forEach(key => {
+          if (key && !key.toLowerCase().trim().startsWith('set:')) {
+            namesSet.add(key);
+          }
+        });
+      }
+    } catch {}
+
+    try {
+      const localArrsRaw = localStorage.getItem('local_setlist_arrangements');
+      if (localArrsRaw) {
+        const localArrs = JSON.parse(localArrsRaw);
+        localArrs.forEach((arr: any) => {
+          if (String(arr.SongID) === String(currentSong?.SongID) && arr.PresetName) {
+            if (!arr.PresetName.toLowerCase().trim().startsWith('set:')) {
+              namesSet.add(arr.PresetName);
+            }
+          }
+        });
+      }
+    } catch {}
+
+    return Array.from(namesSet);
+  }, [currentSong?.SongID, activeRoadmap, isSavingPreset, arrangerOpen, localRefreshTrigger]);
+
+  const toggleTickOnline = (name: string) => {
+    setTickedOnlineArrangements(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) {
+        next.delete(name);
+      } else {
+        next.add(name);
+      }
+      return next;
+    });
+  };
+
+  const copyTickedToLocal = async () => {
+    if (tickedOnlineArrangements.size === 0) {
+      showToast('Please select (tick) at least one online arrangement to copy!', 'warning');
+      return;
+    }
+
+    setIsSavingPreset(true);
+    let successCount = 0;
+    try {
+      const localRaw = localStorage.getItem(`custom_arrangements_${currentSong?.SongID}`) || '{}';
+      const localObj = JSON.parse(localRaw);
+
+      for (const name of tickedOnlineArrangements) {
+        const match = (syncedSheetArrangements || []).find(arr => arr.PresetName === name);
+        if (match) {
+          try {
+            const parsedRoadmap = JSON.parse(match.RoadmapJSON);
+            const blocksArray = Array.isArray(parsedRoadmap) ? parsedRoadmap : (parsedRoadmap.roadmap || []);
+            const targetKey = parsedRoadmap.key || currentSong?.OriginalKey || 'C';
+            const targetSections = parsedRoadmap.snapshotSections || null;
+
+            localObj[name] = {
+              roadmap: blocksArray,
+              key: targetKey,
+              arrangementName: name,
+              snapshotSections: targetSections,
+            };
+            successCount++;
+          } catch (e) {
+            console.error(`Error copying ${name}:`, e);
+          }
+        }
+      }
+
+      localStorage.setItem(`custom_arrangements_${currentSong?.SongID}`, JSON.stringify(localObj));
+      setLocalRefreshTrigger(prev => prev + 1);
+      setArrangementsTab('local');
+      setLoadedFromSource('local');
+      setTickedOnlineArrangements(new Set());
+      showToast(`Successfully copied ${successCount} arrangement(s) to local arrangements!`, 'success');
+    } catch (e) {
+      showToast('Could not copy selected arrangements to local storage.', 'error');
+    } finally {
+      setIsSavingPreset(false);
+    }
+  };
   
   // Pull from other song states
   const [isPulling, setIsPulling] = useState(false);
@@ -90,13 +269,47 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
   
   // Timeline Ref for horizontal scroll tracking and Minimap viewport
   const timelineViewportRef = useRef<HTMLDivElement>(null);
+  const chordsViewportRef = useRef<HTMLDivElement>(null);
+  const lyricsViewportRef = useRef<HTMLDivElement>(null);
   const [timelineScrollState, setTimelineScrollState] = useState({ scrollLeft: 0, scrollWidth: 1, clientWidth: 1 });
+  const activeScrollSourceRef = useRef<string | null>(null);
 
-  // Update timeline viewport measurements
+  // Scroll synchronization helper to align horizontal scroll positions across tracks
+  const syncScroll = (
+    scrolledRef: React.RefObject<HTMLDivElement | null>,
+    targetRefs: React.RefObject<HTMLDivElement | null>[]
+  ) => {
+    const source = scrolledRef.current;
+    if (!source) return;
+    const scrollLeft = source.scrollLeft;
+    targetRefs.forEach((ref) => {
+      const target = ref.current;
+      if (target && target.scrollLeft !== scrollLeft) {
+        target.scrollLeft = scrollLeft;
+      }
+    });
+  };
+
+  // Update timeline viewport measurements and synchronize target tracks
   const handleTimelineScroll = () => {
     if (timelineViewportRef.current) {
       const { scrollLeft, scrollWidth, clientWidth } = timelineViewportRef.current;
       setTimelineScrollState({ scrollLeft, scrollWidth: scrollWidth || 1, clientWidth: clientWidth || 1 });
+      if (activeScrollSourceRef.current === 'timeline') {
+        syncScroll(timelineViewportRef, [chordsViewportRef, lyricsViewportRef]);
+      }
+    }
+  };
+
+  const handleChordsScroll = () => {
+    if (activeScrollSourceRef.current === 'chords') {
+      syncScroll(chordsViewportRef, [timelineViewportRef, lyricsViewportRef]);
+    }
+  };
+
+  const handleLyricsScroll = () => {
+    if (activeScrollSourceRef.current === 'lyrics') {
+      syncScroll(lyricsViewportRef, [timelineViewportRef, chordsViewportRef]);
     }
   };
 
@@ -205,35 +418,12 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
             </div>
             <div className="text-left">
               <div className="flex items-center gap-2">
-                <div className="flex items-center bg-black/80 border border-indigo-500/30 rounded-lg p-1 select-none font-mono text-[9px] font-black shadow-inner">
-                  <button
-                    onClick={() => {
-                      setIsDirectorMode(false);
-                      showToast('Switched to Stage-Safe Basic User Mode', 'info');
-                    }}
-                    className={`px-3 py-1 rounded-md transition-all cursor-pointer flex items-center gap-1 ${
-                      !isDirectorMode 
-                        ? 'bg-teal-500/20 text-teal-300 border border-teal-500/30 shadow-[0_0_8px_rgba(20,184,166,0.15)] font-black' 
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    <span>👤</span>
-                    <span>BASIC USER (STAGE SAFE)</span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      setIsDirectorMode(true);
-                      showToast('Switched to Director Studio Mode', 'success');
-                    }}
-                    className={`px-3 py-1 rounded-md transition-all cursor-pointer flex items-center gap-1 ${
-                      isDirectorMode 
-                        ? 'bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 shadow-[0_0_8px_rgba(99,102,241,0.2)] font-black' 
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    <span>🎛️</span>
-                    <span>DIRECTOR (FULL EDITOR)</span>
-                  </button>
+                <div className={`flex items-center px-3 py-1 bg-black/60 border rounded-lg font-mono text-[9px] font-black tracking-widest ${
+                  isAdmin 
+                    ? 'border-indigo-500/40 text-indigo-400 shadow-[0_0_8px_rgba(99,102,241,0.15)]' 
+                    : 'border-teal-500/40 text-teal-400 shadow-[0_0_8px_rgba(20,184,166,0.15)]'
+                }`}>
+                  {isAdmin ? '🔓 ADMIN MODE' : '👁️ VIEWER MODE'}
                 </div>
                 {isArrangementLocked && (
                   <span className="text-[9px] font-mono font-black uppercase tracking-widest text-amber-400 bg-amber-500/10 px-2 py-1 rounded border border-amber-500/20">
@@ -241,10 +431,16 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
                   </span>
                 )}
               </div>
-              <h2 className="text-sm font-black text-white uppercase tracking-wider flex items-center gap-1.5 mt-0.5">
-                <span>{currentSong?.Title || 'Song'} Arranger Studio</span>
-                <span className="text-[10px] text-indigo-300 font-bold font-mono">({currentKey})</span>
-              </h2>
+              <div className="flex items-center gap-1.5 mt-0.5 max-w-[180px] sm:max-w-[280px] md:max-w-[380px] overflow-hidden shrink min-w-0">
+                <div className="h-[24px] flex items-center justify-start overflow-hidden w-full">
+                  <MarqueeTitle
+                    title={`${currentSong?.Title || 'Song'} Arranger Studio`}
+                    alignment="left"
+                    textSizeClass="text-sm font-black text-white"
+                  />
+                </div>
+                <span className="text-[10px] text-indigo-300 font-bold font-mono shrink-0">({currentKey})</span>
+              </div>
             </div>
           </div>
 
@@ -279,6 +475,16 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
           {/* Quick HUD controls */}
           <div className="flex items-center gap-2">
             <button
+              type="button"
+              onClick={() => setShowSidebar(!showSidebar)}
+              className="lg:hidden px-3 py-2 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/35 text-indigo-300 rounded-lg text-xs font-black uppercase tracking-wider transition-all cursor-pointer flex items-center gap-1.5 shadow-sm shadow-indigo-500/10"
+              title="Toggle Director Deck (Signals & Arrangements)"
+            >
+              <Database className="w-3.5 h-3.5 text-indigo-400" />
+              <span>{showSidebar ? 'Hide Deck' : 'Show Deck'}</span>
+            </button>
+
+            <button
               onClick={() => setIsManualOpen(true)}
               className="px-3 py-2 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/35 text-indigo-300 rounded-lg text-xs font-black uppercase tracking-wider transition-all cursor-pointer flex items-center gap-1.5 shadow-sm shadow-indigo-500/10"
             >
@@ -286,17 +492,28 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
               <span>How To Use</span>
             </button>
 
-            <button
-              onClick={() => setIsArrangementLocked(!isArrangementLocked)}
-              className={`p-2 rounded-lg border font-mono text-[10px] uppercase font-bold tracking-widest transition-all cursor-pointer flex items-center gap-1.5 ${
-                isArrangementLocked 
-                  ? 'bg-amber-950/30 border-amber-500/30 text-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.1)]' 
-                  : 'bg-emerald-950/30 border-emerald-500/30 text-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.1)]'
-              }`}
-            >
-              {isArrangementLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
-              <span className="hidden sm:inline">{isArrangementLocked ? 'Locked' : 'Unlocked'}</span>
-            </button>
+            {isViewOnlyOnlineSequence ? (
+              <button
+                disabled={true}
+                className="p-2 rounded-lg border font-mono text-[10px] uppercase font-bold tracking-widest bg-amber-950/25 border-amber-500/20 text-amber-400/50 cursor-not-allowed flex items-center gap-1.5 shadow-[0_0_8px_rgba(245,158,11,0.05)]"
+                title="Online arrangements are view-only in Viewer Mode. Copy to Local to edit."
+              >
+                <Lock className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Online Locked</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => setIsArrangementLocked(!isArrangementLocked)}
+                className={`p-2 rounded-lg border font-mono text-[10px] uppercase font-bold tracking-widest transition-all cursor-pointer flex items-center gap-1.5 ${
+                  isArrangementLocked 
+                    ? 'bg-amber-950/30 border-amber-500/30 text-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.1)]' 
+                    : 'bg-emerald-950/30 border-emerald-500/30 text-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.1)]'
+                }`}
+              >
+                {isArrangementLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                <span className="hidden sm:inline">{isArrangementLocked ? 'Locked' : 'Unlocked'}</span>
+              </button>
+            )}
 
             <button
               onClick={() => setArrangerOpen(false)}
@@ -312,18 +529,52 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
           
           {/* LEFT SIDEBAR: "DIRECTOR DECK" */}
           {isDirectorMode && (
-            <div className="w-72 border-r border-indigo-500/15 bg-[#08091a]/95 flex flex-col overflow-y-auto custom-scrollbar shrink-0 hidden lg:flex p-4 gap-4 text-left">
-            
-            {/* SIGNAL INJECTOR: Click to Insert Block */}
-            <div className="flex flex-col gap-2.5">
-              <div className="flex items-center gap-1.5 border-b border-indigo-500/10 pb-2">
-                <Radio className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
-                <span className="text-[10px] font-black uppercase tracking-widest text-indigo-300">
-                  Signal Ingestor Panel
-                </span>
+            <div className={`w-72 border-r border-indigo-500/15 bg-[#08091a] flex flex-col overflow-y-auto custom-scrollbar shrink-0 p-4 gap-4 text-left ${
+              showSidebar 
+                ? 'flex fixed inset-y-0 left-0 z-50 pt-24 shadow-2xl w-72 border-r border-indigo-500/30 bg-[#08091a]' 
+                : 'hidden'
+            } lg:flex lg:relative lg:inset-auto lg:z-auto lg:pt-4`}>
+              
+              {/* Mobile close button inside sidebar */}
+              <div className="lg:hidden flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowSidebar(false)}
+                  className="text-[9px] font-mono font-black uppercase text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-1 rounded"
+                >
+                  ✕ Close Panel
+                </button>
               </div>
+
+              {/* SAVING LOCALLY NOTICE BANNER */}
+              {isSavingLocally && (
+                <div className="p-3 bg-amber-950/25 border border-amber-500/20 rounded-xl flex flex-col gap-1 shadow-[0_0_15px_rgba(245,158,11,0.03)] transition-all duration-300 hover:border-amber-500/35">
+                  <div className="flex items-center gap-1.5 text-amber-400 font-sans font-black text-[9px] uppercase tracking-widest">
+                    <span className="flex h-1.5 w-1.5 relative">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-500"></span>
+                    </span>
+                    Local Mode Active
+                  </div>
+                  <p className="text-[9px] leading-relaxed text-amber-200/70 font-medium">
+                    {!isAdmin 
+                      ? "You are in Viewer Mode. All arrangement saves, timeline adjustments, and modifications are stored in your browser's local storage only."
+                      : "Local Only destination selected. Updates will not sync with the cloud sheet."
+                    }
+                  </p>
+                </div>
+              )}
+            
+              {/* SIGNAL INJECTOR: Click to Insert Block */}
+              <div className="flex flex-col gap-2.5">
+                <div className="flex items-center gap-1.5 border-b border-indigo-500/10 pb-2">
+                  <Radio className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
+                  <span className="text-[10px] font-black uppercase tracking-widest text-indigo-300">
+                    Signal Ingestor Panel
+                  </span>
+                </div>
               <p className="text-[10px] text-gray-400 font-medium leading-normal -mt-1 mb-1">
-                Inject audio sequence blocks straight into your live timeline deck.
+                Inject audio arrangement blocks straight into your live timeline deck.
               </p>
               
               <div className="grid grid-cols-2 gap-2">
@@ -354,13 +605,13 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
               </div>
             </div>
 
-            {/* PRESETS ENGINE: Shared Band Presets */}
+            {/* ARRANGEMENTS ENGINE: Shared Band Arrangements */}
             <div className="flex flex-col gap-2.5 pt-2 border-t border-indigo-500/10 mt-2">
               <div className="flex items-center justify-between border-b border-indigo-500/10 pb-2">
                 <div className="flex items-center gap-1.5">
                   <Database className="w-3.5 h-3.5 text-emerald-400" />
                   <span className="text-[10px] font-black uppercase tracking-widest text-indigo-300">
-                    Master Presets Deck
+                    Master Arrangements Deck
                   </span>
                 </div>
                 
@@ -383,47 +634,190 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
                 </button>
               </div>
 
+              {activeSetlistFolder && (
+                <div className="flex flex-col gap-1.5 p-2 bg-amber-500/5 border border-amber-500/20 rounded-xl">
+                  <span className="text-[9px] font-mono font-black uppercase text-amber-400 tracking-wider flex items-center gap-1">
+                    📌 Setlist Context: {activeSetlistFolder}
+                  </span>
+                  {(() => {
+                    const setlistArrName = `Set: ${activeSetlistFolder}`;
+                    const savedArrName = (() => {
+                      // 1. Try local arrangements first
+                      try {
+                        const localArrsRaw = localStorage.getItem('local_setlist_arrangements');
+                        if (localArrsRaw) {
+                          const localArrs = JSON.parse(localArrsRaw);
+                          const found = localArrs.find(
+                            (arr: any) =>
+                              String(arr.SongID) === String(currentSong?.SongID) &&
+                              arr.PresetName.toLowerCase().trim() === `set: ${activeSetlistFolder}`.toLowerCase().trim()
+                          );
+                          if (found) {
+                            const parsed = JSON.parse(found.RoadmapJSON);
+                            return parsed.arrangementName;
+                          }
+                        }
+                      } catch {}
+
+                      // 2. Try synced sheet arrangements
+                      const matchingArr = (syncedSheetArrangements || []).find(
+                        (arr: any) => arr && String(arr.SongID) === String(currentSong?.SongID) && arr.PresetName === `Set: ${activeSetlistFolder}`
+                      );
+                      if (matchingArr) {
+                        try {
+                          const parsed = JSON.parse(matchingArr.RoadmapJSON);
+                          return parsed.arrangementName;
+                        } catch {}
+                      }
+                      return null;
+                    })() || 'Default';
+
+                    // Check if current arrangement matches setlist arrangement blocks or name
+                    const isSetlistArrActive = (() => {
+                      if (currentArrangementName === setlistArrName) return true;
+                      
+                      const setPreset = (window as any).getSetlistArrangement?.(activeSetlistFolder, String(currentSong?.SongID));
+                      if (setPreset) {
+                        try {
+                          const settings = JSON.parse(setPreset.RoadmapJSON);
+                          const blocksArray = settings && typeof settings === 'object' && !Array.isArray(settings) ? (settings.roadmap || []) : settings;
+                          if (Array.isArray(blocksArray) && (window as any).areRoadmapsIdentical?.(blocksArray, activeRoadmap)) {
+                            return true;
+                          }
+                        } catch {}
+                      }
+                      return false;
+                    })();
+
+                    return (
+                      <div
+                        className={`flex flex-col gap-1 p-2 rounded-lg border transition-all ${
+                          isSetlistArrActive
+                            ? 'bg-amber-950/45 border-amber-500/40 text-amber-200 shadow-md shadow-amber-950/25'
+                            : 'bg-black/20 border-indigo-500/5 text-indigo-200 hover:bg-indigo-900/20'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              loadPresetArrangement(setlistArrName, 'local');
+                              setLoadedFromSource('local');
+                              showToast(`Loaded "${savedArrName}" arrangement for "${activeSetlistFolder}"`, 'success');
+                            }}
+                            className="flex-1 text-left font-sans font-extrabold text-xs truncate py-1 cursor-pointer flex items-center gap-1.5"
+                            title={`Click to load "${savedArrName}" arrangement for this song in ${activeSetlistFolder}`}
+                          >
+                            <span className="text-xs">🎵</span>
+                            <span className="truncate">Arrangement: "{savedArrName}"</span>
+                          </button>
+                          <span className="text-[8px] font-mono font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1 rounded uppercase tracking-wider shrink-0 select-none">
+                            {isSetlistArrActive ? 'Active' : 'Setlist'}
+                          </span>
+                        </div>
+                        <div className="text-[9px] text-gray-400 pl-4.5">
+                          Saved inside folder: <span className="text-indigo-300 font-semibold">{activeSetlistFolder}</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* Tab Selector for Online vs Local */}
+              <div className="flex gap-1 bg-black/40 border border-indigo-500/15 p-1 rounded-lg">
+                <button
+                  type="button"
+                  onClick={() => setArrangementsTab('online')}
+                  className={`flex-1 py-1 rounded text-[9px] font-mono font-bold uppercase transition-all cursor-pointer text-center ${
+                    arrangementsTab === 'online'
+                      ? 'bg-indigo-600/30 text-indigo-300 border border-indigo-500/30'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Online ({onlineArrangementNames.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setArrangementsTab('local')}
+                  className={`flex-1 py-1 rounded text-[9px] font-mono font-bold uppercase transition-all cursor-pointer text-center relative ${
+                    arrangementsTab === 'local'
+                      ? isSavingLocally
+                        ? 'bg-amber-600/30 text-amber-300 border border-amber-500/40 shadow-[0_0_8px_rgba(245,158,11,0.1)] font-black'
+                        : 'bg-indigo-600/30 text-indigo-300 border border-indigo-500/30'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Local ({localArrangementNames.length})
+                  {isSavingLocally && (
+                    <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                    </span>
+                  )}
+                </button>
+              </div>
+
               {/* Saved Arrangements list */}
               {(() => {
-                const presets = getPresets();
-                const presetNames = Object.keys(presets).filter(name => !name.startsWith('Set:'));
-                if (presetNames.length === 0) {
+                const currentTabNames = arrangementsTab === 'online' ? onlineArrangementNames : localArrangementNames;
+
+                if (currentTabNames.length === 0) {
                   return (
                     <div className="text-gray-500 italic text-[10px] py-4 text-center bg-black/20 rounded-xl border border-dashed border-indigo-500/10">
-                      No presets saved yet
+                      No {arrangementsTab} arrangements saved yet
                     </div>
                   );
                 }
                 return (
                   <div className="flex flex-col gap-1.5 max-h-[140px] overflow-y-auto custom-scrollbar pr-1">
-                    {presetNames.map((name) => {
+                    {currentTabNames.map((name) => {
                       const isActive = currentArrangementName === name;
+                      const canDelete = arrangementsTab === 'local' || isAdmin;
                       return (
                         <div
                           key={name}
                           className={`group flex items-center justify-between px-2.5 py-1.5 rounded-lg border transition-all ${
                             isActive
-                              ? 'bg-indigo-950/40 border-indigo-500/40 text-white'
+                              ? isSavingLocally && arrangementsTab === 'local'
+                                ? 'bg-amber-950/40 border-amber-500/40 text-amber-200 shadow-md shadow-amber-950/25'
+                                : 'bg-indigo-950/40 border-indigo-500/40 text-white'
                               : 'bg-black/20 border-indigo-500/5 text-indigo-200 hover:bg-indigo-900/20'
                           }`}
                         >
+                          {arrangementsTab === 'online' && (
+                            <input
+                              type="checkbox"
+                              checked={tickedOnlineArrangements.has(name)}
+                              onChange={() => toggleTickOnline(name)}
+                              className="w-3.5 h-3.5 rounded border-indigo-500/30 text-indigo-600 bg-black/40 focus:ring-0 cursor-pointer mr-2.5 accent-indigo-500 shrink-0"
+                              title="Select to copy to local"
+                            />
+                          )}
                           <button
                             onClick={() => {
-                              loadPresetArrangement(name);
-                              showToast(`Loaded "${name}" sequence successfully`, 'success');
+                              loadPresetArrangement(name, arrangementsTab);
+                              setLoadedFromSource(arrangementsTab);
+                              showToast(`Loaded "${name}" arrangement successfully`, 'success');
+                              setShowSidebar(false);
                             }}
                             className="flex-1 text-left font-sans font-bold text-xs truncate py-0.5 cursor-pointer"
                             title={`Load arrangement: ${name}`}
                           >
                             {name}
                           </button>
-                          <button
-                            onClick={() => deletePresetArrangement(name, isActive)}
-                            className="text-gray-500 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 cursor-pointer"
-                            title="Delete preset"
-                          >
-                            ✕
-                          </button>
+                          {canDelete && (
+                            <button
+                              onClick={async () => {
+                                await deletePresetArrangement(name, isActive, arrangementsTab);
+                                setLocalRefreshTrigger(prev => prev + 1);
+                              }}
+                              className="text-gray-500 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 cursor-pointer"
+                              title="Delete arrangement"
+                            >
+                              ✕
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -431,38 +825,233 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
                 );
               })()}
 
-              {/* Save preset form */}
-              <div className="flex flex-col gap-2 mt-1">
+              {/* Copy Selected to Local Button */}
+              {arrangementsTab === 'online' && tickedOnlineArrangements.size > 0 && (
+                <button
+                  type="button"
+                  onClick={copyTickedToLocal}
+                  className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-lg text-[10px] uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-emerald-600/15 mt-1"
+                >
+                  <Copy className="w-3 h-3" />
+                  <span>Copy {tickedOnlineArrangements.size} Selected to Local</span>
+                </button>
+              )}
+
+              {/* Save arrangement form */}
+              <div className={`flex flex-col gap-2 mt-1 p-2.5 rounded-xl border-2 transition-all duration-300 ${
+                isSavingLocally 
+                  ? 'bg-slate-900/40 border-[#94a3b8]/40 shadow-[0_0_12px_rgba(148,163,184,0.05)]' 
+                  : 'bg-slate-900/40 border-[#ef4444]/40 shadow-[0_0_12px_rgba(239,68,68,0.05)]'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <span className={`text-[9px] font-mono font-black uppercase tracking-wider transition-colors duration-300 ${
+                    isSavingLocally ? 'text-[#94a3b8]' : 'text-[#ef4444]'
+                  }`}>
+                    {isViewOnlyOnlineSequence ? 'Copy to Local' : 'Save Arrangement'}
+                  </span>
+                  {isSavingLocally && (
+                    <span className="text-[7px] font-mono font-black bg-[#94a3b8]/20 text-[#94a3b8] px-1 py-0.5 rounded border border-[#94a3b8]/30 uppercase tracking-widest">
+                      Local Sandbox
+                    </span>
+                  )}
+                  {!isSavingLocally && (
+                    <span className="text-[7px] font-mono font-black bg-[#ef4444]/20 text-[#ef4444] px-1 py-0.5 rounded border border-[#ef4444]/30 uppercase tracking-widest animate-pulse">
+                      Live Cloud
+                    </span>
+                  )}
+                </div>
                 <input
                   type="text"
-                  placeholder="Preset name (e.g. Electric)"
+                  placeholder="Arrangement name (e.g. Electric)"
                   value={currentArrangementName}
                   onChange={(e) => setCurrentArrangementName(e.target.value)}
-                  className="w-full bg-black/40 border border-indigo-500/20 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-indigo-400/50 focus:outline-none focus:border-indigo-400"
+                  className={`w-full bg-black/40 border rounded-lg px-2.5 py-1.5 text-xs text-white placeholder-indigo-400/50 focus:outline-none transition-all ${
+                    isSavingLocally 
+                      ? 'border-[#94a3b8]/20 focus:border-[#94a3b8]' 
+                      : 'border-[#ef4444]/20 focus:border-[#ef4444]'
+                  }`}
                 />
+
+                {isAdmin && (
+                  <div className={`flex items-center justify-between text-[10px] font-mono my-1 bg-black/40 p-1.5 rounded border transition-all ${
+                    isSavingLocally ? 'text-[#94a3b8] border-[#94a3b8]/15' : 'text-[#ef4444] border-[#ef4444]/15'
+                  }`}>
+                    <span className="font-bold">Save Destination:</span>
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setAdminSaveTarget('online')}
+                        className={`px-2 py-0.5 rounded text-[8px] font-bold uppercase transition-all cursor-pointer ${
+                          adminSaveTarget === 'online'
+                            ? 'bg-[#ef4444] text-white border border-[#ef4444]/40 font-black shadow-[0_0_8px_rgba(239,68,68,0.2)]'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Online
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAdminSaveTarget('local')}
+                        className={`px-2 py-0.5 rounded text-[8px] font-bold uppercase transition-all cursor-pointer ${
+                          adminSaveTarget === 'local'
+                            ? 'bg-[#94a3b8] text-[#0f172a] border border-[#94a3b8]/40 font-black shadow-[0_0_8px_rgba(148,163,184,0.2)]'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Local Only
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {isViewOnlyOnlineSequence ? (
+                  <button
+                    disabled={isSavingPreset}
+                    onClick={async () => {
+                      if (!currentArrangementName.trim()) {
+                        showToast('Please specify a valid copy name!', 'warning');
+                        return;
+                      }
+                      const copyName = currentArrangementName.trim();
+                      setIsSavingPreset(true);
+                      try {
+                        await executeSaveArrangement(copyName, false, activeRoadmap, true);
+                        setLocalRefreshTrigger(prev => prev + 1);
+                        loadPresetArrangement(copyName);
+                        setArrangementsTab('local');
+                        showToast(`Copied online arrangement to local as "${copyName}" successfully!`, 'success');
+                      } catch (e) {
+                        showToast('Could not copy to local arrangement.', 'error');
+                      } finally {
+                        setIsSavingPreset(false);
+                      }
+                    }}
+                    className="w-full py-1.5 bg-[#94a3b8] hover:bg-[#94a3b8]/90 text-[#0f172a] font-black border border-[#94a3b8]/40 shadow-lg shadow-[#94a3b8]/10 rounded-lg text-[10px] uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Copy to Local to Edit</span>
+                  </button>
+                ) : (
+                  <button
+                    disabled={isSavingPreset}
+                    onClick={async () => {
+                      if (!currentArrangementName.trim()) {
+                        showToast('Please specify a valid arrangement name!', 'warning');
+                        return;
+                      }
+                      const targetName = currentArrangementName.trim();
+                      const saveLocallyOnly = !isAdmin || adminSaveTarget === 'local';
+                      setIsSavingPreset(true);
+                      try {
+                        await executeSaveArrangement(targetName, false, activeRoadmap, saveLocallyOnly);
+                        fetchCatalog();
+                        setLocalRefreshTrigger(prev => prev + 1);
+                        if (saveLocallyOnly) {
+                          setArrangementsTab('local');
+                          showToast(`Arrangement "${targetName}" saved locally successfully!`, 'success');
+                        } else {
+                          setArrangementsTab('online');
+                          showToast(`Arrangement "${targetName}" saved online successfully!`, 'success');
+                        }
+                      } catch (e) {
+                        showToast('Could not save arrangement.', 'error');
+                      } finally {
+                        setIsSavingPreset(false);
+                      }
+                    }}
+                    className={`w-full py-1.5 font-black rounded-lg text-[10px] uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer shadow-md transition-colors duration-300 ${
+                      isSavingLocally 
+                        ? 'bg-[#94a3b8] hover:bg-[#94a3b8]/90 text-[#0f172a] border border-[#94a3b8]/40 shadow-lg shadow-[#94a3b8]/10' 
+                        : 'bg-[#ef4444] hover:bg-[#ef4444]/90 text-white border border-[#ef4444]/40 shadow-lg shadow-[#ef4444]/20'
+                    }`}
+                  >
+                    <Save className="w-3 h-3" />
+                    <span>Save Arrangement {isSavingLocally ? 'Locally' : 'Online'}</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Import/Export Sharing buttons */}
+              <div className="flex gap-1.5 mt-2.5 pt-2.5 border-t border-indigo-500/10">
                 <button
-                  disabled={isSavingPreset}
-                  onClick={async () => {
-                    if (!currentArrangementName.trim()) {
-                      showToast('Please specify a valid arrangement name!', 'warning');
+                  onClick={() => {
+                    if (!activeRoadmap || activeRoadmap.length === 0) {
+                      showToast('No active arrangement to download!', 'warning');
                       return;
                     }
-                    setIsSavingPreset(true);
-                    try {
-                      await executeSaveArrangement(currentArrangementName.trim(), false, activeRoadmap);
-                      fetchCatalog();
-                      showToast(`Arrangement "${currentArrangementName}" saved successfully!`, 'success');
-                    } catch (e) {
-                      showToast('Could not save arrangement preset.', 'error');
-                    } finally {
-                      setIsSavingPreset(false);
-                    }
+                    const exportData = {
+                      type: "worship_song_arrangement",
+                      songTitle: currentSong?.Title || "Unknown Song",
+                      songArtist: currentSong?.Artist || "Unknown Artist",
+                      songId: String(currentSong?.SongID),
+                      arrangementName: currentArrangementName || "Custom Arrangement",
+                      key: currentKey,
+                      roadmap: activeRoadmap,
+                      snapshotSections: sectionTemplates
+                    };
+                    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    const safeTitle = (currentSong?.Title || 'song').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+                    const safeArrName = (currentArrangementName || 'arrangement').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+                    a.download = `${safeTitle}_${safeArrName}_arrangement.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    showToast('Arrangement JSON downloaded successfully!', 'success');
                   }}
-                  className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-lg text-[10px] uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-indigo-600/15"
+                  className="flex-1 py-1 px-1 bg-violet-650/30 hover:bg-violet-600 border border-violet-500/20 text-violet-200 hover:text-white rounded-lg text-[9px] font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1 active:scale-95"
+                  title="Download Current Arrangement as JSON file"
                 >
-                  <Save className="w-3 h-3" />
-                  <span>Save Sequence</span>
+                  <Download className="w-3 h-3" />
+                  <span>Download JSON</span>
                 </button>
+                <label className="flex-1 py-1 px-1 bg-violet-650/30 hover:bg-violet-600 border border-violet-500/20 text-violet-200 hover:text-white rounded-lg text-[9px] font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1 active:scale-95 text-center">
+                  <Plus className="w-3 h-3" />
+                  <span>Upload JSON</span>
+                  <input
+                    type="file"
+                    accept=".json"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const reader = new FileReader();
+                      reader.onload = (evt) => {
+                        try {
+                          const data = JSON.parse(evt.target?.result as string);
+                          if (data.type !== 'worship_song_arrangement') {
+                            showToast('Invalid file format. Must be a Worship Song Arrangement JSON.', 'error');
+                            return;
+                          }
+                          const loadedBlocks = (data.roadmap || []).map((b: any, idx: number) => ({
+                            id: b.id || `block-${idx}`,
+                            name: b.name || 'Section',
+                            enabledLines: b.enabledLines ? [...b.enabledLines] : [],
+                            keyOffset: b.keyOffset || 0,
+                          }));
+                          setActiveRoadmap(loadedBlocks);
+                          if (data.key && setCurrentKey) {
+                            setCurrentKey(data.key);
+                          }
+                          if (data.arrangementName) {
+                            setCurrentArrangementName(data.arrangementName);
+                          }
+                          if (data.snapshotSections) {
+                            setLoadedSnapshotSections(data.snapshotSections);
+                          }
+                          showToast(`Imported arrangement "${data.arrangementName || 'Custom'}" successfully!`, 'success');
+                        } catch (err) {
+                          showToast('Failed to parse arrangement JSON.', 'error');
+                        }
+                      };
+                      reader.readAsText(file);
+                      e.target.value = '';
+                    }}
+                  />
+                </label>
               </div>
             </div>
 
@@ -545,104 +1134,72 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
             {/* DAW WORKSPACE CONTENT CONTAINER */}
             <div className="flex-1 overflow-y-auto custom-scrollbar p-3.5 space-y-4 min-h-0 bg-[#04040a]">
               
-              {/* STAGE-SAFE VS COMPOSITION COMPASS HEADS-UP */}
-              {!isDirectorMode ? (
-                <div className="bg-gradient-to-r from-teal-950/30 to-slate-950/40 border border-teal-500/35 rounded-2xl p-4 sm:p-5 flex flex-col gap-4 text-left shadow-lg select-none relative overflow-hidden">
-                  <div className="absolute -right-10 -bottom-10 w-32 h-32 bg-teal-500/5 rounded-full blur-2xl pointer-events-none" />
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-teal-500/10 pb-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-xl bg-teal-500/15 border border-teal-500/35 flex items-center justify-center text-teal-400 text-lg shrink-0 shadow-[0_0_12px_rgba(20,184,166,0.2)]">
-                        🛡️
-                      </div>
-                      <div>
-                        <span className="text-[9px] font-mono font-black uppercase text-teal-400 tracking-widest bg-teal-500/15 px-2 py-0.5 rounded border border-teal-500/20">
-                          STAGE-SAFE REHEARSAL PLAY-ALONG ACTIVE
-                        </span>
-                        <h4 className="text-xs font-bold text-teal-300 mt-0.5">Basic Musician Mode</h4>
-                      </div>
+              {/* COMPOSITION COMPASS HEADS-UP */}
+              <div className={`bg-gradient-to-r ${
+                isAdmin 
+                  ? 'from-indigo-950/20 to-slate-950/40 border-indigo-500/35 shadow-[0_0_80px_rgba(99,102,241,0.15)]' 
+                  : 'from-teal-950/20 to-slate-950/40 border-teal-500/35 shadow-[0_0_80px_rgba(20,184,166,0.15)]'
+              } border rounded-2xl p-4 sm:p-5 flex flex-col gap-4 text-left shadow-lg select-none relative overflow-hidden`}>
+                <div className="absolute -right-10 -bottom-10 w-32 h-32 bg-indigo-500/5 rounded-full blur-2xl pointer-events-none" />
+                <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b pb-3 ${
+                  isAdmin ? 'border-indigo-500/10' : 'border-teal-500/10'
+                }`}>
+                  <div className="flex items-center gap-3">
+                    <div className={`w-10 h-10 rounded-xl border flex items-center justify-center text-lg shrink-0 ${
+                      isAdmin 
+                        ? 'bg-indigo-500/15 border-indigo-500/35 text-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.25)]' 
+                        : 'bg-teal-500/15 border-teal-500/35 text-teal-400 shadow-[0_0_12px_rgba(20,184,166,0.25)]'
+                    }`}>
+                      {isAdmin ? '⚡' : '👁️'}
                     </div>
-                    <button 
-                      onClick={() => {
-                        setIsDirectorMode(true);
-                        showToast('Upgraded to Director Studio Mode', 'success');
-                      }}
-                      className="self-start sm:self-auto px-3.5 py-1.5 bg-teal-500/15 hover:bg-teal-500/25 border border-teal-500/40 hover:border-teal-400 text-teal-200 hover:text-white rounded-lg text-[9px] font-black uppercase tracking-wider transition-all cursor-pointer active:scale-95 shrink-0 animate-pulse"
-                    >
-                      Unlock Director Deck 🔓
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                      <p className="text-xs text-slate-300 font-medium leading-relaxed">
-                        This mode is optimized for <strong>live performance and rehearsal play-along</strong>. It locks the arrangement timeline and disables destructive editing actions to ensure zero accidental stage disruptions.
-                      </p>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-[10px] font-bold text-slate-400 bg-black/30 p-2.5 rounded-xl border border-teal-500/10 font-mono">
-                      <div className="flex items-center gap-1.5 text-teal-400">
-                        <span>🛡️</span> Stage Safe (Locked)
-                      </div>
-                      <div className="flex items-center gap-1.5 text-rose-400">
-                        <span>🔒</span> Timeline Edit Locked
-                      </div>
-                      <div className="flex items-center gap-1.5 text-emerald-400">
-                        <span>🔓</span> Safe Interactive Sheet
-                      </div>
-                      <div className="flex items-center gap-1.5 text-rose-400">
-                        <span>🔒</span> Preset Deletion Locked
-                      </div>
+                      <span className={`text-[9px] font-mono font-black uppercase tracking-widest px-2 py-0.5 rounded border ${
+                        isAdmin 
+                          ? 'text-indigo-400 bg-indigo-500/15 border-indigo-500/20' 
+                          : 'text-teal-400 bg-teal-500/15 border-teal-500/20'
+                      }`}>
+                        {isAdmin ? 'ORCHESTRATION & COMPOSITION ACTIVE' : 'DIRECTOR STUDIO (VIEWER)'}
+                      </span>
+                      <h4 className={`text-xs font-bold mt-0.5 ${isAdmin ? 'text-indigo-300' : 'text-teal-300'}`}>
+                        {isAdmin ? 'Worship Director Mode' : 'Director Studio Console'}
+                      </h4>
                     </div>
                   </div>
                 </div>
-              ) : (
-                <div className="bg-gradient-to-r from-indigo-950/20 to-slate-950/40 border border-indigo-500/35 rounded-2xl p-4 sm:p-5 flex flex-col gap-4 text-left shadow-lg select-none relative overflow-hidden">
-                  <div className="absolute -right-10 -bottom-10 w-32 h-32 bg-indigo-500/5 rounded-full blur-2xl pointer-events-none" />
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-indigo-500/10 pb-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/35 flex items-center justify-center text-indigo-400 text-lg shrink-0 shadow-[0_0_12px_rgba(99,102,241,0.25)]">
-                        ⚡
-                      </div>
-                      <div>
-                        <span className="text-[9px] font-mono font-black uppercase text-indigo-400 tracking-widest bg-indigo-500/15 px-2 py-0.5 rounded border border-indigo-500/20">
-                          ORCHESTRATION & COMPOSITION ACTIVE
-                        </span>
-                        <h4 className="text-xs font-bold text-indigo-300 mt-0.5">Worship Director Mode</h4>
-                      </div>
-                    </div>
-                    <button 
-                      onClick={() => {
-                        setIsDirectorMode(false);
-                        showToast('Locked to Stage-Safe Play-Along Mode', 'info');
-                      }}
-                      className="self-start sm:self-auto px-3.5 py-1.5 bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/40 hover:border-indigo-400 text-indigo-200 hover:text-white rounded-lg text-[9px] font-black uppercase tracking-wider transition-all cursor-pointer active:scale-95 shrink-0"
-                    >
-                      Lock Stage Mode 🔒
-                    </button>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-xs text-slate-300 font-medium leading-relaxed">
+                      {isAdmin ? (
+                        <>
+                          This mode gives you <strong>full administrative control over arrangements</strong>. You can completely reshape the song arrangement, modulate block keys, edit lyrics/chords templates, and push updates directly to the Google Sheets cloud database or save them locally.
+                        </>
+                      ) : (
+                        <>
+                          This mode gives you <strong>read-only access to online arrangements</strong> and <strong>full custom control over local arrangements</strong>. You can reshape the timeline, modulate blocks, and save modifications locally or copy any online arrangement to local to edit.
+                        </>
+                      )}
+                    </p>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <p className="text-xs text-slate-300 font-medium leading-relaxed">
-                        This mode gives you <strong>full administrative control over arrangements</strong>. You can completely reshape the song sequence, modulate block keys, edit lyrics/chords templates, and push updates directly to the Google Sheets cloud database.
-                      </p>
+                  <div className={`grid grid-cols-2 gap-2 text-[10px] font-bold text-slate-400 bg-black/30 p-2.5 rounded-xl border font-mono ${
+                    isAdmin ? 'border-indigo-500/10' : 'border-teal-500/10'
+                  }`}>
+                    <div className={`flex items-center gap-1.5 ${isAdmin ? 'text-indigo-400' : 'text-teal-400'}`}>
+                      <span>{isAdmin ? '⚡' : '👁️'}</span> {isAdmin ? 'Full Editor (Unlocked)' : 'Director Console'}
                     </div>
-                    <div className="grid grid-cols-2 gap-2 text-[10px] font-bold text-slate-400 bg-black/30 p-2.5 rounded-xl border border-indigo-500/10 font-mono">
-                      <div className="flex items-center gap-1.5 text-indigo-400">
-                        <span>⚡</span> Full Editor (Unlocked)
-                      </div>
-                      <div className="flex items-center gap-1.5 text-emerald-400">
-                        <span>🔓</span> Drag-and-Drop Timeline
-                      </div>
-                      <div className="flex items-center gap-1.5 text-emerald-400">
-                        <span>🔓</span> Inject Block Signals
-                      </div>
-                      <div className="flex items-center gap-1.5 text-emerald-400">
-                        <span>🔓</span> Save Cloud Arrangements
-                      </div>
+                    <div className="flex items-center gap-1.5 text-emerald-400">
+                      <span>🔓</span> Drag-and-Drop Timeline
+                    </div>
+                    <div className="flex items-center gap-1.5 text-emerald-400">
+                      <span>🔓</span> Inject Block Signals
+                    </div>
+                    <div className={`flex items-center gap-1.5 ${isAdmin ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      <span>{isAdmin ? '🔓' : '🔒'}</span> {isAdmin ? 'Save Cloud/Local' : 'Save Local Only'}
                     </div>
                   </div>
                 </div>
-              )}
+              </div>
               
-              {/* SIGNAL INJECTOR: Click to Insert Block (Rendered prominently on top of sequence timeline) */}
+              {/* SIGNAL INJECTOR: Click to Insert Block (Rendered prominently on top of arrangement timeline) */}
               {isDirectorMode && (
                 <div className="bg-[#080918]/90 border border-indigo-500/15 rounded-2xl p-4 shadow-xl flex flex-col gap-2.5 text-left">
                   <div className="flex items-center gap-2 border-b border-indigo-500/10 pb-2">
@@ -699,11 +1256,13 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
                     <div 
                       ref={timelineViewportRef}
                       onScroll={handleTimelineScroll}
+                      onMouseEnter={() => { activeScrollSourceRef.current = 'timeline'; }}
+                      onTouchStart={() => { activeScrollSourceRef.current = 'timeline'; }}
                       className="flex-1 overflow-x-auto custom-scrollbar flex items-center gap-6 px-4 py-4 scroll-smooth"
                     >
                       {activeRoadmap.length === 0 ? (
                         <div className="flex-1 flex flex-col items-center justify-center py-5 text-gray-500 italic text-xs">
-                          Timeline empty. Ingest sequence blocks from left Command Deck to begin.
+                          Timeline empty. Ingest arrangement blocks from left Command Deck to begin.
                         </div>
                       ) : (
                         activeRoadmap.map((block, bIdx) => {
@@ -837,7 +1396,13 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
                       </span>
                     </div>
 
-                    <div className="flex-1 overflow-x-hidden flex items-center gap-6 px-4 py-3 bg-[#0d0c1b]/30">
+                    <div 
+                      ref={chordsViewportRef}
+                      onScroll={handleChordsScroll}
+                      onMouseEnter={() => { activeScrollSourceRef.current = 'chords'; }}
+                      onTouchStart={() => { activeScrollSourceRef.current = 'chords'; }}
+                      className="flex-1 overflow-x-auto custom-scrollbar flex items-center gap-6 px-4 py-3 bg-[#0d0c1b]/30"
+                    >
                       {activeRoadmap.map((block, idx) => {
                         const isSelected = editingBlockId === block.id || (!editingBlockId && idx === 0);
                         const blockOffset = block.keyOffset || 0;
@@ -921,7 +1486,13 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
                       </span>
                     </div>
 
-                    <div className="flex-1 overflow-x-hidden flex items-center gap-6 px-4 py-3 bg-[#0d0c1b]/10">
+                    <div 
+                      ref={lyricsViewportRef}
+                      onScroll={handleLyricsScroll}
+                      onMouseEnter={() => { activeScrollSourceRef.current = 'lyrics'; }}
+                      onTouchStart={() => { activeScrollSourceRef.current = 'lyrics'; }}
+                      className="flex-1 overflow-x-auto custom-scrollbar flex items-center gap-6 px-4 py-3 bg-[#0d0c1b]/10"
+                    >
                       {activeRoadmap.map((block, idx) => {
                         const isSelected = editingBlockId === block.id || (!editingBlockId && idx === 0);
                         const templates = effectiveSectionTemplates[block.name] || [];
@@ -966,7 +1537,7 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
                       </div>
                       <div>
                         <span className="text-[8px] font-mono font-black uppercase tracking-widest text-indigo-400">
-                          Active Block dissection / sequence compiler
+                          Active Block dissection / arrangement compiler
                         </span>
                         <h3 className="font-sans font-black text-sm uppercase tracking-wider text-indigo-300 flex items-center gap-2 mt-0.5">
                           <span>{activeSelectedBlock.name} Layout Console</span>
@@ -1029,7 +1600,7 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
                                   ? 'bg-indigo-600 border-indigo-500 text-white shadow-md shadow-indigo-600/20'
                                   : 'bg-[#131526]/80 border-gray-600 text-transparent'
                               }`}
-                              title={isLineEnabled ? "Line is active in sequence" : "Line is inactive in sequence"}
+                              title={isLineEnabled ? "Line is active in arrangement" : "Line is inactive in arrangement"}
                             >
                               ✓
                             </button>
@@ -1041,50 +1612,55 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
                                 <span className="text-[8px] font-mono font-black tracking-wider text-amber-500/90 uppercase">Chords</span>
                                 {isDirectorMode ? (
                                   <div className="flex flex-col gap-1.5 w-full">
-                                    <input
-                                      type="text"
-                                      disabled={isArrangementLocked}
-                                      value={line.Chords || ''}
-                                      onChange={(e) => {
-                                        const updatedLines = [...(effectiveSectionTemplates[activeSelectedBlock.name] || [])];
-                                        if (updatedLines[lIdx]) {
-                                          updatedLines[lIdx] = {
-                                            ...updatedLines[lIdx],
-                                            Chords: e.target.value,
-                                          };
-                                          setSectionTemplates(prev => ({
-                                            ...prev,
-                                            [activeSelectedBlock.name]: updatedLines
-                                          }));
-                                          if (loadedSnapshotSections) {
-                                            setLoadedSnapshotSections(prev => {
-                                              if (!prev) return null;
-                                              return {
-                                                ...prev,
-                                                [activeSelectedBlock.name]: updatedLines
-                                              };
-                                            });
-                                          }
-                                        }
-                                      }}
-                                      placeholder="Chords (e.g. G C D Em)"
-                                      className="w-full bg-[#0a0c24] border border-indigo-500/15 rounded-lg px-2.5 py-1.5 text-xs font-mono text-amber-400 focus:outline-none focus:border-amber-400 disabled:opacity-50"
-                                    />
                                     {(() => {
                                       const blockOffset = activeSelectedBlock.keyOffset || 0;
                                       const lineOffset = activeSelectedBlock.lineOffsets?.[lIdx] || 0;
                                       const totalOffset = blockOffset + lineOffset;
-                                      if (totalOffset !== 0) {
-                                        return (
-                                          <div className="text-[10px] font-mono text-amber-300/85 px-2 py-0.5 bg-amber-500/5 rounded border border-amber-500/10 flex items-center gap-1">
-                                            <span className="text-[7.5px] bg-amber-500/20 text-amber-400 px-1 py-0.5 rounded font-black leading-none shrink-0">
-                                              TRANSPOSED ({totalOffset > 0 ? '+' : ''}{totalOffset} st):
-                                            </span>
-                                            <span className="font-extrabold tracking-wide truncate">{transposeChord(line.Chords || '', totalOffset)}</span>
-                                          </div>
-                                        );
-                                      }
-                                      return null;
+                                      const displayChords = transposeChord(line.Chords || '', totalOffset);
+
+                                      return (
+                                        <div className="flex flex-col gap-1.5 w-full">
+                                          <input
+                                            type="text"
+                                            disabled={isArrangementLocked}
+                                            value={displayChords}
+                                            onChange={(e) => {
+                                              const rawInput = e.target.value;
+                                              const originalChords = transposeChord(rawInput, -totalOffset);
+                                              const updatedLines = [...(effectiveSectionTemplates[activeSelectedBlock.name] || [])];
+                                              if (updatedLines[lIdx]) {
+                                                updatedLines[lIdx] = {
+                                                  ...updatedLines[lIdx],
+                                                  Chords: originalChords,
+                                                };
+                                                setSectionTemplates(prev => ({
+                                                  ...prev,
+                                                  [activeSelectedBlock.name]: updatedLines
+                                                }));
+                                                if (loadedSnapshotSections) {
+                                                  setLoadedSnapshotSections(prev => {
+                                                    if (!prev) return null;
+                                                    return {
+                                                      ...prev,
+                                                      [activeSelectedBlock.name]: updatedLines
+                                                    };
+                                                  });
+                                                }
+                                              }
+                                            }}
+                                            placeholder="Chords (e.g. G C D Em)"
+                                            className="w-full bg-[#0a0c24] border border-indigo-500/15 rounded-lg px-2.5 py-1.5 text-xs font-mono text-amber-400 focus:outline-none focus:border-amber-400 disabled:opacity-50"
+                                          />
+                                          {totalOffset !== 0 && (
+                                            <div className="text-[10px] font-mono text-indigo-400/85 px-2 py-0.5 bg-indigo-500/5 rounded border border-indigo-500/10 flex items-center gap-1">
+                                              <span className="text-[7.5px] bg-indigo-500/20 text-indigo-400 px-1 py-0.5 rounded font-black leading-none shrink-0">
+                                                ORIGINAL (Untransposed):
+                                              </span>
+                                              <span className="font-extrabold tracking-wide truncate">{line.Chords || 'None'}</span>
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
                                     })()}
                                   </div>
                                 ) : (
@@ -1276,7 +1852,7 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
                             return b;
                           });
                           setActiveRoadmap(rmap);
-                          showToast('Appended new blank line to sequence!', 'success');
+                          showToast('Appended new blank line to arrangement!', 'success');
                         }}
                         className="px-4 py-2 bg-emerald-600/20 hover:bg-emerald-600 border border-emerald-500/30 text-emerald-300 hover:text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
                       >

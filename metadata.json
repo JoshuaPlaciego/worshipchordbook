@@ -1,5 +1,5 @@
 {
-  "name": "Worship Chordbook",
+  "name": "worshipchordbook",
   "description": "An intelligent, stage-ready digital music stand with real-time transpositions, dynamic chord guides, an educational instrument fretboard/piano visualizer, metronome, and custom arrangements.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

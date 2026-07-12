@@ -519,7 +519,9 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
       }
     }
 
-    if (!appUser || !appSecret) {
+    const isFallbackSong = editingSong && String(editingSong.SongID).startsWith('fallback-');
+
+    if (!appUser || !appSecret || isFallbackSong) {
       try {
         const songId = editingSong?.SongID || `local-song-${Date.now()}`;
         
@@ -565,9 +567,11 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
         }
 
         showToast(
-          editingSong 
-            ? 'Standalone changes saved locally to your browser!' 
-            : 'New song created locally in your browser!',
+          isFallbackSong
+            ? 'Fallback song changes saved locally to your device!'
+            : editingSong 
+              ? 'Standalone changes saved locally to your browser!' 
+              : 'New song created locally in your browser!',
           'success'
         );
         onSubmitSuccess();
@@ -991,13 +995,14 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
           <button
             onClick={submitForm}
             disabled={saveDisabled || isLockedByOther}
-            className={`w-full py-3 rounded-xl text-white text-[12px] font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all ${
+            className={`w-full py-3 rounded-xl text-[12px] font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all flex items-center justify-center gap-1.5 ${
               (saveDisabled || isLockedByOther)
                 ? 'bg-indigo-950/40 text-gray-500 border border-indigo-500/10 cursor-not-allowed opacity-50'
-                : 'bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 border border-indigo-400/20 shadow-indigo-900/40 hover:shadow-indigo-500/20'
+                : 'bg-[#fbbf24] hover:bg-[#fbbf24]/90 text-[#0f172a] border border-[#fbbf24]/40 shadow-lg shadow-[#fbbf24]/20'
             }`}
           >
-            SAVE SONG SHEET
+            <span>💾</span>
+            <span>SAVE SONG SHEET</span>
           </button>
         </div>
       </div>

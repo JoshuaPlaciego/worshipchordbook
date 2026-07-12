@@ -1,0 +1,773 @@
+2985	        } else {
+2986	          previewSongsData = [getSongPreviewData(currentSong)];
+2987	        }
+2988	
+2989	        return (
+2990	          <div className="fixed inset-0 bg-[#020205]/90 backdrop-blur-md z-[800] flex items-center justify-center p-4 md:p-6 select-none animate-fadeIn">
+2991	            <div className="w-full max-w-5xl h-[90vh] bg-[#0c0d1b] border border-indigo-500/30 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] flex flex-col overflow-hidden animate-scaleIn">
+2992	              
+2993	              {/* Modal Header */}
+2994	              <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between shrink-0">
+2995	                <div className="flex items-center gap-3">
+2996	                  <span className="text-xl sm:text-2xl">📄</span>
+2997	                  <div>
+2998	                    <h2 className="text-sm sm:text-base font-black uppercase tracking-wider text-indigo-300">
+2999	                      PDF Print Preview
+3000	                    </h2>
+3001	                    <p className="text-[10px] text-gray-400 font-medium">
+3002	                      Inspect your layout, customize options in real-time, and download/print the A4 song sheet.
+3003	                    </p>
+3004	                  </div>
+3005	                </div>
+3006	                <button
+3007	                  onClick={() => setIsPDFPreviewOpen(false)}
+3008	                  className="text-gray-400 hover:text-white hover:bg-white/10 p-2 rounded-lg transition-all active:scale-95 cursor-pointer"
+3009	                >
+3010	                  ✕
+3011	                </button>
+3012	              </div>
+3013	
+3014	              {/* Modal Main Body - Sidebar + Live Paper Preview Container */}
+3015	              <div className="flex-1 overflow-y-auto md:overflow-hidden flex flex-col md:flex-row">
+3016	                
+3017	                {/* Left/Top Column: Real-time Controls */}
+3018	                <div className="w-full md:w-80 border-b md:border-b-0 md:border-r border-white/5 p-5 shrink-0 bg-indigo-950/15 overflow-visible md:overflow-y-auto">
+3019	                  <h3 className="text-[10px] font-black uppercase tracking-widest text-indigo-400 mb-4">
+3020	                    Print Customization
+3021	                  </h3>
+3022	
+3023	                  <div className="space-y-4">
+3024	                    
+3025	                    {/* Include in Export - Only shown if activeSetlistFolder is active and has multiple songs */}
+3026	                    {isInsideSetlistContext && (
+3027	                      <div className="space-y-2 select-none border-b border-white/5 pb-4">
+3028	                        <label className="text-[10px] font-bold text-gray-300 uppercase tracking-wider block">
+3029	                          Include in Export
+3030	                        </label>
+3031	                        <select
+3032	                          value={pdfScope}
+3033	                          onChange={(e) => setPdfScope(e.target.value as any)}
+3034	                          className="w-full bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-2 px-3 rounded-xl text-[10px] uppercase font-bold outline-none focus:ring-2 focus:ring-indigo-400/60 border border-indigo-500/30 hover:border-indigo-400/50 transition-all cursor-pointer shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)]"
+3035	                        >
+3036	                          <option value="current" className="bg-[#0c0d1b]">Viewed Song Only</option>
+3037	                          <option value="all" className="bg-[#0c0d1b]">All Songs in Setlist</option>
+3038	                          <option value="custom" className="bg-[#0c0d1b]">Select Songs...</option>
+3039	                        </select>
+3040	
+3041	                        {/* Custom Checkbox Selection List - active only when custom is selected */}
+3042	                        {pdfScope === 'custom' && (
+3043	                          <div className="mt-3 bg-[#020205]/60 border border-white/5 rounded-xl p-2.5 max-h-[160px] overflow-y-auto custom-scrollbar space-y-2">
+3044	                            <span className="text-[8px] font-black uppercase text-indigo-400 tracking-wider block">
+3045	                              CHECK SONGS TO INCLUDE
+3046	                            </span>
+3047	                            {setlists
+3048	                              .map((id) => songs.find((s) => String(s.SongID) === String(id)))
+3049	                              .filter((s): s is Song => !!s)
+3050	                              .map((song, sIdx) => {
+3051	                                const sIdStr = String(song.SongID);
+3052	                                const isChecked = pdfSelectedSongIds.includes(sIdStr);
+3053	                                return (
+3054	                                  <label
+3055	                                    key={song.SongID}
+3056	                                    className="flex items-center gap-2 text-[10px] font-semibold text-gray-300 hover:text-white cursor-pointer select-none leading-tight"
+3057	                                  >
+3058	                                    <input
+3059	                                      type="checkbox"
+3060	                                      checked={isChecked}
+3061	                                      onChange={() => {
+3062	                                        if (isChecked) {
+3063	                                          setPdfSelectedSongIds(prev => prev.filter(id => id !== sIdStr));
+3064	                                        } else {
+3065	                                          setPdfSelectedSongIds(prev => [...prev, sIdStr]);
+3066	                                        }
+3067	                                      }}
+3068	                                      className="accent-indigo-500 rounded border-white/10"
+3069	                                    />
+3070	                                    <span className="truncate">
+3071	                                      <span className="text-gray-500 font-bold mr-1">#{sIdx + 1}</span>
+3072	                                      {song.Title}
+3073	                                    </span>
+3074	                                  </label>
+3075	                                );
+3076	                              })}
+3077	                          </div>
+3078	                        )}
+3079	                      </div>
+3080	                    )}
+3081	
+3082	                    {/* Chords Display Mode */}
+3083	                    <div className="space-y-1.5">
+3084	                      <label className="text-[10px] font-bold text-gray-300 uppercase tracking-wider block">
+3085	                        Display Mode
+3086	                      </label>
+3087	                      <select
+3088	                        value={displayMode}
+3089	                        onChange={(e) => setDisplayMode(e.target.value as any)}
+3090	                        className="w-full bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-2 px-3 rounded-xl text-[10px] uppercase font-bold outline-none focus:ring-2 focus:ring-indigo-400/60 border border-indigo-500/30 hover:border-indigo-400/50 transition-all cursor-pointer shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)]"
+3091	                      >
+3092	                        <option value="both" className="bg-[#0c0d1b]">Show Chords & Numbers</option>
+3093	                        <option value="chords" className="bg-[#0c0d1b]">Chords Only</option>
+3094	                        <option value="numbers" className="bg-[#0c0d1b]">Numbers Only</option>
+3095	                      </select>
+3096	                    </div>
+3097	
+3098	                    {/* Lyrics Visibility */}
+3099	                    <div className="space-y-1.5">
+3100	                      <label className="text-[10px] font-bold text-gray-300 uppercase tracking-wider block">
+3101	                        Lyrics Visibility
+3102	                      </label>
+3103	                      <select
+3104	                        value={showLyrics ? 'true' : 'false'}
+3105	                        onChange={(e) => setShowLyrics(e.target.value === 'true')}
+3106	                        className="w-full bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-2 px-3 rounded-xl text-[10px] uppercase font-bold outline-none focus:ring-2 focus:ring-indigo-400/60 border border-indigo-500/30 hover:border-indigo-400/50 transition-all cursor-pointer shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)]"
+3107	                      >
+3108	                        <option value="true" className="bg-[#0c0d1b]">Show Lyrics</option>
+3109	                        <option value="false" className="bg-[#0c0d1b]">Hide Lyrics</option>
+3110	                      </select>
+3111	                    </div>
+3112	
+3113	                    {/* Sheet Layout Mode */}
+3114	                    <div className="space-y-1.5">
+3115	                      <label className="text-[10px] font-bold text-gray-300 uppercase tracking-wider block">
+3116	                        Sheet Layout Mode
+3117	                      </label>
+3118	                      <select
+3119	                        value={sheetLayoutMode}
+3120	                        onChange={(e) => setSheetLayoutMode(e.target.value as any)}
+3121	                        className="w-full bg-indigo-950/30 hover:bg-indigo-900/40 text-indigo-100 py-2 px-3 rounded-xl text-[10px] uppercase font-bold outline-none focus:ring-2 focus:ring-indigo-400/60 border border-indigo-500/30 hover:border-indigo-400/50 transition-all cursor-pointer shadow-[inset_0_2px_8px_rgba(0,0,0,0.5)]"
+3122	                      >
+3123	                        <option value="sequence" className="bg-[#0c0d1b]">Flow Sequence</option>
+3124	                        <option value="compact" className="bg-[#0c0d1b]">Compact</option>
+3125	                      </select>
+3126	                    </div>
+3127	
+3128	                    {/* Active Key Quick Selector */}
+3129	                    <div className="space-y-2">
+3130	                      <label className="text-[10px] font-bold text-gray-300 uppercase tracking-wider block">
+3131	                        Transposed Key (Viewed Song)
+3132	                      </label>
+3133	                      <div className="flex items-center justify-between gap-1 bg-[#020205]/40 p-1.5 rounded-xl border border-white/5">
+3134	                        <button
+3135	                          onClick={() => {
+3136	                            const keys = Object.keys(NOTE_TO_INDEX);
+3137	                            const currIdx = keys.indexOf(currentKey);
+3138	                            const prevIdx = (currIdx - 1 + keys.length) % keys.length;
+3139	                            setCurrentKey(keys[prevIdx]);
+3140	                          }}
+3141	                          className="p-1 rounded-lg bg-white/5 hover:bg-white/10 active:scale-90 text-[10px] font-bold text-indigo-300 cursor-pointer animate-press"
+3142	                        >
+3143	                          ◀
+3144	                        </button>
+3145	                        <span className="text-xs font-mono font-black text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-3 py-1 rounded-lg shadow-inner min-w-[50px] text-center select-none">
+3146	                          {currentKey}
+3147	                        </span>
+3148	                        <button
+3149	                          onClick={() => {
+3150	                            const keys = Object.keys(NOTE_TO_INDEX);
+3151	                            const currIdx = keys.indexOf(currentKey);
+3152	                            const nextIdx = (currIdx + 1) % keys.length;
+3153	                            setCurrentKey(keys[nextIdx]);
+3154	                          }}
+3155	                          className="p-1 rounded-lg bg-white/5 hover:bg-white/10 active:scale-90 text-[10px] font-bold text-indigo-300 cursor-pointer animate-press"
+3156	                        >
+3157	                          ▶
+3158	                        </button>
+3159	                      </div>
+3160	                    </div>
+3161	
+3162	                    {/* Song Transposition Customizer (Only shown if exporting multiple songs) */}
+3163	                    {previewSongsData.length > 1 && (
+3164	                      <div className="space-y-2 border-t border-white/5 pt-4 animate-fadeIn">
+3165	                        <label className="text-[10px] font-bold text-amber-400 uppercase tracking-wider block flex items-center gap-1">
+3166	                          <span>🎹</span> Transpose Individual Songs
+3167	                        </label>
+3168	                        <div className="space-y-2 bg-[#020205]/40 p-2.5 rounded-xl border border-indigo-500/10 max-h-[220px] overflow-y-auto custom-scrollbar">
+3169	                          {previewSongsData.map((songData, sIdx) => {
+3170	                            const songIdStr = String(songData.song.SongID);
+3171	                            const resolvedKey = pdfSongKeys[songIdStr] || songData.key;
+3172	                            return (
+3173	                              <div key={songIdStr} className="flex items-center justify-between gap-2 border-b border-white/5 pb-2 last:border-0 last:pb-0">
+3174	                                <div className="min-w-0 flex-1">
+3175	                                  <div className="text-[9.5px] font-extrabold text-white truncate uppercase">
+3176	                                    {sIdx + 1}. {songData.song.Title}
+3177	                                  </div>
+3178	                                  <div className="text-[8.5px] text-indigo-300 font-mono">
+3179	                                    Orig: {songData.song.OriginalKey || 'C'}
+3180	                                  </div>
+3181	                                </div>
+3182	                                <select
+3183	                                  value={resolvedKey}
+3184	                                  onChange={(e) => {
+3185	                                    const newKey = e.target.value;
+3186	                                    setPdfSongKeys(prev => ({
+3187	                                      ...prev,
+3188	                                      [songIdStr]: newKey
+3189	                                    }));
+3190	                                    showToast(`Transposed "${songData.song.Title}" to ${newKey}`, 'success');
+3191	                                  }}
+3192	                                  className="bg-indigo-950/50 text-indigo-200 border border-indigo-500/30 rounded-lg px-2 py-1 text-[9px] font-black uppercase tracking-wider outline-none focus:ring-1 focus:ring-indigo-400 cursor-pointer hover:bg-indigo-900/60 transition-all shadow-sm"
+3193	                                >
+3194	                                  {NOTES.map((k) => (
+3195	                                    <option key={k} value={k} className="bg-[#0c0d1b] text-indigo-100 font-bold">
+3196	                                      Key of {k}
+3197	                                    </option>
+3198	                                  ))}
+3199	                                </select>
+3200	                              </div>
+3201	                            );
+3202	                          })}
+3203	                        </div>
+3204	                      </div>
+3205	                    )}
+3206	
+3207	                    {/* Context Note block */}
+3208	                    <div className="p-3.5 bg-indigo-500/10 border border-indigo-500/20 rounded-xl space-y-1.5 select-none">
+3209	                      <span className="text-[9px] font-black uppercase tracking-wider text-indigo-300 flex items-center gap-1">
+3210	                        <span>💡</span> Live Adjustments
+3211	                      </span>
+3212	                      <p className="text-[9.5px] text-gray-400 leading-normal font-medium">
+3213	                        Changing settings on the left will immediately re-render your preview on the right and update the final printed file.
+3214	                      </p>
+3215	                    </div>
+3216	                  </div>
+3217	                </div>
+3218	
+3219	                {/* Right Column: Interactive paper canvas */}
+3220	                <div className="flex-1 bg-black/45 p-4 sm:p-6 overflow-visible md:overflow-y-auto flex items-start justify-center custom-scrollbar select-text">
+3221	                  
+3222	                  {/* Physical A4 Sheet Container */}
+3223	                  <div className="w-full max-w-[210mm] bg-white text-slate-900 shadow-2xl rounded-lg p-6 sm:p-10 font-sans border border-slate-200 space-y-12">
+3224	                    
+3225	                    {previewSongsData.map((songData, sIdx) => {
+3226	                      const { key: songKey, roadmap: songRoadmap, sectionTemplates: songTemplates, title, artist, song } = songData;
+3227	                      const repInfo = getRoadmapRepetitionInfo(songRoadmap);
+3228	                      return (
+3229	                        <div key={song.SongID} className={`print-song-page-preview ${sIdx > 0 ? 'border-t-2 border-slate-200 pt-10 mt-10' : ''}`}>
+3230	                          {/* Header Container */}
+3231	                          <div className="border-b-2 border-slate-900 pb-2 mb-4 flex justify-between items-end">
+3232	                            <div>
+3233	                              <h1 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight leading-none uppercase flex items-center gap-2">
+3234	                                {setlists.length > 1 && pdfScope !== 'current' && (
+3235	                                  <span className="text-[11px] bg-slate-900 text-white font-extrabold px-1.5 py-0.5 rounded">
+3236	                                    #{setlists.indexOf(String(song.SongID)) + 1}
+3237	                                  </span>
+3238	                                )}
+3239	                                <span>{title}</span>
+3240	                              </h1>
+3241	                              <h2 className="text-[10px] font-bold text-slate-500 mt-1 uppercase">
+3242	                                BY {artist}
+3243	                              </h2>
+3244	                            </div>
+3245	                            <div className="text-xs font-black text-indigo-600 border border-indigo-600 px-2 py-0.5 rounded-md font-mono select-none">
+3246	                              KEY: {songKey.toUpperCase()}
+3247	                            </div>
+3248	                          </div>
+3249	
+3250	                          {/* Flow Roadmap Box */}
+3251	                          <div className="bg-slate-50 border border-slate-200 rounded-md p-2.5 mb-5 select-none">
+3252	                            <div className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">
+3253	                              FLOW ROADMAP (TRANSPOSED SEQUENCE)
+3254	                            </div>
+3255	                            <div className="text-[9.5px] font-bold text-slate-800 leading-normal">
+3256	                              {(() => {
+3257	                                const renderedRoadmap: any[] = [];
+3258	                                songRoadmap.forEach((block: any, idx: number) => {
+3259	                                  const isDuplicate = songRoadmap.findIndex((b: any, bIdx: number) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, songTemplates)) !== -1;
+3260	                                  if (isDuplicate) return;
+3261	                                  renderedRoadmap.push({ block, originalIdx: idx });
+3262	                                });
+3263	
+3264	                                return renderedRoadmap.map(({ block, originalIdx: idx }, rIdx) => {
+3265	                                  const blockOffset = block.keyOffset || 0;
+3266	                                  const blockKeyName = getModulatedKeyName(songKey, blockOffset);
+3267	                                  return (
+3268	                                    <span key={block.id}>
+3269	                                      {rIdx > 0 && <span className="text-slate-400 mx-1">➔</span>}
+3270	                                      <span className="uppercase text-indigo-900 font-bold">
+3271	                                        {block.name} <span className="text-[8.5px] text-indigo-600 font-extrabold">({blockKeyName})</span>
+3272	                                      </span>
+3273	                                    </span>
+3274	                                  );
+3275	                                });
+3276	                              })()}
+3277	                            </div>
+3278	                          </div>
+3279	 
+3280	                           {/* Live Sheet Render */}
+3281	                           <div className="space-y-4">
+3282	                             {songRoadmap.map((block: any, idx: number) => {
+3283	                               let blockDisplayName = block.name;
+3284	 
+3285	                               if (sheetLayoutMode === 'sequence') {
+3286	                                 const firstIdenticalIdx = songRoadmap.findIndex((b: any, bIdx: number) => bIdx < idx && areBlocksLyricsAndChordsIdentical(b, block, songTemplates));
+3287	                                 if (firstIdenticalIdx !== -1) {
+3288	                                   return (
+3289	                                     <div
+3290	                                       key={block.id}
+3291	                                       className="p-2 mb-2 bg-slate-50 border border-dashed border-indigo-200 rounded text-[10px] font-bold text-indigo-600 flex items-center justify-between select-none"
+3292	                                     >
+3293	                                       <span>🔁 REPLAY: {block.name.toUpperCase()} (Same chords & lyrics as section #{firstIdenticalIdx + 1} - {songRoadmap[firstIdenticalIdx].name})</span>
+3294	                                     </div>
+3295	                                   );
+3296	                                 }
+3297	                               }
+3298	
+3299	                               if (sheetLayoutMode === 'compact') {
+3300	                                if (!showLyrics) {
+3301	                                  const firstIdx = songRoadmap.findIndex((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
+3302	                                  if (firstIdx !== idx) return null;
+3303	                                  const identicalBlocks = songRoadmap.filter((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
+3304	                                  const uniqueNames = Array.from(new Set(identicalBlocks.map((b: any) => b.name)));
+3305	                                  blockDisplayName = uniqueNames.join(' / ');
+3306	                                } else {
+3307	                                  const firstIdx = songRoadmap.findIndex((b: any) => b.name === block.name);
+3308	                                  if (firstIdx !== idx) return null;
+3309	                                }
+3310	                              }
+3311	
+3312	                              const blockRep = repInfo[idx];
+3313	                              const templateLines = songTemplates[block.name] || [];
+3314	                              const blockOffset = block.keyOffset || 0;
+3315	                              const blockKeyName = getModulatedKeyName(songKey, blockOffset);
+3316	
+3317	                              const originalIdx = NOTE_TO_INDEX[song.OriginalKey || 'C'] || 0;
+3318	                              const currentIdx = NOTE_TO_INDEX[songKey] || 0;
+3319	                              const totalSemitonesOffset = currentIdx - originalIdx + blockOffset;
+3320	
+3321	                              return (
+3322	                                <div key={block.id} className="break-inside-avoid">
+3323	                                  {/* Section Header */}
+3324	                                  <h3 className="text-[11px] font-black text-indigo-950 uppercase tracking-wide border-b border-slate-200 pb-0.5 mb-1.5 select-none flex items-center justify-between">
+3325	                                    <span>
+3326	                                      {blockDisplayName} {blockOffset !== 0 ? `(KEY: ${blockKeyName})` : ''}
+3327	                                    </span>
+3328	                                    {blockRep && blockRep.totalInRun > 1 && (
+3329	                                      <span className="text-[8px] bg-amber-100 text-amber-800 border border-amber-300 rounded px-1.5 py-0.5 font-mono font-black select-none">
+3330	                                        {blockRep.totalInRun}x
+3331	                                      </span>
+3332	                                    )}
+3333	                                  </h3>
+3334	
+3335	                                  {/* Embedded Lyrics Hints if hidden */}
+3336	                                  {!showLyrics && (
+3337	                                    <div className="mb-2 p-1.5 bg-slate-100 border-l-2 border-indigo-500 rounded-r text-[10px] font-medium text-slate-600 italic select-none">
+3338	                                      {(() => {
+3339	                                        if (sheetLayoutMode === 'compact') {
+3340	                                          const identicalBlocks = songRoadmap.filter((b: any) => areBlocksChordsIdentical(b, block, songTemplates));
+3341	                                          const renderedHints: any[] = [];
+3342	                                          const seenNames = new Set();
+3343	                                          
+3344	                                          identicalBlocks.forEach((b: any) => {
+3345	                                            if (seenNames.has(b.name)) return;
+3346	                                            seenNames.add(b.name);
+3347	                                            const lines = songTemplates[b.name] || [];
+3348	                                            const firstLyric = lines.find((l: any) => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
+3349	                                            if (firstLyric) {
+3350	                                              renderedHints.push({ name: b.name, lyric: firstLyric });
+3351	                                            }
+3352	                                          });
+3353	
+3354	                                          if (renderedHints.length > 0) {
+3355	                                            // Group by lyric
+3356	                                            const groups: { lyric: string; names: string[] }[] = [];
+3357	                                            renderedHints.forEach(h => {
+3358	                                              const normLyric = h.lyric.trim();
+3359	                                              const existingGroup = groups.find(g => g.lyric.trim().toLowerCase() === normLyric.toLowerCase());
+3360	                                              if (existingGroup) {
+3361	                                                existingGroup.names.push(h.name);
+3362	                                              } else {
+3363	                                                groups.push({ lyric: h.lyric, names: [h.name] });
+3364	                                              }
+3365	                                            });
+3366	
+3367	                                            return groups.map((g, gIdx) => (
+3368	                                              <div key={gIdx} className="flex items-center gap-1.5 flex-wrap">
+3369	                                                <span className="text-[8px] font-black uppercase bg-indigo-50 text-indigo-600 px-1 rounded border border-indigo-100 not-italic">
+3370	                                                  {g.names.map(n => n.toUpperCase()).join(' & ')}
+3371	                                                </span>
+3372	                                                <span className="truncate">“{g.lyric}”</span>
+3373	                                                {g.names.length > 1 && (
+3374	                                                  <span className="text-[7px] font-bold text-emerald-600 uppercase bg-emerald-50 px-1 rounded border border-emerald-100">
+3375	                                                    Shared 1st line
+3376	                                                  </span>
+3377	                                                )}
+3378	                                              </div>
+3379	                                            ));
+3380	                                          }
+3381	                                        } else {
+3382	                                          const lines = songTemplates[block.name] || [];
+3383	                                          const firstLyric = lines.find((l: any) => l.Lyrics && l.Lyrics.trim() !== '')?.Lyrics;
+3384	                                          if (firstLyric) {
+3385	                                            return (
+3386	                                              <div className="flex items-center gap-1.5">
+3387	                                                <span className="font-bold text-indigo-600 not-italic">Hint:</span>
+3388	                                                <span className="truncate">“{firstLyric}”</span>
+3389	                                              </div>
+3390	                                            );
+3391	                                          }
+3392	                                        }
+3393	                                        return null;
+3394	                                      })()}
+3395	                                    </div>
+3396	                                  )}
+3397	
+3398	                                  {/* Section Lines */}
+3399	                                  <div className="pl-1.5 space-y-1">
+3400	                                    {(() => {
+3401	                                      const enabledLinesList = templateLines
+3402	                                        .map((l: any, lIdx: number) => ({ l, lIdx }))
+3403	                                        .filter(({ lIdx }: any) => (block.enabledLines || []).includes(lIdx));
+3404	
+3405	                                      const processedLines = enabledLinesList.map(({ l, lIdx }: any) => {
+3406	                                        const transposed = transposeChord(l.Chords || '', totalSemitonesOffset);
+3407	                                        const numbers = getNumberForChord(transposed, blockKeyName, songKey);
+3408	                                        const lyrics = l.Lyrics || '';
+3409	                                        return {
+3410	                                          l,
+3411	                                          lIdx,
+3412	                                          transposed,
+3413	                                          numbers,
+3414	                                          lyrics,
+3415	                                        };
+3416	                                      });
+3417	
+3418	                                      // 3. Find the best multi-line chord progression loop (pattern length L, repeat count K)
+3419	                                      let bestL = -1;
+3420	                                      let bestK = -1;
+3421	                                      const N = processedLines.length;
+3422	
+3423	                                      if (!showLyrics && N >= 4) {
+3424	                                        for (let L = 2; L <= Math.floor(N / 2); L++) {
+3425	                                          let K = 1;
+3426	                                          while ((K + 1) * L <= N) {
+3427	                                            let matches = true;
+3428	                                            for (let offset = 0; offset < L; offset++) {
+3429	                                              const originalChord = processedLines[offset].transposed;
+3430	                                              const nextChord = processedLines[K * L + offset].transposed;
+3431	                                              if (originalChord !== nextChord) {
+3432	                                                matches = false;
+3433	                                                break;
+3434	                                              }
+3435	                                            }
+3436	                                            if (matches) {
+3437	                                              K++;
+3438	                                            } else {
+3439	                                              break;
+3440	                                            }
+3441	                                          }
+3442	
+3443	                                          if (K >= 2) {
+3444	                                            // Make sure at least one line in the pattern has non-empty chords
+3445	                                            let hasChords = false;
+3446	                                            for (let offset = 0; offset < L; offset++) {
+3447	                                              if (processedLines[offset].transposed && processedLines[offset].transposed.trim() !== '') {
+3448	                                                hasChords = true;
+3449	                                                break;
+3450	                                              }
+3451	                                            }
+3452	
+3453	                                            if (hasChords) {
+3454	                                              if (bestL === -1 || (K * L > bestK * bestL) || (K * L === bestK * bestL && L < bestL)) {
+3455	                                                bestL = L;
+3456	                                                bestK = K;
+3457	                                              }
+3458	                                            }
+3459	                                          }
+3460	                                        }
+3461	                                      }
+3462	
+3463	                                      // 4. Render with Loop-Grouping if a pattern is detected
+3464	                                      if (bestL >= 2 && bestK >= 2) {
+3465	                                        const loopLength = bestL;
+3466	                                        const repeatCount = bestK;
+3467	                                        const loopedLinesCount = loopLength * repeatCount;
+3468	
+3469	                                        const lyricsAreIdenticalOrHidden = !showLyrics || (() => {
+3470	                                          for (let r = 1; r < repeatCount; r++) {
+3471	                                            for (let offset = 0; offset < loopLength; offset++) {
+3472	                                              const lineA = processedLines[offset];
+3473	                                              const lineB = processedLines[r * loopLength + offset];
+3474	                                              if ((lineA.lyrics || '') !== (lineB.lyrics || '')) {
+3475	                                                return false;
+3476	                                              }
+3477	                                            }
+3478	                                          }
+3479	                                          return true;
+3480	                                        })();
+3481	
+3482	                                        const loopContainers = [];
+3483	
+3484	                                        if (lyricsAreIdenticalOrHidden) {
+3485	                                          const runLines = processedLines.slice(0, loopLength);
+3486	                                          loopContainers.push(
+3487	                                            <div
+3488	                                              key="loop-run-single"
+3489	                                              className="border-l-3 border-amber-500 bg-amber-50 rounded-r-lg px-2.5 py-2 my-2 space-y-1"
+3490	                                            >
+3491	                                              <div className="flex items-center gap-2 mb-1 select-none">
+3492	                                                <span className="text-[8px] font-mono font-black uppercase tracking-wider text-amber-800 bg-amber-100 border border-amber-200 rounded px-1.5 py-0.5 flex items-center gap-1 shadow-sm">
+3493	                                                  <span>🔁</span> PLAY {repeatCount}X
+3494	                                                </span>
+3495	                                                <span className="text-[8px] text-amber-600 font-mono tracking-wide">
+3496	                                                  (chords progression repeats)
+3497	                                                </span>
+3498	                                              </div>
+3499	
+3500	                                              <div className="space-y-1">
+3501	                                                {runLines.map((lineData) => {
+3502	                                                  const { lIdx, transposed, numbers, lyrics } = lineData;
+3503	                                                  return (
+3504	                                                    <div key={lIdx} className="break-inside-avoid">
+3505	                                                      {displayMode !== 'numbers' && transposed && (
+3506	                                                        <div className="font-mono font-bold text-[11px] text-indigo-700 whitespace-pre leading-none mb-0.5">
+3507	                                                          {transposed}
+3508	                                                        </div>
+3509	                                                      )}
+3510	                                                      {displayMode !== 'chords' && numbers && (
+3511	                                                        <div className="font-mono font-bold text-[10px] text-slate-500 whitespace-pre leading-none mb-0.5">
+3512	                                                          {numbers}
+3513	                                                        </div>
+3514	                                                      )}
+3515	                                                      {showLyrics && lyrics && (
+3516	                                                        <div className="text-[11px] text-slate-800 leading-tight">
+3517	                                                          {lyrics}
+3518	                                                        </div>
+3519	                                                      )}
+3520	                                                    </div>
+3521	                                                  );
+3522	                                                })}
+3523	                                              </div>
+3524	                                            </div>
+3525	                                          );
+3526	                                        } else {
+3527	                                          // Lyrics are shown and are different: render all rounds so the user can read the lyrics
+3528	                                          for (let r = 0; r < repeatCount; r++) {
+3529	                                            const runLines = processedLines.slice(r * loopLength, (r + 1) * loopLength);
+3530	                                            loopContainers.push(
+3531	                                              <div
+3532	                                                key={`loop-run-${r}`}
+3533	                                                className="border-l-3 border-indigo-500 bg-indigo-50 rounded-r-lg px-2.5 py-2 my-2 space-y-1"
+3534	                                              >
+3535	                                                <div className="flex items-center gap-2 mb-1 select-none">
+3536	                                                  {r === 0 ? (
+3537	                                                    <>
+3538	                                                      <span className="text-[8px] font-mono font-black uppercase tracking-wider text-amber-800 bg-amber-100 border border-amber-200 rounded px-1.5 py-0.5 flex items-center gap-1 shadow-sm">
+3539	                                                        <span>🔁</span> CHORD LOOP ({repeatCount}X) — ROUND 1
+3540	                                                      </span>
+3541	                                                      <span className="text-[8px] text-indigo-600 font-mono tracking-wide">
+3542	                                                        (chords progression pattern repeats)
+3543	                                                      </span>
+3544	                                                    </>
+3545	                                                  ) : (
+3546	                                                    <>
+3547	                                                      <span className="text-[8px] font-mono font-black uppercase tracking-wider text-indigo-800 bg-indigo-100 border border-indigo-200 rounded px-1.5 py-0.5 flex items-center gap-1 shadow-sm">
+3548	                                                        <span>🔁</span> ROUND {r + 1}
+3549	                                                      </span>
+3550	                                                      <span className="text-[8px] text-gray-500 font-mono tracking-wide">
+3551	                                                        (identical chords as Round 1)
+3552	                                                      </span>
+3553	                                                    </>
+3554	                                                  )}
+3555	                                                </div>
+3556	
+3557	                                                <div className="space-y-1">
+3558	                                                  {runLines.map((lineData) => {
+3559	                                                    const { lIdx, transposed, numbers, lyrics } = lineData;
+3560	                                                    return (
+3561	                                                      <div key={lIdx} className="break-inside-avoid">
+3562	                                                        {displayMode !== 'numbers' && transposed && (
+3563	                                                          <div className="font-mono font-bold text-[11px] text-indigo-700 whitespace-pre leading-none mb-0.5">
+3564	                                                            {transposed}
+3565	                                                          </div>
+3566	                                                        )}
+3567	                                                        {displayMode !== 'chords' && numbers && (
+3568	                                                          <div className="font-mono font-bold text-[10px] text-slate-500 whitespace-pre leading-none mb-0.5">
+3569	                                                            {numbers}
+3570	                                                          </div>
+3571	                                                        )}
+3572	                                                        {showLyrics && lyrics && (
+3573	                                                          <div className="text-[11px] text-slate-800 leading-tight">
+3574	                                                            {lyrics}
+3575	                                                          </div>
+3576	                                                        )}
+3577	                                                      </div>
+3578	                                                    );
+3579	                                                  })}
+3580	                                                </div>
+3581	                                              </div>
+3582	                                            );
+3583	                                          }
+3584	                                        }
+3585	
+3586	                                        const remainingLines = processedLines.slice(loopedLinesCount);
+3587	
+3588	                                        return (
+3589	                                          <div className="space-y-1">
+3590	                                            {loopContainers}
+3591	                                            {remainingLines.length > 0 && (
+3592	                                              <div className="pt-2 space-y-1 border-t border-dashed border-slate-200">
+3593	                                                {remainingLines.map((lineData) => {
+3594	                                                  const { lIdx, transposed, numbers, lyrics } = lineData;
+3595	                                                  return (
+3596	                                                    <div key={lIdx} className="break-inside-avoid">
+3597	                                                      {displayMode !== 'numbers' && transposed && (
+3598	                                                        <div className="font-mono font-bold text-[11px] text-indigo-700 whitespace-pre leading-none mb-0.5">
+3599	                                                          {transposed}
+3600	                                                        </div>
+3601	                                                      )}
+3602	                                                      {displayMode !== 'chords' && numbers && (
+3603	                                                        <div className="font-mono font-bold text-[10px] text-slate-500 whitespace-pre leading-none mb-0.5">
+3604	                                                          {numbers}
+3605	                                                        </div>
+3606	                                                      )}
+3607	                                                      {showLyrics && lyrics && (
+3608	                                                        <div className="text-[11px] text-slate-800 leading-tight">
+3609	                                                          {lyrics}
+3610	                                                        </div>
+3611	                                                      )}
+3612	                                                    </div>
+3613	                                                  );
+3614	                                                })}
+3615	                                              </div>
+3616	                                            )}
+3617	                                          </div>
+3618	                                        );
+3619	                                      }
+3620	
+3621	                                      // 5. Compute consecutive runs of identical lines (Fallback)
+3622	                                      interface LineRun {
+3623	                                        startIndex: number;
+3624	                                        endIndex: number;
+3625	                                        count: number;
+3626	                                      }
+3627	
+3628	                                      const lineRuns: LineRun[] = [];
+3629	                                      let i = 0;
+3630	                                      while (i < processedLines.length) {
+3631	                                        let j = i + 1;
+3632	                                        while (j < processedLines.length) {
+3633	                                          const lineA = processedLines[i];
+3634	                                          const lineB = processedLines[j];
+3635	
+3636	                                          const chordsIdentical = lineA.transposed === lineB.transposed;
+3637	                                          const lyricsIdentical = !showLyrics || lineA.lyrics === lineB.lyrics;
+3638	
+3639	                                          if (chordsIdentical && lyricsIdentical) {
+3640	                                            j++;
+3641	                                          } else {
+3642	                                            break;
+3643	                                          }
+3644	                                        }
+3645	
+3646	                                        lineRuns.push({
+3647	                                          startIndex: i,
+3648	                                          endIndex: j - 1,
+3649	                                          count: j - i,
+3650	                                        });
+3651	
+3652	                                        i = j;
+3653	                                      }
+3654	
+3655	                                      // 6. Render grouped lines (Fallback)
+3656	                                      return lineRuns.map((run) => {
+3657	                                        const firstLine = processedLines[run.startIndex];
+3658	                                        const { lIdx, transposed, numbers, lyrics } = firstLine;
+3659	
+3660	                                        return (
+3661	                                          <div key={lIdx} className="break-inside-avoid">
+3662	                                            {displayMode !== 'numbers' && transposed && (
+3663	                                              <div className="font-mono font-bold text-[11px] text-indigo-700 whitespace-pre leading-none mb-0.5 flex items-center gap-2 flex-wrap">
+3664	                                                <span>{transposed}</span>
+3665	                                                {run.count > 1 && (
+3666	                                                  <span className="text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded px-1.5 py-0.5 font-mono font-black select-none tracking-wide">
+3667	                                                    {run.count}x
+3668	                                                  </span>
+3669	                                                )}
+3670	                                              </div>
+3671	                                            )}
+3672	                                            {displayMode !== 'chords' && numbers && (
+3673	                                              <div className="font-mono font-bold text-[10px] text-slate-500 whitespace-pre leading-none mb-0.5 flex items-center gap-2 flex-wrap">
+3674	                                                <span>{numbers}</span>
+3675	                                                {run.count > 1 && displayMode === 'numbers' && (
+3676	                                                  <span className="text-[8px] bg-amber-100 text-amber-800 border border-amber-200 rounded px-1.5 py-0.5 font-mono font-black select-none tracking-wide">
+3677	                                                    {run.count}x
+3678	                                                  </span>
+3679	                                                )}
+3680	                                              </div>
+3681	                                            )}
+3682	                                            {showLyrics && lyrics && (
+3683	                                              <div className="text-[11px] text-slate-800 leading-tight">
+3684	                                                {lyrics}
+3685	                                              </div>
+3686	                                            )}
+3687	                                          </div>
+3688	                                        );
+3689	                                      });
+3690	                                    })()}
+3691	                                  </div>
+3692	                                </div>
+3693	                              );
+3694	                            })}
+3695	                          </div>
+3696	                        </div>
+3697	                      );
+3698	                    })}
+3699	                  </div>
+3700	                </div>
+3701	
+3702	              </div>
+3703	
+3704	              {/* Modal Footer Controls */}
+3705	              <div className="px-5 py-4 border-t border-white/5 bg-[#080812] flex items-center justify-between shrink-0 gap-3">
+3706	                <button
+3707	                  onClick={() => setIsPDFPreviewOpen(false)}
+3708	                  className="px-4 py-2 bg-white/5 hover:bg-white/10 text-gray-300 font-bold rounded-xl text-xs uppercase tracking-wider transition-all active:scale-95 cursor-pointer"
+3709	                >
+3710	                  Cancel
+3711	                </button>
+3712	                <button
+3713	                  onClick={() => {
+3714	                    exportToPDF();
+3715	                    setIsPDFPreviewOpen(false);
+3716	                  }}
+3717	                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-xl text-xs uppercase tracking-wider transition-all active:scale-95 shadow-md shadow-indigo-500/10 cursor-pointer flex items-center gap-1.5"
+3718	                >
+3719	                  <span>🖨️</span>
+3720	                  <span>Print / Save as PDF</span>
+3721	                </button>
+3722	              </div>
+3723	
+3724	            </div>
+3725	          </div>
+3726	        );
+3727	      })()}
+3728	
+3729	      {/* Real-time Toasts notifications */}
+3730	      <div id="toastContainer" className="fixed bottom-6 right-4 sm:right-6 z-[950] flex flex-col gap-2 pointer-events-none w-full max-w-[90vw] sm:max-w-xs">
+3731	        {toasts.map((toast) => {
+3732	          let theme = 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20';
+3733	          let symbol = 'ℹ';
+3734	          if (toast.type === 'success') {
+3735	            theme = 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20';
+3736	            symbol = '✓';
+3737	          } else if (toast.type === 'error') {
+3738	            theme = 'bg-rose-500/10 text-rose-300 border-rose-500/20';
+3739	            symbol = '✕';
+3740	          } else if (toast.type === 'warning') {
+3741	            theme = 'bg-amber-500/10 text-amber-300 border-amber-500/20';
+3742	            symbol = '⚠️';
+3743	          }
+3744	          return (
+3745	            <div
+3746	              key={toast.id}
+3747	              className={`p-4 rounded-2xl backdrop-blur-xl shadow-2xl text-xs font-semibold tracking-wide border pointer-events-auto flex items-center gap-2 w-full animate-fadeIn ${theme}`}
+3748	            >
+3749	              <span className="text-base flex-shrink-0">{symbol}</span>
+3750	              <span>{toast.message}</span>
+3751	            </div>
+3752	          );
+3753	        })}
+3754	      </div>
+3755	    </div>
+3756	  );
+3757	}

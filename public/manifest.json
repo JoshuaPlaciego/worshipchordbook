@@ -1,6 +1,6 @@
 {
-  "name": "ChordSheet Live Flow",
-  "short_name": "ChordSheet",
+  "name": "worshipchordbook",
+  "short_name": "worshipchordbook",
   "description": "Interactive Chord Sheet, Auto-Scroller, and Setlist Organizer with dynamic key transposing.",
   "start_url": ".",
   "display": "standalone",

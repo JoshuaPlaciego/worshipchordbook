@@ -20,20 +20,92 @@ function doGet(e) {
 function getSheetData(tabName) {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
+    
+    // Unified Setlists / Arrangements storage to save cells!
+    if (tabName === "Arrangements" || tabName === "Setlists") {
+      var setlistSheet = ss.getSheetByName("Setlists");
+      if (!setlistSheet) {
+        setlistSheet = ss.insertSheet("Setlists");
+        setlistSheet.appendRow(["Set", "Songs & Arrangements"]);
+      }
+      
+      var data = setlistSheet.getDataRange().getDisplayValues();
+      
+      if (tabName === "Arrangements") {
+        var arrangements = [];
+        for (var i = 1; i < data.length; i++) {
+          var key = data[i][0].toString();
+          if (key.indexOf("ARR_") === 0) {
+            var rest = key.substring(4);
+            var firstUnderscore = rest.indexOf("_");
+            if (firstUnderscore !== -1) {
+              var songId = rest.substring(0, firstUnderscore);
+              var presetName = rest.substring(firstUnderscore + 1);
+              arrangements.push({
+                "SongID": songId,
+                "PresetName": presetName,
+                "RoadmapJSON": data[i][1]
+              });
+            }
+          }
+        }
+        
+        // Auto-migration: Check for legacy Arrangements tab and migrate rows
+        var legacyArrSheet = ss.getSheetByName("Arrangements");
+        if (legacyArrSheet) {
+          var legacyData = legacyArrSheet.getDataRange().getDisplayValues();
+          if (legacyData.length > 1) {
+            for (var k = 1; k < legacyData.length; k++) {
+              var lSongId = legacyData[k][0].toString();
+              var lPreset = legacyData[k][1].toString();
+              var lRoadmap = legacyData[k][2].toString();
+              
+              var alreadyExists = false;
+              for (var m = 0; m < arrangements.length; m++) {
+                if (arrangements[m].SongID === lSongId && arrangements[m].PresetName === lPreset) {
+                  alreadyExists = true;
+                  break;
+                }
+              }
+              if (!alreadyExists) {
+                arrangements.push({
+                  "SongID": lSongId,
+                  "PresetName": lPreset,
+                  "RoadmapJSON": lRoadmap
+                });
+                var compoundKey = "ARR_" + lSongId + "_" + lPreset;
+                setlistSheet.appendRow([compoundKey, lRoadmap]);
+              }
+            }
+            try {
+              ss.deleteSheet(legacyArrSheet);
+            } catch (err) {
+              console.warn("Could not delete legacy Arrangements sheet:", err);
+            }
+          } else {
+            try {
+              ss.deleteSheet(legacyArrSheet);
+            } catch (err) {}
+          }
+        }
+        return createJsonResponse(arrangements);
+        
+      } else { // tabName === "Setlists"
+        var setlists = [];
+        for (var i = 1; i < data.length; i++) {
+          var key = data[i][0].toString();
+          if (key.indexOf("ARR_") !== 0) {
+            setlists.push({
+              "Set": key,
+              "Songs & Arrangements": data[i][1]
+            });
+          }
+        }
+        return createJsonResponse(setlists);
+      }
+    }
+    
     var sheet = ss.getSheetByName(tabName);
-    
-    // Auto-create Arrangements sheet if it doesn't exist yet
-    if (!sheet && tabName === "Arrangements") {
-      sheet = ss.insertSheet("Arrangements");
-      sheet.appendRow(["SongID", "PresetName", "RoadmapJSON"]);
-    }
-    
-    // Auto-create Setlists sheet if it doesn't exist yet
-    if (!sheet && tabName === "Setlists") {
-      sheet = ss.insertSheet("Setlists");
-      sheet.appendRow(["Set", "Songs & Arrangements"]);
-    }
-    
     if (!sheet) return createJsonResponse([]);
     
     // Use getDisplayValues() instead of getValues()
@@ -123,6 +195,24 @@ function doPost(e) {
     return createJsonResponse({ success: isValid });
   }
 
+  // Handle pessimistic lock actions
+  if (params.action === "checkLock") {
+    var res = checkLockStatus(params.lockId);
+    return createJsonResponse(res);
+  }
+  if (params.action === "acquireLock") {
+    var res = acquireLock(params.lockId, params.username);
+    return createJsonResponse(res);
+  }
+  if (params.action === "releaseLock") {
+    var res = releaseLock(params.lockId, params.username);
+    return createJsonResponse(res);
+  }
+  if (params.action === "updateLockHeartbeat") {
+    var res = updateLockHeartbeat(params.lockId, params.username);
+    return createJsonResponse(res);
+  }
+
   // For all other master write actions (like bulkAdd or updateSong), require valid credentials dynamically
   if (params.action === "bulkAdd" || params.action === "updateSong") {
     if (!isUserValid(params.user, params.secret)) {
@@ -148,14 +238,24 @@ function doPost(e) {
       }
     }
     
-    var songId = new Date().getTime().toString();
-    songSheet.appendRow([songId, params.song.title, params.song.artist, params.song.key, params.song.version]);
+    // Ensure "SongLinesJSON" column exists in headers, if not add it
+    var headers = songSheet.getRange(1, 1, 1, songSheet.getLastColumn()).getValues()[0];
+    var colIdx = headers.indexOf("SongLinesJSON");
+    if (colIdx === -1) {
+      colIdx = headers.length;
+      songSheet.getRange(1, colIdx + 1).setValue("SongLinesJSON");
+    }
     
-    var lineSheet = ss.getSheetByName("SongLines");
-    params.lines.forEach(function(l) {
-      lineSheet.appendRow([songId, l.section, l.order, l.chords, l.lyrics]);
-    });
-
+    var songId = new Date().getTime().toString();
+    
+    // Build row array matching headers length
+    var newRow = [songId, params.song.title, params.song.artist, params.song.key, params.song.version];
+    while (newRow.length < colIdx) {
+      newRow.push("");
+    }
+    newRow[colIdx] = JSON.stringify(params.lines);
+    songSheet.appendRow(newRow);
+    
     // Update versions automatically
     updateSyncVersion(ss, "Songs");
     updateSyncVersion(ss, "SongLines");
@@ -169,6 +269,13 @@ function doPost(e) {
   if (params.action === "updateSong") {
     var songIdStr = params.song.id.toString();
     
+    // Safety Net: Read-Before-Write check right before final save to Sheet
+    var lockId = "song_" + songIdStr;
+    var lockCheck = checkLockStatus(lockId);
+    if (lockCheck.isLocked && lockCheck.lockedBy !== params.user) {
+      return createJsonResponse({status: "error", message: "This song is locked for editing by " + lockCheck.lockedBy});
+    }
+    
     var songSheet = ss.getSheetByName("Songs");
     var existingSongs = songSheet.getDataRange().getDisplayValues();
     var songRowToUpdate = -1;
@@ -181,28 +288,37 @@ function doPost(e) {
     }
     
     if (songRowToUpdate !== -1) {
-      songSheet.getRange(songRowToUpdate, 2, 1, 4).setValues([[
-        params.song.title, 
-        params.song.artist, 
-        params.song.key, 
-        params.song.version
-      ]]);
+      // Ensure "SongLinesJSON" column exists in headers, if not add it
+      var headers = songSheet.getRange(1, 1, 1, songSheet.getLastColumn()).getValues()[0];
+      var colIdx = headers.indexOf("SongLinesJSON");
+      if (colIdx === -1) {
+        colIdx = headers.length;
+        songSheet.getRange(1, colIdx + 1).setValue("SongLinesJSON");
+        headers = songSheet.getRange(1, 1, 1, songSheet.getLastColumn()).getValues()[0];
+      }
+      
+      // Update Title, Artist, Key, Version
+      songSheet.getRange(songRowToUpdate, 2).setValue(params.song.title);
+      songSheet.getRange(songRowToUpdate, 3).setValue(params.song.artist);
+      songSheet.getRange(songRowToUpdate, 4).setValue(params.song.key);
+      songSheet.getRange(songRowToUpdate, 5).setValue(params.song.version);
+      
+      // Set the packed lines cell
+      songSheet.getRange(songRowToUpdate, colIdx + 1).setValue(JSON.stringify(params.lines));
     } else {
       return createJsonResponse({status: "error", message: "Song not found for updating."});
     }
 
+    // Delete the legacy lines from SongLines tab if they exist (to save cells!)
     var lineSheet = ss.getSheetByName("SongLines");
-    var existingLines = lineSheet.getDataRange().getDisplayValues();
-    
-    for (var j = existingLines.length - 1; j >= 1; j--) {
-      if (existingLines[j][0].toString() === songIdStr) {
-        lineSheet.deleteRow(j + 1); 
+    if (lineSheet) {
+      var existingLines = lineSheet.getDataRange().getDisplayValues();
+      for (var j = existingLines.length - 1; j >= 1; j--) {
+        if (existingLines[j][0].toString() === songIdStr) {
+          lineSheet.deleteRow(j + 1); 
+        }
       }
     }
-    
-    params.lines.forEach(function(l) {
-      lineSheet.appendRow([songIdStr, l.section, l.order, l.chords, l.lyrics]);
-    });
     
     // Update versions automatically
     updateSyncVersion(ss, "Songs");
@@ -212,56 +328,60 @@ function doPost(e) {
   }
 
   // ----------------------------------------------------
-  // ACTION: SAVE SHARED ROADMAP ARRANGEMENT
+  // ACTION: SAVE SHARED ROADMAP ARRANGEMENT (Consolidated to Setlists Sheet to save cells)
   // ----------------------------------------------------
   if (params.action === "saveArrangement") {
-    var arrSheet = ss.getSheetByName("Arrangements");
-    if (!arrSheet) {
-      arrSheet = ss.insertSheet("Arrangements");
-      arrSheet.appendRow(["SongID", "PresetName", "RoadmapJSON"]);
+    var setlistSheet = ss.getSheetByName("Setlists");
+    if (!setlistSheet) {
+      setlistSheet = ss.insertSheet("Setlists");
+      setlistSheet.appendRow(["Set", "Songs & Arrangements"]);
     }
-    var data = arrSheet.getDataRange().getDisplayValues();
+    var data = setlistSheet.getDataRange().getDisplayValues();
     var songIdStr = params.songId.toString();
     var presetName = params.name.toString();
     var roadmapJson = JSON.stringify(params.roadmap);
+    var compoundKey = "ARR_" + songIdStr + "_" + presetName;
     
     var foundRow = -1;
     for (var i = 1; i < data.length; i++) {
-      if (data[i][0].toString() === songIdStr && data[i][1].toString() === presetName) {
+      if (data[i][0].toString() === compoundKey) {
         foundRow = i + 1;
         break;
       }
     }
     if (foundRow !== -1) {
-      arrSheet.getRange(foundRow, 3).setValue(roadmapJson);
+      setlistSheet.getRange(foundRow, 2).setValue(roadmapJson);
     } else {
-      arrSheet.appendRow([songIdStr, presetName, roadmapJson]);
+      setlistSheet.appendRow([compoundKey, roadmapJson]);
     }
 
-    // Update versions automatically
+    // Update versions automatically for both so caches invalidate correctly
     updateSyncVersion(ss, "Arrangements");
+    updateSyncVersion(ss, "Setlists");
     
     return createJsonResponse({status: "success"});
   }
 
   // ----------------------------------------------------
-  // ACTION: DELETE SHARED ROADMAP ARRANGEMENT
+  // ACTION: DELETE SHARED ROADMAP ARRANGEMENT (Consolidated to Setlists Sheet to save cells)
   // ----------------------------------------------------
   if (params.action === "deleteArrangement") {
-    var arrSheet = ss.getSheetByName("Arrangements");
-    if (!arrSheet) return createJsonResponse({status: "error", message: "No arrangements sheet found"});
-    var data = arrSheet.getDataRange().getDisplayValues();
+    var setlistSheet = ss.getSheetByName("Setlists");
+    if (!setlistSheet) return createJsonResponse({status: "success"}); // Fail gracefully
+    var data = setlistSheet.getDataRange().getDisplayValues();
     var songIdStr = params.songId.toString();
     var presetName = params.name.toString();
+    var compoundKey = "ARR_" + songIdStr + "_" + presetName;
     
     for (var i = data.length - 1; i >= 1; i--) {
-      if (data[i][0].toString() === songIdStr && data[i][1].toString() === presetName) {
-        arrSheet.deleteRow(i + 1);
+      if (data[i][0].toString() === compoundKey) {
+        setlistSheet.deleteRow(i + 1);
       }
     }
     
-    // Update versions automatically
+    // Update versions automatically for both so caches invalidate correctly
     updateSyncVersion(ss, "Arrangements");
+    updateSyncVersion(ss, "Setlists");
 
     return createJsonResponse({status: "success"});
   }
@@ -324,4 +444,118 @@ function doPost(e) {
 
 function createJsonResponse(data) {
   return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ----------------------------------------------------
+// PESSIMISTIC LOCKING MECHANISM FOR HIGH-CONCURRENCY
+// ----------------------------------------------------
+function getLocksSheet(ss) {
+  var sheet = ss.getSheetByName("Locks");
+  if (!sheet) {
+    sheet = ss.insertSheet("Locks");
+    sheet.appendRow(["LockID", "LockedBy", "LastActive", "IsLocked"]);
+  }
+  return sheet;
+}
+
+function checkLockStatus(lockId) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = getLocksSheet(ss);
+  var data = sheet.getDataRange().getValues();
+  
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0].toString() === lockId) {
+      var lockedBy = data[i][1];
+      var lastActive = data[i][2];
+      var isLocked = data[i][3] === "true" || data[i][3] === true || data[i][3] === "TRUE";
+      
+      // Auto-unlock if lock is older than 5 minutes of inactivity (300000 ms)
+      var now = new Date().getTime();
+      if (isLocked && lastActive && (now - Number(lastActive) > 300000)) {
+        sheet.getRange(i + 1, 4).setValue("false");
+        return { isLocked: false, lockedBy: "" };
+      }
+      
+      return { isLocked: isLocked, lockedBy: lockedBy, lastActive: lastActive };
+    }
+  }
+  return { isLocked: false, lockedBy: "" };
+}
+
+function acquireLock(lockId, username) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = getLocksSheet(ss);
+  var data = sheet.getDataRange().getValues();
+  var now = new Date().getTime().toString();
+  
+  var foundRow = -1;
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0].toString() === lockId) {
+      foundRow = i + 1;
+      break;
+    }
+  }
+  
+  if (foundRow !== -1) {
+    var currentIsLocked = data[foundRow - 1][3] === "true" || data[foundRow - 1][3] === true || data[foundRow - 1][3] === "TRUE";
+    var currentLockedBy = data[foundRow - 1][1];
+    var currentLastActive = data[foundRow - 1][2];
+    var currentTime = new Date().getTime();
+    
+    // Check if locked by someone else and still active
+    if (currentIsLocked && currentLockedBy !== username && (currentTime - Number(currentLastActive) <= 300000)) {
+      return { success: false, isLocked: true, lockedBy: currentLockedBy };
+    }
+    
+    sheet.getRange(foundRow, 2).setValue(username);
+    sheet.getRange(foundRow, 3).setValue(now);
+    sheet.getRange(foundRow, 4).setValue("true");
+  } else {
+    sheet.appendRow([lockId, username, now, "true"]);
+  }
+  
+  return { success: true, isLocked: true, lockedBy: username };
+}
+
+function releaseLock(lockId, username) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = getLocksSheet(ss);
+  var data = sheet.getDataRange().getValues();
+  
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0].toString() === lockId) {
+      var currentLockedBy = data[i][1];
+      if (currentLockedBy === username || username === "Admin" || username === "admin") {
+        sheet.getRange(i + 1, 4).setValue("false");
+        return { success: true };
+      }
+      return { success: false, message: "Locked by another user" };
+    }
+  }
+  return { success: true };
+}
+
+function updateLockHeartbeat(lockId, username) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = getLocksSheet(ss);
+  var data = sheet.getDataRange().getValues();
+  var now = new Date().getTime().toString();
+  
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0].toString() === lockId) {
+      var currentIsLocked = data[i][3] === "true" || data[i][3] === true || data[i][3] === "TRUE";
+      var currentLockedBy = data[i][1];
+      
+      if (currentIsLocked && currentLockedBy !== username) {
+        return { success: false, lockedBy: currentLockedBy };
+      }
+      
+      sheet.getRange(i + 1, 2).setValue(username);
+      sheet.getRange(i + 1, 3).setValue(now);
+      sheet.getRange(i + 1, 4).setValue("true");
+      return { success: true };
+    }
+  }
+  
+  return acquireLock(lockId, username);
 }

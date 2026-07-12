@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 interface InstallAndConfigureModalProps {
   isOpen: boolean;
@@ -30,6 +30,38 @@ export const InstallAndConfigureModal: React.FC<InstallAndConfigureModalProps> =
   const [activeTab, setActiveTab] = useState<'install' | 'backend'>('install');
   const [inputUrl, setInputUrl] = useState(scriptUrl);
   const [syncLoading, setSyncLoading] = useState(false);
+
+  // Global cursor loading state integration
+  useEffect(() => {
+    const incrementProcessing = () => {
+      if (typeof window !== 'undefined') {
+        (window as any).__processingCount = ((window as any).__processingCount || 0) + 1;
+        document.body.classList.add('app-processing');
+      }
+    };
+
+    const decrementProcessing = () => {
+      if (typeof window !== 'undefined') {
+        (window as any).__processingCount = Math.max(0, ((window as any).__processingCount || 0) - 1);
+        if ((window as any).__processingCount === 0) {
+          document.body.classList.remove('app-processing');
+        }
+      }
+    };
+
+    if (syncLoading) {
+      incrementProcessing();
+    } else {
+      decrementProcessing();
+    }
+
+    return () => {
+      if (syncLoading) {
+        decrementProcessing();
+      }
+    };
+  }, [syncLoading]);
+
   const [copiedScript, setCopiedScript] = useState(false);
 
   if (!isOpen) return null;

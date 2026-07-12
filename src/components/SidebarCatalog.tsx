@@ -30,6 +30,12 @@ interface SidebarCatalogProps {
   onOpenInstallGuide?: () => void;
   onDownloadSetlistPDF?: (setName: string) => void;
   isDesktopSidebar?: boolean;
+  setlistsTabMode?: 'online' | 'local';
+  onChangeSetlistsTabMode?: (mode: 'online' | 'local') => void;
+  onImportSetlistJSON?: (json: any) => Promise<void>;
+  onExportSetlistJSON?: (setName: string) => void;
+  onlineSetlistsCount?: number;
+  localSetlistsCount?: number;
 }
 
 export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
@@ -61,6 +67,12 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
   onOpenInstallGuide,
   onDownloadSetlistPDF,
   isDesktopSidebar = false,
+  setlistsTabMode = 'online',
+  onChangeSetlistsTabMode,
+  onImportSetlistJSON,
+  onExportSetlistJSON,
+  onlineSetlistsCount = 0,
+  localSetlistsCount = 0,
 }) => {
   const [search, setSearch] = useState('');
   const [expandedSets, setExpandedSets] = useState<{ [setName: string]: boolean }>({});
@@ -143,7 +155,7 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
         id="navDrawer"
         className={isDesktopSidebar
           ? "w-full h-full bg-[#03040c]/40 flex flex-col border-r border-indigo-500/10"
-          : `fixed inset-y-0 left-0 w-[85vw] max-w-sm bg-gradient-to-br from-indigo-950/95 via-[#0a0b16]/95 to-[#05060a]/95 backdrop-blur-3xl z-[100] transform shadow-[4px_0_40px_rgba(49,46,129,0.5)] flex flex-col transition-transform duration-300 border-r border-indigo-500/20 ${
+          : `fixed ${isAdmin ? 'top-6 bottom-0' : 'inset-y-0'} left-0 w-[85vw] max-w-sm bg-gradient-to-br from-indigo-950/95 via-[#0a0b16]/95 to-[#05060a]/95 backdrop-blur-3xl z-[100] transform shadow-[4px_0_40px_rgba(49,46,129,0.5)] flex flex-col transition-transform duration-300 border-r border-indigo-500/20 ${
               isOpen ? 'translate-x-0' : '-translate-x-full'
             }`
         }
@@ -168,7 +180,7 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                 onOpenAddSongForm();
                 onClose();
               }}
-              className="w-full mb-4 py-2.5 btn-5d-primary text-white text-[10px] font-bold tracking-wider rounded-xl flex items-center justify-center gap-2 cursor-pointer shadow-md"
+              className="w-full mb-4 py-2.5 bg-[#fbbf24] hover:bg-[#fbbf24]/90 text-[#0f172a] font-black border border-[#fbbf24]/40 shadow-lg shadow-[#fbbf24]/10 text-[10px] tracking-wider rounded-xl flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-95"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4" />
@@ -194,37 +206,94 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
           </div>
 
           {currentTab === 'setlists' && (
-            <div className="mb-4 bg-black/20 p-2.5 rounded-xl border border-white/5 select-none">
-              <div className="text-[8px] font-bold text-indigo-300/80 uppercase tracking-widest mb-1.5">
-                + Create New Setlist Folder
-              </div>
-              <div className="flex gap-1.5">
-                <input
-                  type="text"
-                  placeholder="e.g. Sunday Morning"
-                  id="sidebarNewSetName"
-                  className="flex-1 bg-black/40 text-indigo-100 py-1.5 px-2.5 rounded-lg text-xs outline-none border border-white/10"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      if (onCreateSetlist && e.currentTarget.value.trim()) {
-                        onCreateSetlist(e.currentTarget.value.trim());
-                        e.currentTarget.value = '';
-                      }
-                    }
-                  }}
-                />
+            <div className="flex flex-col gap-2.5 mb-4">
+              {/* Online vs Local Toggle */}
+              <div className="grid grid-cols-2 gap-1 bg-black/40 p-1 rounded-xl border border-indigo-500/10">
                 <button
-                  onClick={() => {
-                    const el = document.getElementById('sidebarNewSetName') as HTMLInputElement;
-                    if (el && onCreateSetlist && el.value.trim()) {
-                      onCreateSetlist(el.value.trim());
-                      el.value = '';
-                    }
-                  }}
-                  className="px-2.5 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-[10px] font-black uppercase tracking-wider rounded-lg transition-all active:scale-95 cursor-pointer"
+                  onClick={() => onChangeSetlistsTabMode && onChangeSetlistsTabMode('online')}
+                  className={`text-[9px] font-bold py-1.5 rounded-lg transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-1 ${
+                    setlistsTabMode === 'online'
+                      ? 'bg-indigo-600/30 border border-indigo-500/20 text-white font-black shadow-inner shadow-indigo-500/5'
+                      : 'text-indigo-300/40 hover:text-indigo-200'
+                  }`}
                 >
-                  Create
+                  🌐 Online Sets ({onlineSetlistsCount})
                 </button>
+                <button
+                  onClick={() => onChangeSetlistsTabMode && onChangeSetlistsTabMode('local')}
+                  className={`text-[9px] font-bold py-1.5 rounded-lg transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-1 ${
+                    setlistsTabMode === 'local'
+                      ? 'bg-purple-600/30 border border-purple-500/20 text-white font-black shadow-inner shadow-purple-500/5'
+                      : 'text-purple-300/40 hover:text-purple-200'
+                  }`}
+                >
+                  💾 Local Sets ({localSetlistsCount})
+                </button>
+              </div>
+
+              {/* Import Setlist Button */}
+              <div className="flex items-center justify-between bg-black/20 p-2 rounded-xl border border-white/5 select-none gap-2">
+                <span className="text-[9px] font-bold text-indigo-300/80 uppercase tracking-widest font-mono">
+                  📤 Share & Import
+                </span>
+                <label className="px-2.5 py-1 bg-violet-650/40 hover:bg-violet-600 text-violet-250 hover:text-white border border-violet-500/30 hover:border-violet-500/60 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all cursor-pointer">
+                  Import Set
+                  <input
+                    type="file"
+                    accept=".json"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file && onImportSetlistJSON) {
+                        const reader = new FileReader();
+                        reader.onload = async (evt) => {
+                          try {
+                            const parsed = JSON.parse(evt.target?.result as string);
+                            await onImportSetlistJSON(parsed);
+                          } catch (err) {
+                            alert('Failed to import setlist file');
+                          }
+                        };
+                        reader.readAsText(file);
+                      }
+                      e.target.value = '';
+                    }}
+                  />
+                </label>
+              </div>
+
+              <div className="bg-black/20 p-2.5 rounded-xl border border-white/5 select-none">
+                <div className="text-[8px] font-bold text-indigo-300/80 uppercase tracking-widest mb-1.5">
+                  + Create New Setlist Folder
+                </div>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    placeholder="e.g. Sunday Morning"
+                    id="sidebarNewSetName"
+                    className="flex-1 bg-black/40 text-indigo-100 py-1.5 px-2.5 rounded-lg text-xs outline-none border border-white/10"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        if (onCreateSetlist && e.currentTarget.value.trim()) {
+                          onCreateSetlist(e.currentTarget.value.trim());
+                          e.currentTarget.value = '';
+                        }
+                      }
+                    }}
+                  />
+                  <button
+                    onClick={() => {
+                      const el = document.getElementById('sidebarNewSetName') as HTMLInputElement;
+                      if (el && onCreateSetlist && el.value.trim()) {
+                        onCreateSetlist(el.value.trim());
+                        el.value = '';
+                      }
+                    }}
+                    className="px-2.5 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-[10px] font-black uppercase tracking-wider rounded-lg transition-all active:scale-95 cursor-pointer"
+                  >
+                    Create
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -312,23 +381,38 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                     return (
                       <div
                         key={setName}
-                        className="bg-indigo-950/20 border border-indigo-500/10 rounded-xl overflow-hidden transition-all shadow-md"
+                        className={`overflow-hidden transition-all rounded-xl shadow-md ${
+                          setlistsTabMode === 'local'
+                            ? 'bg-amber-950/5 border border-amber-500/10 hover:border-amber-500/20 shadow-amber-500/5'
+                            : 'bg-indigo-950/20 border border-indigo-500/10 shadow-md'
+                        }`}
                       >
                         {/* Folder Header */}
                         <div
                           onClick={() => toggleSetExpanded(setName)}
-                          className="group flex items-center justify-between p-3 bg-indigo-900/10 hover:bg-indigo-900/20 cursor-pointer select-none transition-colors border-b border-indigo-500/5 min-w-0"
+                          className={`group flex items-center justify-between p-3 cursor-pointer select-none transition-colors border-b min-w-0 ${
+                            setlistsTabMode === 'local'
+                              ? 'bg-amber-900/5 hover:bg-amber-900/10 border-amber-500/5'
+                              : 'bg-indigo-900/10 hover:bg-indigo-900/20 border-indigo-500/5'
+                          }`}
                         >
                           <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
                             <span className="text-sm transition-transform duration-200 shrink-0">
-                              {isExpanded ? '📂' : '📁'}
+                              {isExpanded ? '📂' : (setlistsTabMode === 'local' ? '💻' : '📁')}
                             </span>
-                            <div className="marquee-container relative overflow-hidden flex-1 min-w-0 select-none">
+                            <div className="marquee-container relative overflow-hidden flex-1 min-w-0 select-none flex items-center gap-1.5">
                               <span className="inline-block text-xs font-black tracking-wide text-gray-200 uppercase whitespace-nowrap truncate w-full group-hover:w-max group-hover:overflow-visible group-hover:text-clip group-hover:animate-hover-marquee">
                                 {setName} {isLocked && <span className="ml-1 text-[11px]" title="Setlist Locked by Admin">🔒</span>}
                               </span>
+                              {setlistsTabMode === 'local' && (
+                                <span className="text-[8px] bg-amber-500/15 border border-amber-500/30 text-amber-300 px-1.5 py-0.2 rounded font-black font-mono whitespace-nowrap">LOCAL</span>
+                              )}
                             </div>
-                            <span className="text-[9px] font-mono font-extrabold text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded-full shrink-0">
+                            <span className={`text-[9px] font-mono font-extrabold px-1.5 py-0.5 rounded-full shrink-0 ${
+                              setlistsTabMode === 'local'
+                                ? 'text-amber-400 bg-amber-500/10 border border-amber-500/25'
+                                : 'text-indigo-400 bg-indigo-500/10 border border-indigo-500/20'
+                            }`}>
                               {songIds.length}
                             </span>
                           </div>
@@ -354,7 +438,11 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                     e.stopPropagation();
                                     setDeleteConfirmSet(null);
                                   }}
-                                  className="px-1.5 py-0.5 bg-indigo-950 hover:bg-indigo-900 border border-indigo-500/20 text-indigo-200 text-[9px] font-bold rounded cursor-pointer transition-all active:scale-90"
+                                  className={`px-1.5 py-0.5 border text-[9px] font-bold rounded cursor-pointer transition-all active:scale-90 ${
+                                    setlistsTabMode === 'local'
+                                      ? 'bg-amber-950 hover:bg-amber-900 border-amber-500/20 text-amber-200'
+                                      : 'bg-indigo-950 hover:bg-indigo-900 border-indigo-500/20 text-indigo-200'
+                                  }`}
                                 >
                                   No
                                 </button>
@@ -373,7 +461,9 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                     className={
                                       activeSetlistFolder === setName
                                         ? "px-2 py-1 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 hover:text-emerald-350 border border-emerald-500/30 rounded-md text-[10px] font-extrabold transition-all cursor-pointer flex items-center gap-1.5 shrink-0 shadow-[0_0_12px_rgba(16,185,129,0.1)]"
-                                        : "px-2 py-1 bg-indigo-500/10 hover:bg-indigo-500/30 text-indigo-300 hover:text-white rounded-md text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shrink-0"
+                                        : setlistsTabMode === 'local'
+                                          ? "px-2 py-1 bg-amber-500/10 hover:bg-amber-500/30 text-amber-300 hover:text-white border border-amber-500/20 rounded-md text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shrink-0"
+                                          : "px-2 py-1 bg-indigo-500/10 hover:bg-indigo-500/30 text-indigo-300 hover:text-white rounded-md text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1 shrink-0"
                                     }
                                     title={activeSetlistFolder === setName ? "Setlist is Live" : "Start Setlist"}
                                   >
@@ -408,15 +498,31 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                     <button
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        setDeleteConfirmSet(setName);
+                                        onExportSetlistJSON?.(setName);
                                       }}
-                                      className="p-1 hover:bg-rose-500/10 text-gray-500 hover:text-rose-400 rounded-md transition-colors cursor-pointer"
-                                      title="Delete Setlist Folder"
+                                      className={`p-1 rounded-md transition-colors cursor-pointer mr-0.5 hover:bg-white/5 ${
+                                        setlistsTabMode === 'local' ? 'text-amber-500/60 hover:text-amber-400' : 'text-gray-500 hover:text-indigo-400'
+                                      }`}
+                                      title="Download Setlist JSON"
                                     >
                                       <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                                       </svg>
                                     </button>
+                                    {(setlistsTabMode === 'local' || isAdmin) && (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setDeleteConfirmSet(setName);
+                                        }}
+                                        className="p-1 hover:bg-rose-500/10 text-gray-500 hover:text-rose-400 rounded-md transition-colors cursor-pointer"
+                                        title="Delete Setlist Folder"
+                                      >
+                                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                        </svg>
+                                      </button>
+                                    )}
                                   </>
                                 )}
                               </>
@@ -429,7 +535,9 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
 
                         {/* Folder Contents (Songs list) */}
                         {isExpanded && (
-                          <div className="p-2 space-y-1 bg-black/10 divide-y divide-indigo-500/5">
+                          <div className={`p-2 space-y-1 bg-black/10 divide-y ${
+                            setlistsTabMode === 'local' ? 'divide-amber-500/5' : 'divide-indigo-500/5'
+                          }`}>
                             {folderSongs.length === 0 ? (
                               <div className="text-[10px] text-gray-500 italic p-3 text-center">
                                 Folder is empty. Open a song sheet and click "Setlists" to add it!
@@ -488,7 +596,9 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                     }}
                                     className={`group flex items-center justify-between p-2 rounded-lg cursor-pointer transition-all ${
                                       isCurrent
-                                        ? 'bg-indigo-600/20 border-l-2 border-l-indigo-400 shadow-inner'
+                                        ? setlistsTabMode === 'local'
+                                          ? 'bg-amber-600/15 border-l-2 border-l-amber-400 shadow-[inset_0_2px_8px_rgba(245,158,11,0.05)] text-amber-100 font-semibold'
+                                          : 'bg-indigo-600/20 border-l-2 border-l-indigo-400 shadow-inner'
                                         : 'hover:bg-white/5'
                                     } ${
                                       draggedItem && draggedItem.setName === setName && draggedItem.index === idx
@@ -496,7 +606,9 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                         : ''
                                     } ${
                                       dragOverIndex === idx
-                                        ? 'border-t-2 border-t-indigo-400 bg-indigo-900/10'
+                                        ? setlistsTabMode === 'local'
+                                          ? 'border-t-2 border-t-amber-400 bg-amber-900/10'
+                                          : 'border-t-2 border-t-indigo-400 bg-indigo-900/10'
                                         : ''
                                     }`}
                                   >
@@ -504,7 +616,11 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                     <div className="flex items-center gap-1.5 min-w-0 flex-1">
                                       {/* Drag Handle Grip or Index Badge */}
                                       {dragDisabled ? (
-                                        <div className="w-5 h-5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 font-extrabold flex items-center justify-center text-[9px] shrink-0 font-mono select-none">
+                                        <div className={`w-5 h-5 rounded-full font-extrabold flex items-center justify-center text-[9px] shrink-0 font-mono select-none border ${
+                                          setlistsTabMode === 'local'
+                                            ? 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+                                            : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400'
+                                        }`}>
                                           {idx + 1}
                                         </div>
                                       ) : (
@@ -512,7 +628,11 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                           onClick={(e) => {
                                             e.stopPropagation();
                                           }}
-                                          className="cursor-grab active:cursor-grabbing p-1 text-indigo-400/30 hover:text-indigo-300 transition-colors shrink-0"
+                                          className={`cursor-grab active:cursor-grabbing p-1 transition-colors shrink-0 ${
+                                            setlistsTabMode === 'local'
+                                              ? 'text-amber-400/30 hover:text-amber-300'
+                                              : 'text-indigo-400/30 hover:text-indigo-300'
+                                          }`}
                                           title="Drag to reorder"
                                         >
                                           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -527,7 +647,9 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                       )}
 
                                       <div className="min-w-0 flex-1 pr-2">
-                                        <div className="text-[11px] font-bold text-gray-200 truncate group-hover:text-white">
+                                        <div className={`text-[11px] font-bold truncate group-hover:text-white ${
+                                          isCurrent && setlistsTabMode === 'local' ? 'text-amber-200' : 'text-gray-200'
+                                        }`}>
                                           {s.Title}
                                         </div>
                                         <div className="text-[9px] text-gray-500 truncate">
@@ -546,7 +668,9 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                               e.stopPropagation();
                                               moveSong(setName, songIds, idx, -1);
                                             }}
-                                            className="p-1 text-[9px] text-indigo-400 hover:text-indigo-200 disabled:opacity-25 rounded transition-all active:scale-125 cursor-pointer"
+                                            className={`p-1 text-[9px] disabled:opacity-25 rounded transition-all active:scale-125 cursor-pointer ${
+                                              setlistsTabMode === 'local' ? 'text-amber-400 hover:text-amber-200' : 'text-indigo-400 hover:text-indigo-200'
+                                            }`}
                                             title="Move Up"
                                           >
                                             ▲
@@ -557,7 +681,9 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                               e.stopPropagation();
                                               moveSong(setName, songIds, idx, 1);
                                             }}
-                                            className="p-1 text-[9px] text-indigo-400 hover:text-indigo-200 disabled:opacity-25 rounded transition-all active:scale-125 cursor-pointer"
+                                            className={`p-1 text-[9px] disabled:opacity-25 rounded transition-all active:scale-125 cursor-pointer ${
+                                              setlistsTabMode === 'local' ? 'text-amber-400 hover:text-amber-200' : 'text-indigo-400 hover:text-indigo-200'
+                                            }`}
                                             title="Move Down"
                                           >
                                             ▼
@@ -577,7 +703,7 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                         </div>
                                       )}
                                       {isCurrent && (
-                                        <span className="text-[10px] text-violet-400 ml-1">⚡</span>
+                                        <span className={`text-[10px] ml-1 ${setlistsTabMode === 'local' ? 'text-amber-400' : 'text-violet-400'}`}>⚡</span>
                                       )}
                                     </div>
                                   </div>
@@ -585,7 +711,9 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                               })
                             )}
                             {folderSongs.length > 0 && (
-                              <div className="pt-2 px-1 pb-1 border-t border-indigo-500/10 flex items-center justify-end">
+                              <div className={`pt-2 px-1 pb-1 border-t flex items-center justify-end ${
+                                setlistsTabMode === 'local' ? 'border-amber-500/10' : 'border-indigo-500/10'
+                              }`}>
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
@@ -593,7 +721,11 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                       onDownloadSetlistPDF(setName);
                                     }
                                   }}
-                                  className="w-full py-2 bg-indigo-600/20 hover:bg-indigo-600 border border-indigo-500/30 hover:border-indigo-500/60 rounded-xl text-[10px] text-indigo-200 hover:text-white font-black uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 shadow-md text-center"
+                                  className={`w-full py-2 border rounded-xl text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 shadow-md text-center ${
+                                    setlistsTabMode === 'local'
+                                      ? 'bg-amber-600/20 hover:bg-amber-600 border-amber-500/30 hover:border-amber-500/60 text-amber-200 hover:text-white'
+                                      : 'bg-indigo-600/20 hover:bg-indigo-600 border-indigo-500/30 hover:border-indigo-500/60 text-indigo-200 hover:text-white'
+                                  }`}
                                 >
                                   <span>📄</span> Download Merged Setlist PDF
                                 </button>

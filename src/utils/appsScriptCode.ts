@@ -1,4 +1,4 @@
-/**
+export const APPS_SCRIPT_CODE = `/**
  * GOOGLE APPS SCRIPT BACKEND FOR SONGS, ARRANGEMENTS & SETLISTS
  * 
  * INSTRUCTIONS TO UPDATE YOUR GOOGLE SHEET APPS SCRIPT:
@@ -577,3 +577,4 @@ function updateLockHeartbeat(lockId, username) {
   
   return acquireLock(lockId, username);
 }
+`;

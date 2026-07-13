@@ -36,6 +36,8 @@ interface SidebarCatalogProps {
   onExportSetlistJSON?: (setName: string) => void;
   onlineSetlistsCount?: number;
   localSetlistsCount?: number;
+  onOpenDeviceWorkspace?: () => void;
+  onOpenAdminDatabaseControl?: () => void;
 }
 
 export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
@@ -73,12 +75,15 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
   onExportSetlistJSON,
   onlineSetlistsCount = 0,
   localSetlistsCount = 0,
+  onOpenDeviceWorkspace,
+  onOpenAdminDatabaseControl,
 }) => {
   const [search, setSearch] = useState('');
   const [expandedSets, setExpandedSets] = useState<{ [setName: string]: boolean }>({});
   const [draggedItem, setDraggedItem] = useState<{ setName: string; index: number } | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [deleteConfirmSet, setDeleteConfirmSet] = useState<string | null>(null);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
 
   const [prevIsOpen, setPrevIsOpen] = useState(false);
   const [prevTab, setPrevTab] = useState(currentTab);
@@ -206,7 +211,7 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
           </div>
 
           {currentTab === 'setlists' && (
-            <div className="flex flex-col gap-2.5 mb-4">
+            <div className="flex flex-col gap-2 mb-3">
               {/* Online vs Local Toggle */}
               <div className="grid grid-cols-2 gap-1 bg-black/40 p-1 rounded-xl border border-indigo-500/10">
                 <button
@@ -231,13 +236,23 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                 </button>
               </div>
 
-              {/* Import Setlist Button */}
-              <div className="flex items-center justify-between bg-black/20 p-2 rounded-xl border border-white/5 select-none gap-2">
-                <span className="text-[9px] font-bold text-indigo-300/80 uppercase tracking-widest font-mono">
-                  📤 Share & Import
-                </span>
-                <label className="px-2.5 py-1 bg-violet-650/40 hover:bg-violet-600 text-violet-250 hover:text-white border border-violet-500/30 hover:border-violet-500/60 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all cursor-pointer">
-                  Import Set
+              {/* Actions row: Create and Import side by side */}
+              <div className="grid grid-cols-2 gap-2 select-none">
+                <button
+                  onClick={() => setIsCreateOpen(!isCreateOpen)}
+                  className={`py-1.5 px-2 rounded-lg border text-[9px] font-bold uppercase tracking-wider transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-1.5 ${
+                    isCreateOpen
+                      ? 'bg-indigo-600/30 border-indigo-400/50 text-white shadow-md'
+                      : 'bg-indigo-950/20 border-indigo-500/15 text-indigo-300 hover:text-indigo-200 hover:bg-indigo-900/20'
+                  }`}
+                >
+                  <span>📂</span>
+                  <span>{isCreateOpen ? 'Close New' : 'New Folder'}</span>
+                </button>
+
+                <label className="py-1.5 px-2 rounded-lg border bg-indigo-950/20 border-indigo-500/15 text-indigo-300 hover:text-indigo-200 hover:bg-indigo-900/20 text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer text-center flex items-center justify-center gap-1.5">
+                  <span>📥</span>
+                  <span>Import Set</span>
                   <input
                     type="file"
                     accept=".json"
@@ -262,21 +277,20 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                 </label>
               </div>
 
-              <div className="bg-black/20 p-2.5 rounded-xl border border-white/5 select-none">
-                <div className="text-[8px] font-bold text-indigo-300/80 uppercase tracking-widest mb-1.5">
-                  + Create New Setlist Folder
-                </div>
-                <div className="flex gap-1.5">
+              {/* Collapsible input area */}
+              {isCreateOpen && (
+                <div className="bg-black/30 p-2 rounded-xl border border-indigo-500/20 select-none animate-fadeIn flex gap-1.5">
                   <input
                     type="text"
                     placeholder="e.g. Sunday Morning"
                     id="sidebarNewSetName"
-                    className="flex-1 bg-black/40 text-indigo-100 py-1.5 px-2.5 rounded-lg text-xs outline-none border border-white/10"
+                    className="flex-1 bg-black/40 text-indigo-100 py-1.5 px-2 rounded-lg text-xs outline-none border border-white/10 font-mono"
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
                         if (onCreateSetlist && e.currentTarget.value.trim()) {
                           onCreateSetlist(e.currentTarget.value.trim());
                           e.currentTarget.value = '';
+                          setIsCreateOpen(false);
                         }
                       }
                     }}
@@ -287,14 +301,15 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                       if (el && onCreateSetlist && el.value.trim()) {
                         onCreateSetlist(el.value.trim());
                         el.value = '';
+                        setIsCreateOpen(false);
                       }
                     }}
-                    className="px-2.5 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-[10px] font-black uppercase tracking-wider rounded-lg transition-all active:scale-95 cursor-pointer"
+                    className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-[10px] font-black uppercase tracking-wider rounded-lg transition-all active:scale-95 cursor-pointer"
                   >
                     Create
                   </button>
                 </div>
-              </div>
+              )}
             </div>
           )}
 
@@ -838,42 +853,73 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
         </div>
 
         {/* Drawer Capabilities Panel */}
-        <div className="p-5 sm:p-6 pt-4 border-t border-indigo-500/20 bg-indigo-950/30 backdrop-blur-md flex-shrink-0 shadow-[inset_0_10px_20px_rgba(0,0,0,0.2)]">
-          <div className="select-none flex flex-col space-y-2">
-            <button
-              onClick={() => {
-                if (onOpenInstallGuide) onOpenInstallGuide();
-                onClose();
-              }}
-              className="w-full flex items-center justify-center gap-2 bg-indigo-500/10 text-indigo-300 py-2.5 px-4 rounded-xl border border-indigo-500/20 hover:bg-indigo-500/20 active:scale-95 transition-all cursor-pointer font-bold"
-            >
-              <span className="text-sm">📱</span>
-              <span className="text-[10px] uppercase tracking-widest font-black">Install Mobile App</span>
-            </button>
+        <div className="p-4 sm:p-5 pt-3 border-t border-indigo-500/20 bg-indigo-950/30 backdrop-blur-md flex-shrink-0 shadow-[inset_0_10px_20px_rgba(0,0,0,0.2)]">
+          <div className="select-none flex flex-col space-y-1.5">
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => {
+                  if (onOpenInstallGuide) onOpenInstallGuide();
+                  onClose();
+                }}
+                className="flex items-center justify-center gap-1.5 bg-indigo-500/10 text-indigo-300 py-1.5 px-2 rounded-xl border border-indigo-500/20 hover:bg-indigo-500/20 active:scale-95 transition-all cursor-pointer font-bold h-10 text-center"
+                title="Install Mobile App"
+              >
+                <span className="text-xs shrink-0">📱</span>
+                <span className="text-[8.5px] uppercase tracking-wider font-black leading-tight">Install App</span>
+              </button>
 
-            <button
-              onClick={() => {
-                if (onDownloadManual) onDownloadManual();
-                onClose();
-              }}
-              className="w-full flex items-center justify-center gap-2 bg-emerald-500/10 text-emerald-300 py-2.5 px-4 rounded-xl border border-emerald-500/20 hover:bg-emerald-500/20 active:scale-95 transition-all cursor-pointer font-bold"
-            >
-              <span className="text-sm">📖</span>
-              <span className="text-[10px] uppercase tracking-widest font-black">Download PDF Manual</span>
-            </button>
+              <button
+                onClick={() => {
+                  if (onOpenDeviceWorkspace) onOpenDeviceWorkspace();
+                  onClose();
+                }}
+                className="flex items-center justify-center gap-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 py-1.5 px-2 rounded-xl border border-amber-500/20 active:scale-95 transition-all cursor-pointer font-bold shadow-[0_0_15px_rgba(245,158,11,0.05)] h-10 text-center"
+                title="Device Workspace Sync"
+              >
+                <span className="text-xs shrink-0">📁</span>
+                <span className="text-[8.5px] uppercase tracking-wider font-black leading-tight">Device Sync</span>
+              </button>
 
-            <button
-              onClick={() => {
-                if (onRunDiagnostics) onRunDiagnostics();
-                onClose();
-              }}
-              className="w-full flex items-center justify-center gap-2 bg-rose-500/10 text-rose-300 py-2.5 px-4 rounded-xl border border-rose-500/20 hover:bg-rose-500/20 active:scale-95 transition-all cursor-pointer font-bold"
-            >
-              <span className="text-sm">🩺</span>
-              <span className="text-[10px] uppercase tracking-widest font-black">Database Diagnostics</span>
-            </button>
-            <p className="text-[8.5px] text-gray-500 text-center italic leading-tight pt-1">
-              Organize your setlists, install to phone for offline gig use, and run database diagnoses.
+              <button
+                onClick={() => {
+                  if (onDownloadManual) onDownloadManual();
+                  onClose();
+                }}
+                className="flex items-center justify-center gap-1.5 bg-emerald-500/10 text-emerald-300 py-1.5 px-2 rounded-xl border border-emerald-500/20 hover:bg-emerald-500/20 active:scale-95 transition-all cursor-pointer font-bold h-10 text-center"
+                title="Download PDF Manual"
+              >
+                <span className="text-xs shrink-0">📖</span>
+                <span className="text-[8.5px] uppercase tracking-wider font-black leading-tight">PDF Manual</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  if (onRunDiagnostics) onRunDiagnostics();
+                  onClose();
+                }}
+                className="flex items-center justify-center gap-1.5 bg-rose-500/10 text-rose-300 py-1.5 px-2 rounded-xl border border-rose-500/20 hover:bg-rose-500/20 active:scale-95 transition-all cursor-pointer font-bold h-10 text-center"
+                title="Database Diagnostics"
+              >
+                <span className="text-xs shrink-0">🩺</span>
+                <span className="text-[8.5px] uppercase tracking-wider font-black leading-tight">Diagnostics</span>
+              </button>
+
+              {isAdmin && (
+                <button
+                  onClick={() => {
+                    if (onOpenAdminDatabaseControl) onOpenAdminDatabaseControl();
+                    onClose();
+                  }}
+                  className="col-span-2 flex items-center justify-center gap-1.5 bg-purple-600/15 text-purple-300 py-1.5 px-2 rounded-xl border border-purple-500/30 hover:bg-purple-600/25 active:scale-95 transition-all cursor-pointer font-extrabold h-10 text-center shadow-lg shadow-purple-500/5"
+                  title="Admin Database Suite"
+                >
+                  <span className="text-xs shrink-0">🛡️</span>
+                  <span className="text-[9px] uppercase tracking-wider font-black leading-tight">Admin Database Suite</span>
+                </button>
+              )}
+            </div>
+            <p className="hidden sm:block text-[8px] text-gray-500 text-center italic leading-tight pt-1 select-none">
+              Organize setlists, run offline, or execute schema diagnostics.
             </p>
           </div>
         </div>

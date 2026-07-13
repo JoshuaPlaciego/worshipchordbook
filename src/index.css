@@ -101,6 +101,25 @@ body {
   transition: font-size 0.2s ease;
 }
 
+/* Gold breathing line animation */
+@keyframes goldBreathing {
+  0%, 100% {
+    opacity: 0.65;
+    box-shadow: 0 0 6px rgba(251, 191, 36, 0.25);
+    filter: brightness(0.9);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 16px rgba(251, 191, 36, 0.9);
+    filter: brightness(1.25);
+  }
+}
+
+.gold-breathing-line {
+  background: linear-gradient(90deg, #d97706 0%, #fbbf24 35%, #fef08a 50%, #fbbf24 65%, #d97706 100%);
+  animation: goldBreathing 3.5s infinite ease-in-out;
+}
+
 /* Custom Scrollbar for a cleaner look */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

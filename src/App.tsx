@@ -11,12 +11,25 @@ import { ShortcutsModal } from './components/ShortcutsModal';
 import { SongEditModal } from './components/SongEditModal';
 import { MusicianModal } from './components/MusicianModal';
 import { SidebarCatalog } from './components/SidebarCatalog';
+import { DeviceWorkspaceModal } from './components/DeviceWorkspaceModal';
 import { DatabaseDiagnosticModal } from './components/DatabaseDiagnosticModal';
 import { ArrangementDAWModal } from './components/ArrangementDAWModal';
 import SetlistSelectorDialog from './components/SetlistSelectorDialog';
 import { InstallAndConfigureModal } from './components/InstallAndConfigureModal';
+import { AdminDatabaseModal } from './components/AdminDatabaseModal';
 import { LiveConcertClock } from './components/LiveConcertClock';
 import { MarqueeTitle } from './components/MarqueeTitle';
+import {
+  saveHandleToDB,
+  getHandleFromDB,
+  removeHandleFromDB,
+  verifyPermission,
+  writeJsonToFile,
+  readJsonFromFile,
+  listFilesInSubfolder,
+  exportAllToDevice,
+  importAllFromDevice
+} from './lib/deviceSync';
 import { FALLBACK_SONGS, FALLBACK_SONG_LINES } from './fallbackData';
 import { 
   Music, Sparkles, Folder, Star, Info, List, 
@@ -25,7 +38,32 @@ import {
 } from 'lucide-react';
 
 const DEFAULT_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyXCeXackc_suAUMKCGJ6qIjMygAADB9zHmoJ5EqWU_OTmBxkgH9uHLP4nY427farS5/exec';
-let SCRIPT_URL = localStorage.getItem('custom_script_url') || DEFAULT_SCRIPT_URL;
+
+export const getStoredScriptUrls = (): string[] => {
+  try {
+    const stored = localStorage.getItem('custom_script_urls');
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {}
+  const single = localStorage.getItem('custom_script_url');
+  if (single) return [single];
+  return [DEFAULT_SCRIPT_URL];
+};
+
+export const getStoredAlertEmails = (): string[] => {
+  try {
+    const stored = localStorage.getItem('custom_alert_emails');
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+};
+
+let SCRIPT_URL = getStoredScriptUrls()[0];
 const LOCAL_STORAGE_KEY = 'user_added_songs';
 
 export interface BlockRepetitionInfo {
@@ -265,27 +303,145 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<'songs' | 'setlists' | 'favorites'>('songs');
   const [isNavOpen, setIsNavOpen] = useState(false);
   const [isDiagnosticModalOpen, setIsDiagnosticModalOpen] = useState(false);
-   const [isInstallModalOpen, setIsInstallModalOpen] = useState(false);
+  const [isInstallModalOpen, setIsInstallModalOpen] = useState(false);
+  const [isAdminDatabaseModalOpen, setIsAdminDatabaseModalOpen] = useState(false);
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
+  const [currentScriptUrls, setCurrentScriptUrls] = useState<string[]>(getStoredScriptUrls);
   const [currentScriptUrl, setCurrentScriptUrl] = useState(SCRIPT_URL);
   const [isOfflineMode, setIsOfflineMode] = useState(false);
+  const [alertEmails, setAlertEmails] = useState<string[]>(getStoredAlertEmails);
 
-  const handleSaveScriptUrl = (url: string) => {
-    localStorage.setItem('custom_script_url', url);
-    SCRIPT_URL = url;
-    setCurrentScriptUrl(url);
-    showToast('Backend API URL saved successfully!', 'success');
+  // Helper to fetch central cluster node directory from primary node
+  const syncClusterDirectory = async (primaryUrl: string): Promise<string[] | null> => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      const res = await fetch(`${primaryUrl}?tab=Setlists`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!res.ok) return null;
+      const text = await res.text();
+      const setlists = JSON.parse(text);
+      if (Array.isArray(setlists)) {
+        const clusterRow = setlists.find(row => (row.Set || row.PresetName) === 'SYSTEM_CONFIG_CLUSTER_NODES');
+        if (clusterRow) {
+          const rawJson = clusterRow['Songs & Arrangements'] || clusterRow.RoadmapJSON || '{}';
+          const data = JSON.parse(rawJson);
+          if (data && Array.isArray(data.urls) && data.urls.length > 0) {
+            return data.urls as string[];
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch central cluster directory:', err);
+    }
+    return null;
+  };
+
+  // Helper to save central cluster node directory to primary node
+  const saveClusterDirectoryToCloud = async (urls: string[]): Promise<boolean> => {
+    try {
+      const payload = {
+        action: 'saveSetlist',
+        name: 'SYSTEM_CONFIG_CLUSTER_NODES',
+        roadmap: { urls, lastUpdated: Date.now() },
+      };
+      const res = await fetch(urls[0], {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const resJson = await res.json();
+      return resJson.status === 'success';
+    } catch (err) {
+      console.warn('Error saving cluster directory to cloud:', err);
+      return false;
+    }
+  };
+
+  // Helper to save central alert emails configuration to primary node
+  const saveAlertEmailsToCloud = async (emails: string[]): Promise<boolean> => {
+    try {
+      const urls = getStoredScriptUrls();
+      const payload = {
+        action: 'saveSetlist',
+        name: 'SYSTEM_CONFIG_ALERT_EMAILS',
+        roadmap: { emails, lastUpdated: Date.now() },
+      };
+      const res = await fetch(urls[0], {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const resJson = await res.json();
+      return resJson.status === 'success';
+    } catch (err) {
+      console.warn('Error saving alert emails configuration to cloud:', err);
+      return false;
+    }
+  };
+
+  const handleSaveAlertEmails = async (emails: string[]) => {
+    localStorage.setItem('custom_alert_emails', JSON.stringify(emails));
+    setAlertEmails(emails);
+
+    // If logged in as admin and a sheet node is connected, propagate to cloud
+    if (appUser && appSecret && currentScriptUrls.length > 0) {
+      showToast('Propagating Alert Emails to central cloud directory...', 'info');
+      const cloudSuccess = await saveAlertEmailsToCloud(emails);
+      if (cloudSuccess) {
+        showToast('Alert Emails successfully saved to Central Cloud Directory!', 'success');
+      } else {
+        showToast('⚠️ Local alert emails updated, but failed to sync to cloud. Ensure Apps Script is correct.', 'warning');
+      }
+    } else {
+      showToast('Alert Emails list updated locally!', 'success');
+    }
+  };
+
+  const handleSaveScriptUrls = async (urls: string[]) => {
+    localStorage.setItem('custom_script_urls', JSON.stringify(urls));
+    if (urls.length > 0) {
+      localStorage.setItem('custom_script_url', urls[0]);
+      SCRIPT_URL = urls[0];
+      setCurrentScriptUrl(urls[0]);
+    } else {
+      localStorage.removeItem('custom_script_url');
+      SCRIPT_URL = DEFAULT_SCRIPT_URL;
+      setCurrentScriptUrl(DEFAULT_SCRIPT_URL);
+    }
+    setCurrentScriptUrls(urls);
+
+    // If logged in as admin and a sheet node is connected, propagate cluster list to cloud
+    if (appUser && appSecret && urls.length > 0) {
+      showToast('Propagating Cluster update to cloud directory...', 'info');
+      const cloudSuccess = await saveClusterDirectoryToCloud(urls);
+      if (cloudSuccess) {
+        showToast('Spreadsheet Cluster successfully saved to Central Cloud Directory!', 'success');
+      } else {
+        showToast('⚠️ Local cluster updated, but failed to sync to cloud directory. Ensure Apps Script is correct.', 'warning');
+      }
+    } else {
+      showToast('Spreadsheet Cluster config updated locally!', 'success');
+    }
+
     setTimeout(() => {
       fetchCatalog();
     }, 100);
   };
 
+  const handleSaveScriptUrl = (url: string) => {
+    // Legacy support: updates the cluster with just this one URL or prepends it
+    const updatedUrls = [url];
+    handleSaveScriptUrls(updatedUrls);
+  };
+
   const handleResetScriptUrl = () => {
-    const defaultUrl = 'https://script.google.com/macros/s/AKfycbyXCeXackc_suAUMKCGJ6qIjMygAADB9zHmoJ5EqWU_OTmBxkgH9uHLP4nY427farS5/exec';
+    localStorage.removeItem('custom_script_urls');
     localStorage.removeItem('custom_script_url');
-    SCRIPT_URL = defaultUrl;
-    setCurrentScriptUrl(defaultUrl);
-    showToast('Backend API URL reset to default.', 'info');
+    SCRIPT_URL = DEFAULT_SCRIPT_URL;
+    setCurrentScriptUrl(DEFAULT_SCRIPT_URL);
+    setCurrentScriptUrls([DEFAULT_SCRIPT_URL]);
+    showToast('Database Cluster reset to default.', 'info');
     setTimeout(() => {
       fetchCatalog();
     }, 100);
@@ -328,6 +484,197 @@ export default function App() {
   const [activeSetlistType, setActiveSetlistType] = useState<'online' | 'local'>(() => {
     return (localStorage.getItem('active_setlist_type') as 'online' | 'local') || 'online';
   });
+
+  // Device Directory handle state
+  const [deviceDirHandle, setDeviceDirHandle] = useState<any | null>(null);
+  const [deviceDirName, setDeviceDirName] = useState<string>('');
+  const [deviceDirPermission, setDeviceDirPermission] = useState<boolean>(false);
+  const [isDeviceOnboardingOpen, setIsDeviceOnboardingOpen] = useState<boolean>(false);
+
+  // Sync state on load
+  useEffect(() => {
+    async function loadWorkspace() {
+      try {
+        const handle = await getHandleFromDB();
+        if (handle) {
+          setDeviceDirHandle(handle);
+          setDeviceDirName(handle.name);
+          // Query if permission is already granted
+          const status = await handle.queryPermission({ mode: 'readwrite' });
+          if (status === 'granted') {
+            setDeviceDirPermission(true);
+          } else {
+            setDeviceDirPermission(false);
+          }
+        } else {
+          // Check if visited before
+          const hasConnectedBefore = localStorage.getItem('has_connected_device_dir_v1');
+          if (!hasConnectedBefore) {
+            setIsDeviceOnboardingOpen(true);
+          }
+        }
+      } catch (err) {
+        console.error('Error loading workspace handle:', err);
+      }
+    }
+    loadWorkspace();
+  }, []);
+
+  const handleConnectDeviceFolder = async () => {
+    try {
+      if (typeof (window as any).showDirectoryPicker !== 'function') {
+        showToast('Your browser does not support the File System Access API. Please use Chrome, Edge, or Opera.', 'error');
+        return;
+      }
+      const handle = await (window as any).showDirectoryPicker({
+        mode: 'readwrite'
+      });
+      if (handle) {
+        const permitted = await verifyPermission(handle, true);
+        if (permitted) {
+          setDeviceDirHandle(handle);
+          setDeviceDirName(handle.name);
+          setDeviceDirPermission(true);
+          await saveHandleToDB(handle);
+          localStorage.setItem('has_connected_device_dir_v1', 'true');
+          setIsDeviceOnboardingOpen(false);
+          showToast(`Connected Workspace Folder: "${handle.name}"`, 'success');
+
+          // Export current state
+          try {
+            const localArrs = JSON.parse(localStorage.getItem('local_setlist_arrangements') || '[]');
+            await exportAllToDevice(handle, songs, localSetlists, localArrs);
+            showToast('Synchronized current database to your device workspace folder!', 'success');
+          } catch (syncErr) {
+            console.error('Initial export failed:', syncErr);
+            showToast('Connected, but initial database sync failed.', 'warning');
+          }
+        } else {
+          showToast('Read/Write permission is required to sync to device workspace.', 'error');
+        }
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        console.error('Directory selection failed:', err);
+        showToast('Failed to select workspace folder.', 'error');
+      }
+    }
+  };
+
+  const handleRequestWorkspacePermission = async () => {
+    if (!deviceDirHandle) return;
+    try {
+      const permitted = await verifyPermission(deviceDirHandle, true);
+      if (permitted) {
+        setDeviceDirPermission(true);
+        showToast('Access to Device Workspace restored!', 'success');
+      } else {
+        showToast('Permission denied. Cannot write to device folder.', 'error');
+      }
+    } catch (err) {
+      console.error('Failed to request permission:', err);
+      showToast('Error requesting directory permission.', 'error');
+    }
+  };
+
+  const handleDisconnectDeviceFolder = async () => {
+    try {
+      await removeHandleFromDB();
+      setDeviceDirHandle(null);
+      setDeviceDirName('');
+      setDeviceDirPermission(false);
+      showToast('Device Workspace folder disconnected.', 'info');
+    } catch (err) {
+      console.error('Error disconnecting directory:', err);
+    }
+  };
+
+  const handleSyncExportToDevice = async () => {
+    if (!deviceDirHandle) return;
+    setIsLoading(true);
+    try {
+      const permitted = await verifyPermission(deviceDirHandle, true);
+      if (!permitted) {
+        showToast('Permission required to save files.', 'error');
+        setIsLoading(false);
+        return;
+      }
+      const localArrs = JSON.parse(localStorage.getItem('local_setlist_arrangements') || '[]');
+      await exportAllToDevice(deviceDirHandle, songs, localSetlists, localArrs);
+      showToast('Successfully exported all songs, arrangements, and setlists to your device!', 'success');
+    } catch (err) {
+      console.error('Export failed:', err);
+      showToast('Export failed. Check console.', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSyncImportFromDevice = async () => {
+    if (!deviceDirHandle) return;
+    setIsLoading(true);
+    try {
+      const permitted = await verifyPermission(deviceDirHandle, true);
+      if (!permitted) {
+        showToast('Permission required to read files.', 'error');
+        setIsLoading(false);
+        return;
+      }
+      const data = await importAllFromDevice(deviceDirHandle);
+      
+      if (data.songs && data.songs.length > 0) {
+        setSongs((prevSongs) => {
+          const songMap = new Map(prevSongs.map((s) => [String(s.SongID), s]));
+          for (const s of data.songs) {
+            songMap.set(String(s.SongID), s);
+          }
+          const merged = Array.from(songMap.values());
+          localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(merged));
+          return merged;
+        });
+      }
+
+      if (data.localSetlists && data.localSetlists.length > 0) {
+        setLocalSetlists((prevSets) => {
+          const setMap = new Map(prevSets.map((s) => [s.PresetName, s]));
+          for (const s of data.localSetlists) {
+            setMap.set(s.PresetName, s);
+          }
+          const merged = Array.from(setMap.values());
+          localStorage.setItem('worship_local_setlists', JSON.stringify(merged));
+          return merged;
+        });
+      }
+
+      if (data.localArrs && data.localArrs.length > 0) {
+        const localArrs = JSON.parse(localStorage.getItem('local_setlist_arrangements') || '[]');
+        const arrMap = new Map(localArrs.map((arr: any) => [`${arr.SongID}_${arr.PresetName}`, arr]));
+        for (const arr of data.localArrs) {
+          arrMap.set(`${arr.SongID}_${arr.PresetName}`, arr);
+        }
+        const merged = Array.from(arrMap.values());
+        localStorage.setItem('local_setlist_arrangements', JSON.stringify(merged));
+      }
+
+      showToast('Successfully imported and merged database from your device workspace!', 'success');
+    } catch (err) {
+      console.error('Import failed:', err);
+      showToast('Import failed. Check console.', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleAutoMirrorToDevice = async () => {
+    if (deviceDirHandle && deviceDirPermission) {
+      try {
+        const localArrs = JSON.parse(localStorage.getItem('local_setlist_arrangements') || '[]');
+        await exportAllToDevice(deviceDirHandle, songs, localSetlists, localArrs);
+      } catch (err) {
+        console.error('Background auto-mirror failed:', err);
+      }
+    }
+  };
 
   const handleImportSetlistJSON = async (json: any) => {
     if (!json || json.type !== 'worship_setlist') {
@@ -769,42 +1116,83 @@ export default function App() {
 
   const refetchArrangements = async () => {
     try {
-      const [presetsRes, setlistsRes] = await Promise.all([
-        fetch(`${SCRIPT_URL}?tab=Arrangements`),
-        fetch(`${SCRIPT_URL}?tab=Setlists`)
-      ]);
-      const [presetsText, setlistsText] = await Promise.all([
-        (presetsRes as any).text(),
-        (setlistsRes as any).text()
-      ]);
-      
-      const presetsList = JSON.parse(presetsText);
-      let returnedPresets: any[] = [];
-      if (Array.isArray(presetsList)) {
-        returnedPresets = presetsList.map((row: any) => ({
-          SongID: String(row.SongID),
-          PresetName: String(row.PresetName),
-          RoadmapJSON: String(row.RoadmapJSON),
-        }));
-        localStorage.setItem('cached_arrangements', JSON.stringify(returnedPresets));
-        setAllSharedArrangements(returnedPresets);
-        if (currentSong) {
-          const matching = returnedPresets.filter((arr: any) => String(arr.SongID) === String(currentSong.SongID));
-          setSyncedSheetArrangements(matching);
-          handleBackgroundArrangementChange(matching, returnedPresets);
+      const urls = getStoredScriptUrls();
+      const results = await Promise.all(
+        urls.map(async (url) => {
+          try {
+            const fetchTab = async (tabName: string) => {
+              try {
+                const res = await fetch(`${url}?tab=${tabName}`);
+                if (!res.ok) return [];
+                const text = await res.text();
+                const parsed = JSON.parse(text);
+                return Array.isArray(parsed) ? parsed : [];
+              } catch {
+                return [];
+              }
+            };
+            const [presetsList, setlistsList] = await Promise.all([
+              fetchTab('Arrangements'),
+              fetchTab('Setlists')
+            ]);
+            return {
+              presets: presetsList,
+              setlists: setlistsList,
+            };
+          } catch (e) {
+            console.warn(`Failed to refetch arrangements from node ${url}`, e);
+            return null;
+          }
+        })
+      );
+
+      const mergedArrMap = new Map<string, any>();
+      const mergedSetlistsMap = new Map<string, any>();
+
+      for (let i = results.length - 1; i >= 0; i--) {
+        const r = results[i];
+        if (!r) continue;
+
+        if (Array.isArray(r.presets)) {
+          r.presets.forEach((row: any) => {
+            if (row && row.SongID && row.PresetName) {
+              const key = `${row.SongID}_${row.PresetName}`;
+              mergedArrMap.set(key, {
+                SongID: String(row.SongID),
+                PresetName: String(row.PresetName),
+                RoadmapJSON: String(row.RoadmapJSON),
+              });
+            }
+          });
+        }
+
+        if (Array.isArray(r.setlists)) {
+          r.setlists.forEach((row: any) => {
+            const name = row.Set || row.PresetName || '';
+            if (name && name !== 'SYSTEM_CONFIG_CLUSTER_NODES' && name !== 'SYSTEM_CONFIG_ALERT_EMAILS') {
+              mergedSetlistsMap.set(name, {
+                PresetName: name,
+                RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}',
+              });
+            }
+          });
         }
       }
 
-      const setlistsList = JSON.parse(setlistsText);
-      let returnedSetlists: any[] = [];
-      if (Array.isArray(setlistsList)) {
-        returnedSetlists = setlistsList.map((row: any) => ({
-          PresetName: row.Set || row.PresetName || '',
-          RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}',
-        }));
-        localStorage.setItem('cached_setlists_meta', JSON.stringify(returnedSetlists));
-        setAllSharedSetlists(returnedSetlists);
+      const returnedPresets = Array.from(mergedArrMap.values());
+      const returnedSetlists = Array.from(mergedSetlistsMap.values());
+
+      localStorage.setItem('cached_arrangements', JSON.stringify(returnedPresets));
+      setAllSharedArrangements(returnedPresets);
+      if (currentSong) {
+        const matching = returnedPresets.filter((arr: any) => String(arr.SongID) === String(currentSong.SongID));
+        setSyncedSheetArrangements(matching);
+        handleBackgroundArrangementChange(matching, returnedPresets);
       }
+
+      localStorage.setItem('cached_setlists_meta', JSON.stringify(returnedSetlists));
+      setAllSharedSetlists(returnedSetlists);
+
       return { presets: returnedPresets, setlists: returnedSetlists };
     } catch (e) {
       console.warn('Error refetching arrangements and setlists', e);
@@ -906,6 +1294,7 @@ export default function App() {
         showToast(`Added to local setlist "${setName}" as "${arrangementName}"${isViewer ? ' (Saved locally as Viewer)' : ''}`, 'success');
         setIsSetlistManagerOpen(false);
         setCurrentTab('songs');
+        handleAutoMirrorToDevice();
       } catch (err) {
         console.error('Error saving song to local setlist', err);
         showToast('Failed to save to local setlist', 'error');
@@ -1071,6 +1460,7 @@ export default function App() {
           localStorage.setItem('worship_local_setlists', JSON.stringify(finalSetlists));
         }
         showToast(`Removed from local setlist: ${setName}${isViewer ? ' (Saved locally as Viewer)' : ''}`, 'info');
+        handleAutoMirrorToDevice();
       } catch (err) {
         console.error('Error removing song from local setlist', err);
       } finally {
@@ -1093,7 +1483,7 @@ export default function App() {
       fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payloadDelete),
-      });
+      }).catch(err => console.warn('Background deleteArrangement failed:', err));
 
       const existingMeta = allSharedSetlists.find(
         (sl) => sl.PresetName === setName
@@ -1116,7 +1506,7 @@ export default function App() {
         fetch(SCRIPT_URL, {
           method: 'POST',
           body: JSON.stringify(payloadMeta),
-        });
+        }).catch(err => console.warn('Background saveSetlist failed:', err));
       }
 
       showToast(`Removed from Setlist: ${setName}`, 'info');
@@ -1169,6 +1559,7 @@ export default function App() {
         setLocalSetlists(finalSetlists);
         localStorage.setItem('worship_local_setlists', JSON.stringify(finalSetlists));
         showToast(`Local setlist order updated for "${setName}"${isViewer ? ' (Saved locally as Viewer)' : ''}`, 'success');
+        handleAutoMirrorToDevice();
       } catch (err) {
         console.error('Error updating local setlist order', err);
       } finally {
@@ -1230,6 +1621,7 @@ export default function App() {
         setLocalSetlists(nextSetlists);
         localStorage.setItem('worship_local_setlists', JSON.stringify(nextSetlists));
         showToast(`Local setlist folder "${nameToUse}" created!${isViewer ? ' (Saved locally as Viewer)' : ''}`, 'success');
+        handleAutoMirrorToDevice();
       } catch (err) {
         console.error('Error creating local setlist folder', err);
       } finally {
@@ -1281,6 +1673,7 @@ export default function App() {
         } catch {}
 
         showToast(`Local setlist folder "${setName}" deleted!${isViewer ? ' (Deleted locally as Viewer)' : ''}`, 'success');
+        handleAutoMirrorToDevice();
       } catch (err) {
         console.error('Error deleting local setlist folder', err);
       } finally {
@@ -1302,7 +1695,7 @@ export default function App() {
       fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payloadMeta),
-      });
+      }).catch(err => console.warn('Background deleteSetlist failed:', err));
 
       const setPresets = allSharedArrangements.filter(
         (arr) => arr.PresetName === `Set: ${setName}`
@@ -1317,7 +1710,7 @@ export default function App() {
         fetch(SCRIPT_URL, {
           method: 'POST',
           body: JSON.stringify(payloadDelete),
-        });
+        }).catch(err => console.warn('Background deleteArrangement failed:', err));
       }
 
       showToast(`Setlist folder "${setName}" deleted!`, 'success');
@@ -1474,116 +1867,244 @@ export default function App() {
     setIsLoading(true);
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // Increased timeout for multiple possible fetches
+      const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 second timeout for multiple fetches
 
-      // 1. Fetch SyncVersion (to minimize Google calls)
-      let metaData: any[] = [];
-      let songsVersion: string | null = null;
-      let linesVersion: string | null = null;
-      let arrVersion: string | null = null;
+      const urls = getStoredScriptUrls();
+      
+      // Fetch from ALL urls in the cluster in parallel!
+      const fetchResults = await Promise.all(
+        urls.map(async (url, idx) => {
+          try {
+            const fetchTab = async (tabName: string) => {
+              try {
+                const res = await fetch(`${url}?tab=${tabName}`, { signal: controller.signal });
+                if (!res.ok) return [];
+                const text = await res.text();
+                const parsed = JSON.parse(text);
+                return Array.isArray(parsed) ? parsed : [];
+              } catch (err) {
+                console.warn(`Error fetching tab ${tabName} from ${url}:`, err);
+                return [];
+              }
+            };
 
-      try {
-        const metaRes = await fetch(`${SCRIPT_URL}?tab=SyncVersion`, { signal: controller.signal });
-        const metaText = await metaRes.text();
-        metaData = JSON.parse(metaText);
-        if (Array.isArray(metaData) && metaData.length > 0) {
-          localStorage.setItem('cached_metadata', JSON.stringify(metaData));
+            const [songsList, linesList, arrList, setlistsList] = await Promise.all([
+              fetchTab('Songs'),
+              fetchTab('SongLines'),
+              fetchTab('Arrangements'),
+              fetchTab('Setlists')
+            ]);
+
+            return {
+              songs: songsList,
+              lines: linesList,
+              arrangements: arrList,
+              setlists: setlistsList
+            };
+          } catch (e) {
+            console.warn(`Failed to fetch from cluster node ${idx + 1}: ${url}`, e);
+            return null;
+          }
+        })
+      );
+
+      // Now merge results from last to first (first node wins if duplicate keys exist)
+      const mergedSongsMap = new Map<string, Song>();
+      const mergedLinesMap = new Map<string, SongLine>();
+      const mergedArrMap = new Map<string, any>();
+      const mergedSetlistsMap = new Map<string, any>();
+
+      // Record total stats for cluster reporting
+      let totalSongsCount = 0;
+      let totalLinesCount = 0;
+
+      for (let i = fetchResults.length - 1; i >= 0; i--) {
+        const res = fetchResults[i];
+        if (!res) continue;
+
+        res.songs.forEach((s) => {
+          if (s && s.SongID) {
+            mergedSongsMap.set(String(s.SongID), s);
+            totalSongsCount++;
+          }
+        });
+
+        res.lines.forEach((l) => {
+          if (l && l.LineID) {
+            mergedLinesMap.set(String(l.LineID), l);
+            totalLinesCount++;
+          }
+        });
+
+        res.arrangements.forEach((arr) => {
+          if (arr && arr.SongID && arr.PresetName) {
+            const key = `${arr.SongID}_${arr.PresetName}`;
+            mergedArrMap.set(key, arr);
+          }
+        });
+
+        res.setlists.forEach((row) => {
+          const name = row.Set || row.PresetName || '';
+          if (name === 'SYSTEM_CONFIG_ALERT_EMAILS') {
+            try {
+              const rawJson = row['Songs & Arrangements'] || row.RoadmapJSON || '{}';
+              const parsed = JSON.parse(rawJson);
+              if (parsed && Array.isArray(parsed.emails)) {
+                localStorage.setItem('custom_alert_emails', JSON.stringify(parsed.emails));
+                setAlertEmails(parsed.emails);
+              }
+            } catch (err) {
+              console.warn('Failed to parse SYSTEM_CONFIG_ALERT_EMAILS config:', err);
+            }
+          } else if (name && name !== 'SYSTEM_CONFIG_CLUSTER_NODES') {
+            mergedSetlistsMap.set(name, {
+              PresetName: name,
+              RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}'
+            });
+          }
+        });
+      }
+
+      const remoteSongs = Array.from(mergedSongsMap.values());
+      const remoteLines = Array.from(mergedLinesMap.values());
+      const remoteArrangements = Array.from(mergedArrMap.values());
+      const remoteSetlists = Array.from(mergedSetlistsMap.values());
+
+      // Cache the fully merged results
+      localStorage.setItem('cached_songs', JSON.stringify(remoteSongs));
+      localStorage.setItem('cached_song_lines', JSON.stringify(remoteLines));
+      localStorage.setItem('cached_arrangements', JSON.stringify(remoteArrangements));
+      localStorage.setItem('cached_setlists_meta', JSON.stringify(remoteSetlists));
+
+      // Display capacity stats in storage warn if primary gets big
+      const primarySongsCount = fetchResults[0]?.songs.length || 0;
+      const primaryLinesCount = fetchResults[0]?.lines.length || 0;
+      const cellsEstimate = primarySongsCount * 12 + primaryLinesCount * 5; // songs have ~12 cols, lines have ~5 cols
+      
+      // Store stats for diagnostic reporting
+      localStorage.setItem('primary_sheet_cells_est', cellsEstimate.toString());
+      localStorage.setItem('primary_sheet_songs_count', primarySongsCount.toString());
+      localStorage.setItem('primary_sheet_lines_count', primaryLinesCount.toString());
+
+      const CAPACITY_LIMIT_CELLS = 10000000;
+      const FAILOVER_THRESHOLD_CELLS = 8000000; // 80% capacity trigger
+
+      if (cellsEstimate > FAILOVER_THRESHOLD_CELLS) {
+        // Active write node is nearly full! Attempt Auto-Jump Initiative to a healthy replica
+        let healthyReplicaIdx = -1;
+        for (let j = 1; j < fetchResults.length; j++) {
+          const res = fetchResults[j];
+          if (res) {
+            const sCount = res.songs.length;
+            const lCount = res.lines.length;
+            const estCells = sCount * 12 + lCount * 5;
+            if (estCells < FAILOVER_THRESHOLD_CELLS) {
+              healthyReplicaIdx = j;
+              break;
+            }
+          }
+        }
+
+        if (healthyReplicaIdx !== -1) {
+          const originalUrls = [...urls];
+          const promotedUrl = originalUrls[healthyReplicaIdx];
+          // Shift promotedUrl to index 0, moving the old primary to the end or just swapping
+          const shiftedUrls = [promotedUrl, ...originalUrls.filter((_, idx) => idx !== healthyReplicaIdx)];
           
-          const songsRow = metaData.find(m => m.TabName === 'Songs');
-          songsVersion = songsRow ? String(songsRow.Version || songsRow.LastUpdated || songsRow.Date || songsRow.version) : null;
+          console.log(`🚀 DATABASE AUTO-FAILOVER: Primary write node is nearly full (${(cellsEstimate/CAPACITY_LIMIT_CELLS*100).toFixed(1)}%). Auto-jumping to healthy replica node: ${promotedUrl}`);
           
-          const linesRow = metaData.find(m => m.TabName === 'SongLines');
-          linesVersion = linesRow ? String(linesRow.Version || linesRow.LastUpdated || linesRow.Date || linesRow.version) : null;
+          // Save updated cluster configuration locally
+          localStorage.setItem('custom_script_urls', JSON.stringify(shiftedUrls));
+          localStorage.setItem('custom_script_url', shiftedUrls[0]);
+          SCRIPT_URL = shiftedUrls[0];
+          setCurrentScriptUrl(shiftedUrls[0]);
+          setCurrentScriptUrls(shiftedUrls);
           
-          const arrRow = metaData.find(m => m.TabName === 'Arrangements');
-          arrVersion = arrRow ? String(arrRow.Version || arrRow.LastUpdated || arrRow.Date || arrRow.version) : null;
+          // Propagate cluster registry update to the cloud directory using the newly promoted node
+          if (appUser && appSecret) {
+            showToast('⚠️ Primary node near full. Propagating auto-failover cluster registry to central directory...', 'warning');
+            await saveClusterDirectoryToCloud(shiftedUrls);
+          }
+          
+          showToast(`🚀 DATABASE AUTO-FAILOVER ACTIVATED! Active write node was nearly full (${(cellsEstimate/CAPACITY_LIMIT_CELLS*100).toFixed(1)}%). Auto-promoted healthy replica node with available space to primary position.`, 'success');
+          
+          // Re-trigger catalog load with newly promoted node
+          setTimeout(() => {
+            fetchCatalog();
+          }, 1500);
+          
+          clearTimeout(timeoutId);
+          return; // Stop current execution since we are re-loading with shifted registry
+        } else {
+          // If no other database, or none with space, do nothing as it should return to normal flow
+          showToast('⚠️ Active database is nearly full! Please prepare a new blank copy of Google Sheets and register it in Admin Database Suite to expand capacity.', 'warning');
+          
+          // Trigger Email Notifications since database has reached 8,000,000 cells and no backup database is found!
+          // We also trigger for every 250,000 cells from the 8,000,000 storage base line.
+          const thresholdBase = 8000000;
+          const intervalSize = 250000;
+          const currentIntervalCount = Math.floor((cellsEstimate - thresholdBase) / intervalSize);
+          const currentLevel = thresholdBase + currentIntervalCount * intervalSize;
+          const lastNotified = parseInt(localStorage.getItem('last_notified_cell_level') || '0', 10);
+
+          if (currentLevel > lastNotified && alertEmails.length > 0) {
+            const recipientsStr = alertEmails.join(',');
+            const emailSubject = `🚨 CRITICAL: Worship Chord Book Database Capacity Alert (${(cellsEstimate).toLocaleString()} cells)`;
+            const emailBody = `Attention Worship Chord Book Administrators,
+
+This is an automated alert from your Worship Chord Book PWA.
+
+The primary write node database has reached critical capacity (~${cellsEstimate.toLocaleString()} cells) and has NO backup/replica nodes available for auto-failover:
+• Primary Node: ${urls[0]}
+• Current Cells in Use: ~${cellsEstimate.toLocaleString()} cells (Limit: 10,000,000)
+• Capacity Level: ${(cellsEstimate / 10000000 * 100).toFixed(2)}%
+
+⚠️ ACTION REQUIRED:
+No healthy, under-capacity replica nodes were detected in your database cluster. To expand storage capacity and prevent data write failures, please make a copy of your Google Sheet database and add it as a new node in the Administration Suite.
+
+Next automated alert will trigger if capacity increases by another 250,000 cells.
+
+Thank you,
+Worship Setup Assistant`;
+
+            const payload = {
+              action: 'sendAlertEmail',
+              subject: emailSubject,
+              body: emailBody,
+              recipients: recipientsStr,
+            };
+
+            fetch(urls[0], {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            }).then(res => res.json())
+              .then(resJson => {
+                if (resJson.status === 'success') {
+                  console.log(`Successfully sent database capacity alert email to: ${recipientsStr}`);
+                  localStorage.setItem('last_notified_cell_level', currentLevel.toString());
+                  showToast('📬 Automated administrator capacity alert email successfully sent!', 'success');
+                } else {
+                  console.error('Failed to send database capacity alert email:', resJson.message);
+                }
+              }).catch(err => {
+                console.error('Network error sending alert email:', err);
+              });
+          }
         }
-      } catch (e) {
-        console.warn('Metadata fetch failed, falling back to full sync.', e);
+      } else if (cellsEstimate > 4000000) { // Google Sheets warning threshold
+        showToast('⚠️ Primary sheet database is getting large. Please prepare a backup database node for future use.', 'warning');
       }
 
-      const cachedSongsVersion = localStorage.getItem('cached_songs_version');
-      const cachedLinesVersion = localStorage.getItem('cached_song_lines_version');
-      const cachedArrVersion = localStorage.getItem('cached_arrangements_version');
+      setAllSharedArrangements(remoteArrangements);
+      setAllSharedSetlists(remoteSetlists);
 
-      const needsSongsUpdate = !songsVersion || cachedSongsVersion !== songsVersion || !localStorage.getItem('cached_songs');
-      const needsLinesUpdate = !linesVersion || cachedLinesVersion !== linesVersion || !localStorage.getItem('cached_song_lines');
-      const needsArrUpdate = !arrVersion || cachedArrVersion !== arrVersion || !localStorage.getItem('cached_arrangements');
-
-      let updatesPerformed = false;
-
-      if (needsSongsUpdate || needsLinesUpdate || needsArrUpdate) {
-        showToast('Downloading new updates...', 'info');
-      } else {
-        console.log('All caches up to date.');
-      }
-
-      // 2. Fetch Songs ONLY if needed
-      let remoteSongs: Song[] = [];
-      if (!needsSongsUpdate) {
-        remoteSongs = JSON.parse(localStorage.getItem('cached_songs') || '[]');
-      } else {
-        const res = await fetch(`${SCRIPT_URL}?tab=Songs`, { signal: controller.signal });
-        const textData = (await (res as any).text());
-        let list: Song[] = [];
-        try { list = JSON.parse(textData); } catch { throw new Error('Invalid Songs payload.'); }
-        if (list && (list as any).error) throw new Error((list as any).error);
-
-        remoteSongs = Array.isArray(list) ? list : [];
-        localStorage.setItem('cached_songs', JSON.stringify(remoteSongs));
-        if (songsVersion) localStorage.setItem('cached_songs_version', songsVersion);
-        updatesPerformed = true;
-      }
-
-      // 3. Fetch SongLines ONLY if needed
-      if (needsLinesUpdate) {
-        const linesRes = await fetch(`${SCRIPT_URL}?tab=SongLines`, { signal: controller.signal });
-        const linesText = await linesRes.text();
-        let linesList: SongLine[] = [];
-        try { linesList = JSON.parse(linesText); } catch { console.warn('Invalid SongLines payload'); }
-        if (!((linesList as any).error)) {
-            localStorage.setItem('cached_song_lines', JSON.stringify(linesList));
-            if (linesVersion) localStorage.setItem('cached_song_lines_version', linesVersion);
-            updatesPerformed = true;
-        }
-      }
-
-      // 4. Fetch Arrangements ONLY if needed
-      if (needsArrUpdate) {
-        const arrRes = await fetch(`${SCRIPT_URL}?tab=Arrangements`, { signal: controller.signal });
-        const arrText = await arrRes.text();
-        let arrList: any[] = [];
-        try { arrList = JSON.parse(arrText); } catch { console.warn('Invalid Arrangements payload'); }
-        if (!((arrList as any).error) && Array.isArray(arrList)) {
-            localStorage.setItem('cached_arrangements', JSON.stringify(arrList));
-            setAllSharedArrangements(arrList);
-            if (arrVersion) localStorage.setItem('cached_arrangements_version', arrVersion);
-            updatesPerformed = true;
-        }
-      }
-
-      // Sync Setlists as well
-      try {
-        const setlistsRes = await fetch(`${SCRIPT_URL}?tab=Setlists`, { signal: controller.signal });
-        const setlistsText = await setlistsRes.text();
-        const setlistsList = JSON.parse(setlistsText);
-        if (Array.isArray(setlistsList)) {
-          const mappedSetlists = setlistsList.map((row: any) => ({
-            PresetName: row.Set || row.PresetName || '',
-            RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}',
-          }));
-          localStorage.setItem('cached_setlists_meta', JSON.stringify(mappedSetlists));
-          setAllSharedSetlists(mappedSetlists);
-        }
-      } catch (e) {
-        console.warn('Error syncing setlists on catalog fetch', e);
-      }
-
-      if (updatesPerformed) {
-          showToast('All updates applied successfully!', 'success');
-      } else if (metaData.length > 0) {
-          showToast('Library is up to date.', 'success');
-      }
+      showToast(
+        urls.length > 1 
+          ? `Successfully synchronized cluster! Loaded ${remoteSongs.length} songs and ${remoteArrangements.length} presets.`
+          : 'All updates applied successfully!', 
+        'success'
+      );
       
       clearTimeout(timeoutId);
 
@@ -1624,7 +2145,35 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetchCatalog();
+    const initClusterAndCatalog = async () => {
+      const storedUrls = getStoredScriptUrls();
+      const primaryUrl = storedUrls[0];
+      
+      // Attempt background directory synchronization
+      try {
+        const remoteUrls = await syncClusterDirectory(primaryUrl);
+        if (remoteUrls && Array.isArray(remoteUrls) && remoteUrls.length > 0) {
+          const storedStr = JSON.stringify(storedUrls);
+          const remoteStr = JSON.stringify(remoteUrls);
+          if (storedStr !== remoteStr) {
+            console.log('Central Cluster Directory sync: nodes updated!', remoteUrls);
+            localStorage.setItem('custom_script_urls', remoteStr);
+            localStorage.setItem('custom_script_url', remoteUrls[0]);
+            SCRIPT_URL = remoteUrls[0];
+            setCurrentScriptUrl(remoteUrls[0]);
+            setCurrentScriptUrls(remoteUrls);
+          }
+        }
+      } catch (err) {
+        console.warn('Central Cluster Directory sync failed', err);
+      }
+      
+      // Load the catalog with either the newly synced cluster or the current cluster
+      await fetchCatalog();
+    };
+
+    initClusterAndCatalog();
+
     const handleScroll = () => {
       setShowScrollTop(window.scrollY > 300);
     };
@@ -2933,7 +3482,7 @@ export default function App() {
       fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payloadArrangement),
-      });
+      }).catch(err => console.warn('Background saveArrangement failed:', err));
 
       // 2. Add song to setlist metadata if not present
       const existingMeta = allSharedSetlists.find(
@@ -2957,7 +3506,7 @@ export default function App() {
       fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payloadMeta),
-      });
+      }).catch(err => console.warn('Background saveSetlist failed:', err));
 
       showToast(`Setlist arrangement updated in the shared catalog!`, 'success');
     } catch (err) {
@@ -3048,7 +3597,7 @@ export default function App() {
           fetch(SCRIPT_URL, {
             method: 'POST',
             body: JSON.stringify(payloadArrangement),
-          });
+          }).catch(err => console.warn('Background saveArrangement failed:', err));
 
           const existingMeta = allSharedSetlists.find(
             (sl) => sl.PresetName === activeSetlistFolder
@@ -3072,7 +3621,7 @@ export default function App() {
           fetch(SCRIPT_URL, {
             method: 'POST',
             body: JSON.stringify(payloadMeta),
-          });
+          }).catch(err => console.warn('Background saveSetlist failed:', err));
 
           showToast(`Successfully loaded arrangement to active setlist: ${activeSetlistFolder}`, 'success');
         }
@@ -3212,6 +3761,7 @@ export default function App() {
         setCurrentArrangementName(name);
       }
       setIsLoading(false);
+      handleAutoMirrorToDevice();
     }
   };
 
@@ -3388,7 +3938,7 @@ export default function App() {
           fetch(SCRIPT_URL, {
             method: 'POST',
             body: JSON.stringify(payloadDel),
-          });
+          }).catch(err => console.warn('Background deleteArrangement failed:', err));
         } catch (e) {
           console.warn("Failed to delete setlist mapping:", e);
         }
@@ -5324,20 +5874,22 @@ export default function App() {
 
       {/* Main Layout Screen when PDF Preview is closed */}
       {!isPDFPreviewOpen && (
-        <div className={`flex flex-col min-h-screen ${isAdmin ? 'pt-[80px]' : 'pt-14'}`}>
-          {/* Global Admin Mode Banner */}
+        <div className={`flex flex-col min-h-screen ${isAdmin ? 'pt-[72px]' : 'pt-14'}`}>
+          {/* Global Admin Mode Breathing Gold Line */}
           {isAdmin && (
-            <div className="fixed top-0 left-0 right-0 z-[1000] bg-[#fbbf24] text-[#0f172a] h-6 flex items-center justify-center font-sans font-black text-[10px] uppercase tracking-[0.25em] select-none shadow-md">
-              <span className="animate-pulse mr-1.5">⚠️</span>
-              ADMIN MODE ACTIVATED
-              <span className="animate-pulse ml-1.5">⚠️</span>
+            <div className="fixed top-0 left-0 right-0 z-[1000] h-[18px] gold-breathing-line flex items-center justify-center select-none shadow-lg">
+              <span className="font-sans font-black text-[8px] uppercase tracking-[0.4em] text-amber-950/95 flex items-center gap-1">
+                <span>⚡</span>
+                <span>ADMIN COMMAND DECK ACTIVE</span>
+                <span>⚡</span>
+              </span>
             </div>
           )}
 
           {/* Header */}
           <header
             id="stageHeader"
-            className={`fixed ${isAdmin ? 'top-6' : 'top-0'} left-0 right-0 z-[100] bg-indigo-950/90 backdrop-blur-md border-b border-indigo-500/20 px-4 py-3 flex items-center justify-between transition-all select-none h-14`}
+            className={`fixed ${isAdmin ? 'top-[18px]' : 'top-0'} left-0 right-0 z-[100] bg-indigo-950/90 backdrop-blur-md border-b border-indigo-500/20 px-4 py-3 flex items-center justify-between transition-all select-none h-14`}
           >
             {/* Header Left: Menu, Home, and Brand */}
             <div className="flex items-center gap-2 sm:gap-3">
@@ -7943,15 +8495,28 @@ export default function App() {
       <DatabaseDiagnosticModal
         isOpen={isDiagnosticModalOpen}
         onClose={() => setIsDiagnosticModalOpen(false)}
-        scriptUrl={SCRIPT_URL}
+        scriptUrls={currentScriptUrls}
+      />
+
+      {/* Local Device Hardware Workspace Modal */}
+      <DeviceWorkspaceModal
+        isOpen={isDeviceOnboardingOpen}
+        onClose={() => setIsDeviceOnboardingOpen(false)}
+        deviceDirName={deviceDirName}
+        deviceDirPermission={deviceDirPermission}
+        onConnect={handleConnectDeviceFolder}
+        onRequestPermission={handleRequestWorkspacePermission}
+        onDisconnect={handleDisconnectDeviceFolder}
+        onExport={handleSyncExportToDevice}
+        onImport={handleSyncImportFromDevice}
       />
 
       {/* PWA Installation & Backend Configuration Modal */}
       <InstallAndConfigureModal
         isOpen={isInstallModalOpen}
         onClose={() => setIsInstallModalOpen(false)}
-        scriptUrl={currentScriptUrl}
-        onSaveScriptUrl={handleSaveScriptUrl}
+        scriptUrls={currentScriptUrls}
+        onSaveScriptUrls={handleSaveScriptUrls}
         onResetScriptUrl={handleResetScriptUrl}
         deferredInstallPrompt={deferredInstallPrompt}
         lastSynced={lastSynced}
@@ -7960,8 +8525,29 @@ export default function App() {
         isAdmin={!!(appUser && appSecret)}
         onOpenAdmin={() => {
           setIsInstallModalOpen(false);
-          setIsAdminModalOpen(true);
+          if (appUser && appSecret) {
+            setIsAdminDatabaseModalOpen(true);
+          } else {
+            setIsAdminModalOpen(true);
+          }
         }}
+      />
+
+      {/* Admin Database Control Center Modal */}
+      <AdminDatabaseModal
+        isOpen={isAdminDatabaseModalOpen}
+        onClose={() => setIsAdminDatabaseModalOpen(false)}
+        scriptUrls={currentScriptUrls}
+        onSaveScriptUrls={handleSaveScriptUrls}
+        onResetScriptUrl={handleResetScriptUrl}
+        lastSynced={lastSynced}
+        isOffline={isOfflineMode}
+        onForceSync={fetchCatalog}
+        isAdmin={!!(appUser && appSecret)}
+        onTriggerLogin={() => setIsAdminModalOpen(true)}
+        onLogout={handleAdminLockToggle}
+        alertEmails={alertEmails}
+        onSaveAlertEmails={handleSaveAlertEmails}
       />
 
       {/* Setlist Selector Manager Dialog */}
@@ -8221,6 +8807,8 @@ export default function App() {
           setIsNavOpen(false);
           showToast(`Prepared merged PDF collection for ${setName}!`, 'success');
         }}
+        onOpenDeviceWorkspace={() => setIsDeviceOnboardingOpen(true)}
+        onOpenAdminDatabaseControl={() => setIsAdminDatabaseModalOpen(true)}
       />
 
       {/* Real-time Toasts notifications */}

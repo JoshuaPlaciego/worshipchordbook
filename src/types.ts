@@ -5,6 +5,7 @@ export interface Song {
   OriginalKey?: string;
   Version?: string;
   BPM?: number;
+  _sourceNodeUrl?: string;
 }
 
 export interface SongLine {

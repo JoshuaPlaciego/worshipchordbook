@@ -153,6 +153,8 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
     }
   };
 
+  const canModifyFolders = setlistsTabMode === 'local' || isAdmin;
+
   return (
     <>
       {/* Lateral Menu Drawer / Desktop Persistent Column */}
@@ -237,78 +239,82 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
               </div>
 
               {/* Actions row: Create and Import side by side */}
-              <div className="grid grid-cols-2 gap-2 select-none">
-                <button
-                  onClick={() => setIsCreateOpen(!isCreateOpen)}
-                  className={`py-1.5 px-2 rounded-lg border text-[9px] font-bold uppercase tracking-wider transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-1.5 ${
-                    isCreateOpen
-                      ? 'bg-indigo-600/30 border-indigo-400/50 text-white shadow-md'
-                      : 'bg-indigo-950/20 border-indigo-500/15 text-indigo-300 hover:text-indigo-200 hover:bg-indigo-900/20'
-                  }`}
-                >
-                  <span>📂</span>
-                  <span>{isCreateOpen ? 'Close New' : 'New Folder'}</span>
-                </button>
+              {canModifyFolders && (
+                <>
+                  <div className="grid grid-cols-2 gap-2 select-none">
+                    <button
+                      onClick={() => setIsCreateOpen(!isCreateOpen)}
+                      className={`py-1.5 px-2 rounded-lg border text-[9px] font-bold uppercase tracking-wider transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-1.5 ${
+                        isCreateOpen
+                          ? 'bg-indigo-600/30 border-indigo-400/50 text-white shadow-md'
+                          : 'bg-indigo-950/20 border-indigo-500/15 text-indigo-300 hover:text-indigo-200 hover:bg-indigo-900/20'
+                      }`}
+                    >
+                      <span>📂</span>
+                      <span>{isCreateOpen ? 'Close New' : 'New Folder'}</span>
+                    </button>
 
-                <label className="py-1.5 px-2 rounded-lg border bg-indigo-950/20 border-indigo-500/15 text-indigo-300 hover:text-indigo-200 hover:bg-indigo-900/20 text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer text-center flex items-center justify-center gap-1.5">
-                  <span>📥</span>
-                  <span>Import Set</span>
-                  <input
-                    type="file"
-                    accept=".json"
-                    className="hidden"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file && onImportSetlistJSON) {
-                        const reader = new FileReader();
-                        reader.onload = async (evt) => {
-                          try {
-                            const parsed = JSON.parse(evt.target?.result as string);
-                            await onImportSetlistJSON(parsed);
-                          } catch (err) {
-                            alert('Failed to import setlist file');
+                    <label className="py-1.5 px-2 rounded-lg border bg-indigo-950/20 border-indigo-500/15 text-indigo-300 hover:text-indigo-200 hover:bg-indigo-900/20 text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer text-center flex items-center justify-center gap-1.5">
+                      <span>📥</span>
+                      <span>Import Set</span>
+                      <input
+                        type="file"
+                        accept=".json"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file && onImportSetlistJSON) {
+                            const reader = new FileReader();
+                            reader.onload = async (evt) => {
+                              try {
+                                const parsed = JSON.parse(evt.target?.result as string);
+                                await onImportSetlistJSON(parsed);
+                              } catch (err) {
+                                alert('Failed to import setlist file');
+                              }
+                            };
+                            reader.readAsText(file);
                           }
-                        };
-                        reader.readAsText(file);
-                      }
-                      e.target.value = '';
-                    }}
-                  />
-                </label>
-              </div>
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                  </div>
 
-              {/* Collapsible input area */}
-              {isCreateOpen && (
-                <div className="bg-black/30 p-2 rounded-xl border border-indigo-500/20 select-none animate-fadeIn flex gap-1.5">
-                  <input
-                    type="text"
-                    placeholder="e.g. Sunday Morning"
-                    id="sidebarNewSetName"
-                    className="flex-1 bg-black/40 text-indigo-100 py-1.5 px-2 rounded-lg text-xs outline-none border border-white/10 font-mono"
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        if (onCreateSetlist && e.currentTarget.value.trim()) {
-                          onCreateSetlist(e.currentTarget.value.trim());
-                          e.currentTarget.value = '';
-                          setIsCreateOpen(false);
-                        }
-                      }
-                    }}
-                  />
-                  <button
-                    onClick={() => {
-                      const el = document.getElementById('sidebarNewSetName') as HTMLInputElement;
-                      if (el && onCreateSetlist && el.value.trim()) {
-                        onCreateSetlist(el.value.trim());
-                        el.value = '';
-                        setIsCreateOpen(false);
-                      }
-                    }}
-                    className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-[10px] font-black uppercase tracking-wider rounded-lg transition-all active:scale-95 cursor-pointer"
-                  >
-                    Create
-                  </button>
-                </div>
+                  {/* Collapsible input area */}
+                  {isCreateOpen && (
+                    <div className="bg-black/30 p-2 rounded-xl border border-indigo-500/20 select-none animate-fadeIn flex gap-1.5">
+                      <input
+                        type="text"
+                        placeholder="e.g. Sunday Morning"
+                        id="sidebarNewSetName"
+                        className="flex-1 bg-black/40 text-indigo-100 py-1.5 px-2 rounded-lg text-xs outline-none border border-white/10 font-mono"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            if (onCreateSetlist && e.currentTarget.value.trim()) {
+                              onCreateSetlist(e.currentTarget.value.trim());
+                              e.currentTarget.value = '';
+                              setIsCreateOpen(false);
+                            }
+                          }
+                        }}
+                      />
+                      <button
+                        onClick={() => {
+                          const el = document.getElementById('sidebarNewSetName') as HTMLInputElement;
+                          if (el && onCreateSetlist && el.value.trim()) {
+                            onCreateSetlist(el.value.trim());
+                            el.value = '';
+                            setIsCreateOpen(false);
+                          }
+                        }}
+                        className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-[10px] font-black uppercase tracking-wider rounded-lg transition-all active:scale-95 cursor-pointer"
+                      >
+                        Create
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -415,14 +421,16 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                             <span className="text-sm transition-transform duration-200 shrink-0">
                               {isExpanded ? '📂' : (setlistsTabMode === 'local' ? '💻' : '📁')}
                             </span>
-                            <div className="marquee-container relative overflow-hidden flex-1 min-w-0 select-none flex items-center gap-1.5">
+                            <div className="marquee-container relative overflow-hidden flex-1 min-w-0 select-none">
                               <span className="inline-block text-xs font-black tracking-wide text-gray-200 uppercase whitespace-nowrap truncate w-full group-hover:w-max group-hover:overflow-visible group-hover:text-clip group-hover:animate-hover-marquee">
                                 {setName} {isLocked && <span className="ml-1 text-[11px]" title="Setlist Locked by Admin">🔒</span>}
                               </span>
-                              {setlistsTabMode === 'local' && (
-                                <span className="text-[8px] bg-amber-500/15 border border-amber-500/30 text-amber-300 px-1.5 py-0.2 rounded font-black font-mono whitespace-nowrap">LOCAL</span>
-                              )}
                             </div>
+                            {setlistsTabMode === 'local' ? (
+                              <span className="text-[8px] bg-amber-500/15 border border-amber-500/30 text-amber-300 px-1.5 py-0.5 rounded font-black font-mono whitespace-nowrap shrink-0">LOCAL</span>
+                            ) : (
+                              <span className="text-[8px] bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 px-1.5 py-0.5 rounded font-black font-mono whitespace-nowrap shrink-0">CLOUD</span>
+                            )}
                             <span className={`text-[9px] font-mono font-extrabold px-1.5 py-0.5 rounded-full shrink-0 ${
                               setlistsTabMode === 'local'
                                 ? 'text-amber-400 bg-amber-500/10 border border-amber-500/25'
@@ -524,7 +532,7 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                                       </svg>
                                     </button>
-                                    {(setlistsTabMode === 'local' || isAdmin) && (
+                                    {canModifyFolders && (
                                       <button
                                         onClick={(e) => {
                                           e.stopPropagation();
@@ -560,7 +568,7 @@ export const SidebarCatalog: React.FC<SidebarCatalogProps> = ({
                             ) : (
                               folderSongs.map((s, idx) => {
                                 const isCurrent = currentSong && String(s.SongID) === String(currentSong.SongID);
-                                const dragDisabled = isLocked && !isAdmin;
+                                const dragDisabled = (setlistsTabMode === 'online' && !isAdmin) || (isLocked && !isAdmin);
                                 return (
                                   <div
                                     key={s.SongID}

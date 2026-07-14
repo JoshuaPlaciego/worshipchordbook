@@ -127,6 +127,7 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
   const isSavingLocally = !isAdmin || adminSaveTarget === 'local';
   const [loadedFromSource, setLoadedFromSource] = useState<'online' | 'local'>('local');
   const [tickedOnlineArrangements, setTickedOnlineArrangements] = useState<Set<string>>(new Set());
+  const [tickedLocalArrangements, setTickedLocalArrangements] = useState<Set<string>>(new Set());
   const [localRefreshTrigger, setLocalRefreshTrigger] = useState(0);
   const [showSidebar, setShowSidebar] = useState(false);
 
@@ -212,9 +213,87 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
     });
   };
 
+  const toggleTickLocal = (name: string) => {
+    setTickedLocalArrangements(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) {
+        next.delete(name);
+      } else {
+        next.add(name);
+      }
+      return next;
+    });
+  };
+
+  const copyTickedToCloud = async () => {
+    if (tickedLocalArrangements.size === 0) {
+      showToast('Please select (tick) at least one local arrangement to publish!', 'warning');
+      return;
+    }
+
+    // Check for duplicates before publishing to Cloud
+    const duplicates: string[] = [];
+    for (const name of tickedLocalArrangements) {
+      const isDup = onlineArrangementNames.some(onName => onName.trim().toLowerCase() === name.trim().toLowerCase());
+      if (isDup) {
+        duplicates.push(name);
+      }
+    }
+
+    if (duplicates.length > 0) {
+      showToast(`Publish aborted. The following arrangement(s) already exist on the Cloud for this song: ${duplicates.join(', ')}`, 'error');
+      return;
+    }
+
+    setIsSavingPreset(true);
+    let successCount = 0;
+    try {
+      // Find local arrangement data in localStorage
+      const localRaw = localStorage.getItem(`custom_arrangements_${currentSong?.SongID}`) || '{}';
+      const localObj = JSON.parse(localRaw);
+
+      for (const name of tickedLocalArrangements) {
+        const localData = localObj[name];
+        if (localData) {
+          try {
+            const blocks = localData.roadmap || [];
+            await executeSaveArrangement(name, false, blocks, false);
+            successCount++;
+          } catch (e) {
+            console.error(`Error publishing ${name} to cloud:`, e);
+          }
+        }
+      }
+
+      await fetchCatalog();
+      setTickedLocalArrangements(new Set());
+      setArrangementsTab('online');
+      showToast(`Successfully published ${successCount} arrangement(s) to Cloud!`, 'success');
+    } catch (e) {
+      console.error(e);
+      showToast('Could not publish selected arrangements to cloud.', 'error');
+    } finally {
+      setIsSavingPreset(false);
+    }
+  };
+
   const copyTickedToLocal = async () => {
     if (tickedOnlineArrangements.size === 0) {
       showToast('Please select (tick) at least one online arrangement to copy!', 'warning');
+      return;
+    }
+
+    // Check for duplicates before copying to Local
+    const duplicates: string[] = [];
+    for (const name of tickedOnlineArrangements) {
+      const isDup = localArrangementNames.some(locName => locName.trim().toLowerCase() === name.trim().toLowerCase());
+      if (isDup) {
+        duplicates.push(name);
+      }
+    }
+
+    if (duplicates.length > 0) {
+      showToast(`Copy aborted. The following arrangement(s) already exist locally for this song: ${duplicates.join(', ')}`, 'error');
       return;
     }
 
@@ -762,65 +841,100 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
               {(() => {
                 const currentTabNames = arrangementsTab === 'online' ? onlineArrangementNames : localArrangementNames;
 
-                if (currentTabNames.length === 0) {
-                  return (
-                    <div className="text-gray-500 italic text-[10px] py-4 text-center bg-black/20 rounded-xl border border-dashed border-indigo-500/10">
-                      No {arrangementsTab} arrangements saved yet
-                    </div>
-                  );
-                }
                 return (
                   <div className="flex flex-col gap-1.5 max-h-[140px] overflow-y-auto custom-scrollbar pr-1">
-                    {currentTabNames.map((name) => {
-                      const isActive = currentArrangementName === name;
-                      const canDelete = arrangementsTab === 'local' || isAdmin;
-                      return (
-                        <div
-                          key={name}
-                          className={`group flex items-center justify-between px-2.5 py-1.5 rounded-lg border transition-all ${
-                            isActive
-                              ? isSavingLocally && arrangementsTab === 'local'
-                                ? 'bg-amber-950/40 border-amber-500/40 text-amber-200 shadow-md shadow-amber-950/25'
-                                : 'bg-indigo-950/40 border-indigo-500/40 text-white'
-                              : 'bg-black/20 border-indigo-500/5 text-indigo-200 hover:bg-indigo-900/20'
-                          }`}
-                        >
-                          {arrangementsTab === 'online' && (
-                            <input
-                              type="checkbox"
-                              checked={tickedOnlineArrangements.has(name)}
-                              onChange={() => toggleTickOnline(name)}
-                              className="w-3.5 h-3.5 rounded border-indigo-500/30 text-indigo-600 bg-black/40 focus:ring-0 cursor-pointer mr-2.5 accent-indigo-500 shrink-0"
-                              title="Select to copy to local"
-                            />
-                          )}
-                          <button
-                            onClick={() => {
-                              loadPresetArrangement(name, arrangementsTab);
-                              setLoadedFromSource(arrangementsTab);
-                              showToast(`Loaded "${name}" arrangement successfully`, 'success');
-                              setShowSidebar(false);
-                            }}
-                            className="flex-1 text-left font-sans font-bold text-xs truncate py-0.5 cursor-pointer"
-                            title={`Load arrangement: ${name}`}
+                    {/* Default Blueprint Item */}
+                    <div
+                      className={`group flex items-center justify-between px-2.5 py-1.5 rounded-lg border transition-all ${
+                        !currentArrangementName
+                          ? 'bg-indigo-950/40 border-indigo-500/40 text-white font-black shadow-[0_0_8px_rgba(99,102,241,0.2)]'
+                          : 'bg-black/20 border-indigo-500/5 text-indigo-200 hover:bg-indigo-900/20'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          resetRoadmapBlocks();
+                          setCurrentArrangementName('');
+                          showToast('Loaded Default Blueprint successfully', 'success');
+                          setShowSidebar(false);
+                        }}
+                        className="flex-1 text-left font-sans font-bold text-xs truncate py-0.5 cursor-pointer flex items-center gap-1.5"
+                        title="Load original default blueprint arrangement"
+                      >
+                        <span className="text-xs">📦</span>
+                        <span>Default Blueprint</span>
+                      </button>
+                      <span className="text-[8px] font-mono font-bold bg-indigo-500/15 text-indigo-300 border border-indigo-500/20 px-1 rounded uppercase tracking-wider shrink-0 select-none">
+                        {!currentArrangementName ? 'Active' : 'Original'}
+                      </span>
+                    </div>
+
+                    {currentTabNames.length === 0 ? (
+                      <div className="text-gray-500 italic text-[10px] py-4 text-center bg-black/20 rounded-xl border border-dashed border-indigo-500/10">
+                        No {arrangementsTab} arrangements saved yet
+                      </div>
+                    ) : (
+                      currentTabNames.map((name) => {
+                        const isActive = currentArrangementName === name;
+                        const canDelete = arrangementsTab === 'local' || isAdmin;
+                        return (
+                          <div
+                            key={name}
+                            className={`group flex items-center justify-between px-2.5 py-1.5 rounded-lg border transition-all ${
+                              isActive
+                                ? isSavingLocally && arrangementsTab === 'local'
+                                  ? 'bg-amber-950/40 border-amber-500/40 text-amber-200 shadow-md shadow-amber-950/25'
+                                  : 'bg-indigo-950/40 border-indigo-500/40 text-white'
+                                : 'bg-black/20 border-indigo-500/5 text-indigo-200 hover:bg-indigo-900/20'
+                            }`}
                           >
-                            {name}
-                          </button>
-                          {canDelete && (
+                            {arrangementsTab === 'online' && (
+                              <input
+                                type="checkbox"
+                                checked={tickedOnlineArrangements.has(name)}
+                                onChange={() => toggleTickOnline(name)}
+                                className="w-3.5 h-3.5 rounded border-indigo-500/30 text-indigo-600 bg-black/40 focus:ring-0 cursor-pointer mr-2.5 accent-indigo-500 shrink-0"
+                                title="Select to copy to local"
+                              />
+                            )}
+                            {arrangementsTab === 'local' && isAdmin && (
+                              <input
+                                type="checkbox"
+                                checked={tickedLocalArrangements.has(name)}
+                                onChange={() => toggleTickLocal(name)}
+                                className="w-3.5 h-3.5 rounded border-amber-500/30 text-amber-600 bg-black/40 focus:ring-0 cursor-pointer mr-2.5 accent-amber-500 shrink-0"
+                                title="Select to publish to cloud"
+                              />
+                            )}
                             <button
-                              onClick={async () => {
-                                await deletePresetArrangement(name, isActive, arrangementsTab);
-                                setLocalRefreshTrigger(prev => prev + 1);
+                              onClick={() => {
+                                loadPresetArrangement(name, arrangementsTab);
+                                setLoadedFromSource(arrangementsTab);
+                                showToast(`Loaded "${name}" arrangement successfully`, 'success');
+                                setShowSidebar(false);
                               }}
-                              className="text-gray-500 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 cursor-pointer"
-                              title="Delete arrangement"
+                              className="flex-1 text-left font-sans font-bold text-xs truncate py-0.5 cursor-pointer"
+                              title={`Load arrangement: ${name}`}
                             >
-                              ✕
+                              {name}
                             </button>
-                          )}
-                        </div>
-                      );
-                    })}
+                            {canDelete && (
+                              <button
+                                onClick={async () => {
+                                  await deletePresetArrangement(name, isActive, arrangementsTab);
+                                  setLocalRefreshTrigger(prev => prev + 1);
+                                }}
+                                className="text-gray-500 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 cursor-pointer"
+                                title="Delete arrangement"
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
                   </div>
                 );
               })()}
@@ -834,6 +948,18 @@ export const ArrangementDAWModal: React.FC<ArrangementDAWModalProps> = ({
                 >
                   <Copy className="w-3 h-3" />
                   <span>Copy {tickedOnlineArrangements.size} Selected to Local</span>
+                </button>
+              )}
+
+              {/* Publish Selected to Cloud Button */}
+              {arrangementsTab === 'local' && isAdmin && tickedLocalArrangements.size > 0 && (
+                <button
+                  type="button"
+                  onClick={copyTickedToCloud}
+                  className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-black rounded-lg text-[10px] uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-indigo-600/15 mt-1"
+                >
+                  <Database className="w-3 h-3" />
+                  <span>Publish {tickedLocalArrangements.size} Selected to Cloud</span>
                 </button>
               )}
 

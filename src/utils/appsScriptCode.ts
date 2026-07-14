@@ -213,8 +213,8 @@ function doPost(e) {
     return createJsonResponse(res);
   }
 
-  // For all other master write actions (like bulkAdd or updateSong), require valid credentials dynamically
-  if (params.action === "bulkAdd" || params.action === "updateSong") {
+  // For all other master write actions (like bulkAdd, updateSong or deleteSongRecord), require valid credentials dynamically
+  if (params.action === "bulkAdd" || params.action === "updateSong" || params.action === "deleteSongRecord") {
     if (!isUserValid(params.user, params.secret)) {
       return createJsonResponse({status: "error", message: "Unauthorized"});
     }
@@ -306,7 +306,19 @@ function doPost(e) {
       // Set the packed lines cell
       songSheet.getRange(songRowToUpdate, colIdx + 1).setValue(JSON.stringify(params.lines));
     } else {
-      return createJsonResponse({status: "error", message: "Song not found for updating."});
+      // Replicate the song with the SAME ID into the active database!
+      var headers = songSheet.getRange(1, 1, 1, songSheet.getLastColumn()).getValues()[0];
+      var colIdx = headers.indexOf("SongLinesJSON");
+      if (colIdx === -1) {
+        colIdx = headers.length;
+        songSheet.getRange(1, colIdx + 1).setValue("SongLinesJSON");
+      }
+      var newRow = [songIdStr, params.song.title, params.song.artist, params.song.key, params.song.version];
+      while (newRow.length < colIdx) {
+        newRow.push("");
+      }
+      newRow[colIdx] = JSON.stringify(params.lines);
+      songSheet.appendRow(newRow);
     }
 
     // Delete the legacy lines from SongLines tab if they exist (to save cells!)
@@ -324,6 +336,34 @@ function doPost(e) {
     updateSyncVersion(ss, "Songs");
     updateSyncVersion(ss, "SongLines");
 
+    return createJsonResponse({status: "success"});
+  }
+
+  // ----------------------------------------------------
+  // ACTION: DELETE SONG RECORD (Consolidates song data when migrating from archives)
+  // ----------------------------------------------------
+  if (params.action === "deleteSongRecord") {
+    var songIdStr = params.songId.toString();
+    var songSheet = ss.getSheetByName("Songs");
+    if (songSheet) {
+      var existingSongs = songSheet.getDataRange().getDisplayValues();
+      for (var i = existingSongs.length - 1; i >= 1; i--) {
+        if (existingSongs[i][0].toString() === songIdStr) {
+          songSheet.deleteRow(i + 1);
+        }
+      }
+    }
+    var lineSheet = ss.getSheetByName("SongLines");
+    if (lineSheet) {
+      var existingLines = lineSheet.getDataRange().getDisplayValues();
+      for (var j = existingLines.length - 1; j >= 1; j--) {
+        if (existingLines[j][0].toString() === songIdStr) {
+          lineSheet.deleteRow(j + 1); 
+        }
+      }
+    }
+    updateSyncVersion(ss, "Songs");
+    updateSyncVersion(ss, "SongLines");
     return createJsonResponse({status: "success"});
   }
 

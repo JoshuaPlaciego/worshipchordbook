@@ -625,8 +625,23 @@ export default function App() {
       if (data.songs && data.songs.length > 0) {
         setSongs((prevSongs) => {
           const songMap = new Map(prevSongs.map((s) => [String(s.SongID), s]));
+          let skippedCount = 0;
           for (const s of data.songs) {
+            // Check for unique songs identified by title, artist, and version only
+            const isDup = prevSongs.some((ps) => 
+              String(ps.SongID) !== String(s.SongID) &&
+              ps.Title.trim().toLowerCase() === s.Title.trim().toLowerCase() &&
+              (ps.Artist || '').trim().toLowerCase() === (s.Artist || '').trim().toLowerCase() &&
+              (ps.Version || '1.0').trim().toLowerCase() === (s.Version || '1.0').trim().toLowerCase()
+            );
+            if (isDup) {
+              skippedCount++;
+              continue;
+            }
             songMap.set(String(s.SongID), s);
+          }
+          if (skippedCount > 0) {
+            showToast(`Skipped importing ${skippedCount} duplicate song(s) to protect unique catalog records.`, 'warning');
           }
           const merged = Array.from(songMap.values());
           localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(merged));
@@ -637,8 +652,21 @@ export default function App() {
       if (data.localSetlists && data.localSetlists.length > 0) {
         setLocalSetlists((prevSets) => {
           const setMap = new Map(prevSets.map((s) => [s.PresetName, s]));
+          let skippedCount = 0;
           for (const s of data.localSetlists) {
+            // Check for unique setlist folders within local storage
+            const isDup = prevSets.some((ps) => 
+              ps.PresetName !== s.PresetName &&
+              ps.PresetName.trim().toLowerCase() === s.PresetName.trim().toLowerCase()
+            );
+            if (isDup) {
+              skippedCount++;
+              continue;
+            }
             setMap.set(s.PresetName, s);
+          }
+          if (skippedCount > 0) {
+            showToast(`Skipped importing ${skippedCount} duplicate local setlist folder(s).`, 'warning');
           }
           const merged = Array.from(setMap.values());
           localStorage.setItem('worship_local_setlists', JSON.stringify(merged));
@@ -682,14 +710,21 @@ export default function App() {
       return;
     }
     
-    const folderName = json.name || 'Imported Setlist';
+    const folderName = (json.name || 'Imported Setlist').trim();
+    const folderNameLower = folderName.toLowerCase();
     const songIds = Array.isArray(json.songIds) ? json.songIds : [];
     const arrangements = Array.isArray(json.arrangements) ? json.arrangements : [];
 
     if (setlistsTabMode === 'local') {
+      // Check if a local setlist with same folderName already exists
+      if (localSetlists.some((sl) => sl.PresetName.trim().toLowerCase() === folderNameLower)) {
+        showToast(`A local setlist named "${folderName}" already exists! Import aborted to prevent duplicate.`, 'error');
+        return;
+      }
+
       // Save to localSetlists
       const updatedLocal = [
-        ...localSetlists.filter((sl) => sl.PresetName !== folderName),
+        ...localSetlists,
         {
           PresetName: folderName,
           RoadmapJSON: JSON.stringify({ songIds, lastUpdated: Date.now(), locked: false })
@@ -712,6 +747,13 @@ export default function App() {
         showToast('Cannot import to online sets in Viewer Mode. Please switch to LOCAL sets.', 'warning');
         return;
       }
+
+      // Check if a cloud setlist with same folderName already exists
+      if (allSharedSetlists.some((sl) => sl.PresetName.trim().toLowerCase() === folderNameLower)) {
+        showToast(`A cloud setlist named "${folderName}" already exists! Import aborted to prevent duplicate.`, 'error');
+        return;
+      }
+
       setIsLoading(true);
       try {
         // Save metadata
@@ -1200,6 +1242,89 @@ export default function App() {
     }
   };
 
+  const replicateSongToActiveIfNeeded = async (songId: string | number): Promise<boolean> => {
+    const songIdStr = String(songId);
+    const song = songs.find((s) => String(s.SongID) === songIdStr);
+    if (!song) return false;
+
+    // If there is no _sourceNodeUrl, or it is already the active write database (SCRIPT_URL), no replication needed
+    if (!song._sourceNodeUrl || song._sourceNodeUrl === SCRIPT_URL) {
+      return true;
+    }
+
+    console.log(`Consolidating and replicating song ${songIdStr} from archived node ${song._sourceNodeUrl} to active primary database...`);
+
+    let cachedLines: SongLine[] = [];
+    try {
+      const cacheRaw = localStorage.getItem('cached_song_lines');
+      if (cacheRaw) {
+        cachedLines = JSON.parse(cacheRaw);
+      }
+    } catch (e) {}
+
+    let relevantLines = cachedLines.filter(
+      (line) => line && String(line.SongID) === songIdStr
+    );
+    if (relevantLines.length === 0 && currentSong && String(currentSong.SongID) === songIdStr) {
+      relevantLines = songLines;
+    }
+
+    const payload = {
+      action: 'updateSong',
+      user: appUser,
+      secret: appSecret,
+      song: {
+        id: songIdStr,
+        title: song.Title,
+        artist: song.Artist || '',
+        key: song.OriginalKey || 'C',
+        version: song.Version || '1.0',
+      },
+      lines: relevantLines.map((l) => ({
+        section: l.SectionName || l.Section || l.section || '',
+        order: l.Order || 1,
+        chords: l.Chords || '',
+        lyrics: l.Lyrics || '',
+      })),
+    };
+
+    try {
+      // 1. Save to active DB (creates row if not there)
+      const saveRes = await fetch(SCRIPT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const saveResult = await saveRes.json();
+      if (saveResult.status !== 'success') {
+        throw new Error(saveResult.message || 'Failed to save song to active primary database');
+      }
+
+      // 2. Delete from archived node
+      const deleteRes = await fetch(song._sourceNodeUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'deleteSongRecord',
+          songId: songIdStr,
+          user: appUser,
+          secret: appSecret,
+        }),
+      });
+      const deleteResult = await deleteRes.json();
+      if (deleteResult.status !== 'success') {
+        console.warn('Failed to delete migrated song from archived database:', deleteResult.message);
+      }
+
+      console.log(`Successfully replicated song ${songIdStr} to active primary database.`);
+      return true;
+    } catch (err) {
+      console.error('Error in song replication:', err);
+      showToast('Error consolidating song data from archived node: ' + String(err), 'error');
+      return false;
+    }
+  };
+
   const saveSongToSetlist = async (setName: string, arrangementName: string, customLayout?: { key?: string; roadmap?: any[]; snapshotSections?: any }) => {
     const isViewer = !(appUser && appSecret);
     if (setlistsTabMode === 'local' || isViewer) {
@@ -1312,6 +1437,9 @@ export default function App() {
 
     setIsLoading(true);
     try {
+      // Replicate the song to the active primary database first if it was in an archived node!
+      await replicateSongToActiveIfNeeded(currentSong.SongID);
+
       const capturedSettings = {
         key: customLayout?.key || currentKey,
         roadmap: customLayout?.roadmap || originalRoadmap,
@@ -1355,6 +1483,27 @@ export default function App() {
         throw new Error(resArrJson.message || 'Failed to save arrangement');
       }
 
+      // Replicate: Delete original arrangement from archived node if it migrated
+      const existingArr = allSharedArrangements.find(
+        (arr) => String(arr.SongID) === String(currentSong.SongID) && arr.PresetName === `Set: ${setName}`
+      );
+      if (existingArr && existingArr._sourceNodeUrl && existingArr._sourceNodeUrl !== SCRIPT_URL) {
+        try {
+          await fetch(existingArr._sourceNodeUrl, {
+            method: 'POST',
+            body: JSON.stringify({
+              action: 'deleteArrangement',
+              songId: String(currentSong.SongID),
+              name: `Set: ${setName}`,
+              user: appUser,
+              secret: appSecret,
+            }),
+          });
+        } catch (err) {
+          console.warn('Failed to delete migrated arrangement from archived database:', err);
+        }
+      }
+
       const existingMeta = allSharedSetlists.find(
         (sl) => sl.PresetName === setName
       );
@@ -1385,6 +1534,23 @@ export default function App() {
       const resMetaJson = await resMeta.json();
       if (resMetaJson.status !== 'success') {
         throw new Error(resMetaJson.message || 'Failed to save setlist metadata');
+      }
+
+      // Replicate: Delete original setlist from archived database if it migrated
+      if (existingMeta && existingMeta._sourceNodeUrl && existingMeta._sourceNodeUrl !== SCRIPT_URL) {
+        try {
+          await fetch(existingMeta._sourceNodeUrl, {
+            method: 'POST',
+            body: JSON.stringify({
+              action: 'deleteSetlist',
+              name: setName,
+              user: appUser,
+              secret: appSecret,
+            }),
+          });
+        } catch (err) {
+          console.warn('Failed to delete migrated setlist from archived database:', err);
+        }
       }
 
       showToast(`Added to "${setName}" as "${arrangementName}"`, 'success');
@@ -1480,10 +1646,27 @@ export default function App() {
         songId: songIdToRemove,
         name: `Set: ${setName}`,
       };
+      
+      // Delete from active primary DB
       fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payloadDelete),
       }).catch(err => console.warn('Background deleteArrangement failed:', err));
+
+      // Also delete from archived node if it originated there!
+      const targetArr = allSharedArrangements.find(
+        (arr) => String(arr.SongID) === String(songIdToRemove) && arr.PresetName === `Set: ${setName}`
+      );
+      if (targetArr && targetArr._sourceNodeUrl && targetArr._sourceNodeUrl !== SCRIPT_URL) {
+        fetch(targetArr._sourceNodeUrl, {
+          method: 'POST',
+          body: JSON.stringify({
+            ...payloadDelete,
+            user: appUser,
+            secret: appSecret,
+          }),
+        }).catch(err => console.warn('Background deleteArrangement from archived node failed:', err));
+      }
 
       const existingMeta = allSharedSetlists.find(
         (sl) => sl.PresetName === setName
@@ -1503,10 +1686,32 @@ export default function App() {
           roadmap: { songIds: updatedSongIds, lastUpdated: Date.now(), locked: isSetlistLocked(setName) },
         };
 
-        fetch(SCRIPT_URL, {
+        // Write updated setlist metadata to active primary database
+        const resMeta = await fetch(SCRIPT_URL, {
           method: 'POST',
           body: JSON.stringify(payloadMeta),
-        }).catch(err => console.warn('Background saveSetlist failed:', err));
+        });
+        const resMetaJson = await resMeta.json();
+        if (resMetaJson.status !== 'success') {
+          throw new Error(resMetaJson.message || 'Failed to update setlist metadata on active primary database');
+        }
+
+        // Replicate: Delete original setlist from archived database if it migrated
+        if (existingMeta && existingMeta._sourceNodeUrl && existingMeta._sourceNodeUrl !== SCRIPT_URL) {
+          try {
+            await fetch(existingMeta._sourceNodeUrl, {
+              method: 'POST',
+              body: JSON.stringify({
+                action: 'deleteSetlist',
+                name: setName,
+                user: appUser,
+                secret: appSecret,
+              }),
+            });
+          } catch (err) {
+            console.warn('Failed to delete migrated setlist from archived database:', err);
+          }
+        }
       }
 
       showToast(`Removed from Setlist: ${setName}`, 'info');
@@ -1589,6 +1794,26 @@ export default function App() {
         throw new Error(resMetaJson.message || 'Failed to save setlist order');
       }
 
+      // Replicate: Delete original setlist from archived database if it migrated
+      const existingMeta = allSharedSetlists.find(
+        (sl) => sl.PresetName === setName
+      );
+      if (existingMeta && existingMeta._sourceNodeUrl && existingMeta._sourceNodeUrl !== SCRIPT_URL) {
+        try {
+          await fetch(existingMeta._sourceNodeUrl, {
+            method: 'POST',
+            body: JSON.stringify({
+              action: 'deleteSetlist',
+              name: setName,
+              user: appUser,
+              secret: appSecret,
+            }),
+          });
+        } catch (err) {
+          console.warn('Failed to delete migrated setlist from archived database:', err);
+        }
+      }
+
       showToast(`Setlist order updated for "${setName}"`, 'success');
       await refetchArrangements();
     } catch (err: any) {
@@ -1599,20 +1824,24 @@ export default function App() {
     }
   };
 
-  const createNewSetlistFolder = async (setName: string) => {
+  const createNewSetlistFolder = async (setName: string, target?: 'cloud' | 'local') => {
     if (!setName.trim()) {
       showToast('Please enter a setlist name', 'error');
       return;
     }
     const isViewer = !(appUser && appSecret);
-    if (setlistsTabMode === 'local' || isViewer) {
+    const useLocal = target === 'local' || (target !== 'cloud' && (setlistsTabMode === 'local' || isViewer));
+    
+    const nameToUse = setName.trim();
+    const nameToUseLower = nameToUse.toLowerCase();
+
+    if (useLocal) {
+      if (localSetlists.some((sl) => sl.PresetName.trim().toLowerCase() === nameToUseLower)) {
+        showToast(`A local setlist named "${nameToUse}" already exists!`, 'warning');
+        return;
+      }
       setIsLoading(true);
       try {
-        const nameToUse = setName.trim();
-        if (localSetlists.some((sl) => sl.PresetName === nameToUse)) {
-          showToast(`A local setlist named "${nameToUse}" already exists!`, 'warning');
-          return;
-        }
         const newSet = {
           PresetName: nameToUse,
           RoadmapJSON: JSON.stringify({ songIds: [], lastUpdated: Date.now(), locked: false })
@@ -1629,11 +1858,17 @@ export default function App() {
       }
       return;
     }
+
+    if (allSharedSetlists.some((sl) => sl.PresetName.trim().toLowerCase() === nameToUseLower)) {
+      showToast(`A cloud setlist named "${nameToUse}" already exists!`, 'warning');
+      return;
+    }
+
     setIsLoading(true);
     try {
       const payloadMeta = {
         action: 'saveSetlist',
-        name: setName.trim(),
+        name: nameToUse,
         roadmap: { songIds: [], lastUpdated: Date.now() },
       };
 
@@ -1646,7 +1881,7 @@ export default function App() {
         throw new Error(resMetaJson.message || 'Failed to create setlist folder');
       }
 
-      showToast(`Setlist folder "${setName.trim()}" created!`, 'success');
+      showToast(`Setlist folder "${nameToUse}" created!`, 'success');
       await refetchArrangements();
     } catch (err: any) {
       console.error(err);
@@ -1692,10 +1927,28 @@ export default function App() {
         action: 'deleteSetlist',
         name: setName,
       };
+      
+      // Delete from active primary DB
       fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify(payloadMeta),
       }).catch(err => console.warn('Background deleteSetlist failed:', err));
+
+      // Delete from archived node if it originated there
+      const existingMeta = allSharedSetlists.find(
+        (sl) => sl.PresetName === setName
+      );
+      if (existingMeta && existingMeta._sourceNodeUrl && existingMeta._sourceNodeUrl !== SCRIPT_URL) {
+        fetch(existingMeta._sourceNodeUrl, {
+          method: 'POST',
+          body: JSON.stringify({
+            action: 'deleteSetlist',
+            name: setName,
+            user: appUser,
+            secret: appSecret,
+          }),
+        }).catch(err => console.warn('Background deleteSetlist from archived node failed:', err));
+      }
 
       const setPresets = allSharedArrangements.filter(
         (arr) => arr.PresetName === `Set: ${setName}`
@@ -1707,10 +1960,26 @@ export default function App() {
           songId: String(preset.SongID),
           name: `Set: ${setName}`,
         };
+        
+        // Delete from active primary DB
         fetch(SCRIPT_URL, {
           method: 'POST',
           body: JSON.stringify(payloadDelete),
         }).catch(err => console.warn('Background deleteArrangement failed:', err));
+
+        // Delete from archived DB if it originated there
+        if (preset._sourceNodeUrl && preset._sourceNodeUrl !== SCRIPT_URL) {
+          fetch(preset._sourceNodeUrl, {
+            method: 'POST',
+            body: JSON.stringify({
+              action: 'deleteArrangement',
+              songId: String(preset.SongID),
+              name: `Set: ${setName}`,
+              user: appUser,
+              secret: appSecret,
+            }),
+          }).catch(err => console.warn('Background deleteArrangement from archived node failed:', err));
+        }
       }
 
       showToast(`Setlist folder "${setName}" deleted!`, 'success');
@@ -1921,17 +2190,18 @@ export default function App() {
       for (let i = fetchResults.length - 1; i >= 0; i--) {
         const res = fetchResults[i];
         if (!res) continue;
+        const nodeUrl = urls[i];
 
         res.songs.forEach((s) => {
           if (s && s.SongID) {
-            mergedSongsMap.set(String(s.SongID), s);
+            mergedSongsMap.set(String(s.SongID), { ...s, _sourceNodeUrl: nodeUrl });
             totalSongsCount++;
           }
         });
 
         res.lines.forEach((l) => {
           if (l && l.LineID) {
-            mergedLinesMap.set(String(l.LineID), l);
+            mergedLinesMap.set(String(l.LineID), { ...l, _sourceNodeUrl: nodeUrl });
             totalLinesCount++;
           }
         });
@@ -1939,7 +2209,7 @@ export default function App() {
         res.arrangements.forEach((arr) => {
           if (arr && arr.SongID && arr.PresetName) {
             const key = `${arr.SongID}_${arr.PresetName}`;
-            mergedArrMap.set(key, arr);
+            mergedArrMap.set(key, { ...arr, _sourceNodeUrl: nodeUrl });
           }
         });
 
@@ -1959,7 +2229,8 @@ export default function App() {
           } else if (name && name !== 'SYSTEM_CONFIG_CLUSTER_NODES') {
             mergedSetlistsMap.set(name, {
               PresetName: name,
-              RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}'
+              RoadmapJSON: row['Songs & Arrangements'] || row.RoadmapJSON || '{}',
+              _sourceNodeUrl: nodeUrl
             });
           }
         });
@@ -2452,6 +2723,12 @@ Worship Setup Assistant`;
 
     // Do not check custom arrangement names created for sets ("Set: <SetlistName>")
     if (currentArrangementName.startsWith('Set: ')) return;
+
+    // Ensure the arrangement was originally loaded from/available on the cloud
+    const wasCloudArr = syncedSheetArrangements.some(
+      (a) => a.PresetName.toLowerCase().trim() === currentArrangementName.toLowerCase().trim()
+    );
+    if (!wasCloudArr) return;
 
     // Find the currently active arrangement in the remote list
     const remoteArr = newSongArrangements.find(
@@ -3542,6 +3819,10 @@ Worship Setup Assistant`;
         throw new Error('LocalOnlyViewerMode');
       }
 
+      if (currentSong) {
+        await replicateSongToActiveIfNeeded(currentSong.SongID);
+      }
+
       const richRoadmap = {
         roadmap: roadmapToSave,
         key: currentKey,
@@ -3565,6 +3846,27 @@ Worship Setup Assistant`;
 
       if (result.status === 'success') {
         showToast(`Preset "${name}" synced with the shared catalog!`, 'success');
+        
+        // Replicate: Delete original arrangement from archived database if migrated
+        const existingArr = allSharedArrangements.find(
+          (arr) => String(arr.SongID) === String(currentSong?.SongID) && arr.PresetName === name
+        );
+        if (existingArr && existingArr._sourceNodeUrl && existingArr._sourceNodeUrl !== SCRIPT_URL) {
+          try {
+            await fetch(existingArr._sourceNodeUrl, {
+              method: 'POST',
+              body: JSON.stringify({
+                action: 'deleteArrangement',
+                songId: String(currentSong?.SongID),
+                name: name,
+                user: appUser,
+                secret: appSecret,
+              }),
+            });
+          } catch (err) {
+            console.warn('Failed to delete arrangement from archived node:', err);
+          }
+        }
       } else {
         throw new Error(result.message || 'Spreadsheet save failed');
       }
@@ -3594,10 +3896,37 @@ Worship Setup Assistant`;
             name: `Set: ${activeSetlistFolder}`,
             roadmap: capturedSettings,
           };
-          fetch(SCRIPT_URL, {
+          
+          // Save setlist arrangement to active DB
+          const resSetlistArr = await fetch(SCRIPT_URL, {
             method: 'POST',
             body: JSON.stringify(payloadArrangement),
-          }).catch(err => console.warn('Background saveArrangement failed:', err));
+          });
+          const setlistArrJson = await resSetlistArr.json();
+          if (setlistArrJson.status !== 'success') {
+            throw new Error(setlistArrJson.message || 'Failed to save setlist arrangement');
+          }
+
+          // Replicate: Delete original setlist arrangement from archived DB if migrated
+          const existingSetlistArr = allSharedArrangements.find(
+            (arr) => String(arr.SongID) === String(currentSong.SongID) && arr.PresetName === `Set: ${activeSetlistFolder}`
+          );
+          if (existingSetlistArr && existingSetlistArr._sourceNodeUrl && existingSetlistArr._sourceNodeUrl !== SCRIPT_URL) {
+            try {
+              await fetch(existingSetlistArr._sourceNodeUrl, {
+                method: 'POST',
+                body: JSON.stringify({
+                  action: 'deleteArrangement',
+                  songId: String(currentSong.SongID),
+                  name: `Set: ${activeSetlistFolder}`,
+                  user: appUser,
+                  secret: appSecret,
+                }),
+              });
+            } catch (err) {
+              console.warn('Failed to delete setlist arrangement from archived node:', err);
+            }
+          }
 
           const existingMeta = allSharedSetlists.find(
             (sl) => sl.PresetName === activeSetlistFolder
@@ -3618,10 +3947,33 @@ Worship Setup Assistant`;
             name: activeSetlistFolder,
             roadmap: { songIds, lastUpdated: Date.now(), locked: isSetlistLocked(activeSetlistFolder) },
           };
-          fetch(SCRIPT_URL, {
+          
+          // Save setlist meta to active DB
+          const resMeta = await fetch(SCRIPT_URL, {
             method: 'POST',
             body: JSON.stringify(payloadMeta),
-          }).catch(err => console.warn('Background saveSetlist failed:', err));
+          });
+          const resMetaJson = await resMeta.json();
+          if (resMetaJson.status !== 'success') {
+            throw new Error(resMetaJson.message || 'Failed to save setlist metadata');
+          }
+
+          // Replicate: Delete original setlist from archived database if migrated
+          if (existingMeta && existingMeta._sourceNodeUrl && existingMeta._sourceNodeUrl !== SCRIPT_URL) {
+            try {
+              await fetch(existingMeta._sourceNodeUrl, {
+                method: 'POST',
+                body: JSON.stringify({
+                  action: 'deleteSetlist',
+                  name: activeSetlistFolder,
+                  user: appUser,
+                  secret: appSecret,
+                }),
+              });
+            } catch (err) {
+              console.warn('Failed to delete setlist metadata from archived node:', err);
+            }
+          }
 
           showToast(`Successfully loaded arrangement to active setlist: ${activeSetlistFolder}`, 'success');
         }
@@ -6247,7 +6599,10 @@ Worship Setup Assistant`;
                             return (
                               <div
                                 key={songId}
-                                onClick={() => executeSongLoad(fSong)}
+                                onClick={async () => {
+                                  setActiveSetlistFolder('');
+                                  await executeSongLoad(fSong, true, '');
+                                }}
                                 className="p-3 bg-amber-500/[0.03] hover:bg-amber-500/[0.08] border border-amber-500/10 hover:border-amber-400/30 rounded-xl flex items-center justify-between cursor-pointer transition-all active:scale-99 group/item"
                               >
                                 <div className="flex flex-col">
@@ -6285,13 +6640,19 @@ Worship Setup Assistant`;
                         </p>
                       </div>
                       <div className="flex flex-col sm:flex-row sm:items-center gap-2 mt-1 sm:mt-0 shrink-0">
-                        <span className="px-2.5 py-1 bg-indigo-500/10 border border-indigo-500/25 text-indigo-300 rounded-lg font-sans font-black text-[9px] uppercase tracking-widest shrink-0 self-start sm:self-auto flex items-center gap-1">
-                          👤 {currentArrangementName ? `Sequence: ${currentArrangementName}` : 'Standalone Song'}
-                        </span>
-                        {activeSetlistFolder && (
-                          <span className="px-2.5 py-1 bg-amber-500/10 border border-amber-500/25 text-amber-300 rounded-lg font-sans font-black text-[9px] uppercase tracking-widest shrink-0 self-start sm:self-auto flex items-center gap-1">
-                            📁 Set: {activeSetlistFolder}
+                        {!activeSetlistFolder ? (
+                          <span className="px-2.5 py-1 bg-indigo-500/10 border border-indigo-500/25 text-indigo-300 rounded-lg font-sans font-black text-[9px] uppercase tracking-widest shrink-0 self-start sm:self-auto flex items-center gap-1">
+                            👤 Standalone
                           </span>
+                        ) : (
+                          <>
+                            <span className="px-2.5 py-1 bg-indigo-500/10 border border-indigo-500/25 text-indigo-300 rounded-lg font-sans font-black text-[9px] uppercase tracking-widest shrink-0 self-start sm:self-auto flex items-center gap-1">
+                              👤 {currentArrangementName ? `Sequence: ${currentArrangementName}` : 'Standalone'}
+                            </span>
+                            <span className="px-2.5 py-1 bg-amber-500/10 border border-amber-500/25 text-amber-300 rounded-lg font-sans font-black text-[9px] uppercase tracking-widest shrink-0 self-start sm:self-auto flex items-center gap-1">
+                              📁 Set: {activeSetlistFolder}
+                            </span>
+                          </>
                         )}
                       </div>
                     </div>
@@ -8249,6 +8610,7 @@ Worship Setup Assistant`;
         }}
         showToast={showToast}
         setLoading={setIsLoading}
+        songs={songs}
       />
 
       {/* Keyboard Shortcuts Help Modal */}
@@ -8564,8 +8926,8 @@ Worship Setup Assistant`;
           onRemoveSongFromSet={async (setName, sId) => {
             await removeSongFromSetlist(setName, sId);
           }}
-          onCreateNewSetlist={async (setName) => {
-            await createNewSetlistFolder(setName);
+          onCreateNewSetlist={async (setName, target) => {
+            await createNewSetlistFolder(setName, target);
           }}
           isAdmin={!!(appUser && appSecret)}
           currentKey={currentKey}
@@ -8705,7 +9067,7 @@ Worship Setup Assistant`;
                   
                   const { song, forceDefaultArrangement, activeFolderOverride, arrsOverride } = pendingSongLoad;
                   await executeSongLoad(song, forceDefaultArrangement, activeFolderOverride, arrsOverride);
-                  if (activeFolderOverride) {
+                  if (activeFolderOverride !== undefined) {
                     setActiveSetlistFolder(activeFolderOverride);
                   }
                   setPendingSongLoad(null);
@@ -8736,7 +9098,8 @@ Worship Setup Assistant`;
           setLoadConfigSheetLayoutMode(sheetLayoutMode);
           setPendingSongLoad({
             song,
-            forceDefaultArrangement: false
+            forceDefaultArrangement: true,
+            activeFolderOverride: ''
           });
           setIsNavOpen(false);
         }}
@@ -8837,6 +9200,27 @@ Worship Setup Assistant`;
           );
         })}
       </div>
+
+      {/* Global Interactive Loading Overlay - prevents duplicate clicks and race conditions */}
+      {isLoading && (
+        <div 
+          id="globalLoadingOverlay"
+          className="fixed inset-0 z-[100000] bg-[#020205]/10 backdrop-blur-[0.5px] flex items-center justify-center animate-fadeIn select-none"
+          style={{ pointerEvents: 'all' }}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+        >
+          {/* Subtle spinning music note indicator for modern look and clean style */}
+          <div className="bg-slate-950/80 border border-indigo-500/30 px-4 py-2.5 rounded-full flex items-center gap-2 shadow-2xl animate-pulse">
+            <span className="w-2 h-2 rounded-full bg-indigo-500 animate-ping" />
+            <span className="text-[10px] font-mono font-bold tracking-widest text-indigo-200 uppercase">
+              Processing Database...
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

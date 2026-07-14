@@ -14,6 +14,7 @@ interface SongEditModalProps {
   showToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
   setLoading: (loading: boolean) => void;
   usedSectionNames?: string[];
+  songs: Song[];
 }
 
 export const SongEditModal: React.FC<SongEditModalProps> = ({
@@ -28,6 +29,7 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
   showToast,
   setLoading,
   usedSectionNames = [],
+  songs = [],
 }) => {
   const [title, setTitle] = useState('');
   const [artist, setArtist] = useState('');
@@ -495,6 +497,27 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
       return;
     }
 
+    // Check for duplicates (Title, Artist, Version only)
+    const normalizedTitle = title.trim().toLowerCase();
+    const normalizedArtist = artist.trim().toLowerCase();
+    const normalizedVersion = (version || '1.0').trim().toLowerCase();
+
+    const duplicateExists = songs.some(s => {
+      // If we are editing, ignore the song itself
+      if (editingSong && String(s.SongID) === String(editingSong.SongID)) {
+        return false;
+      }
+      const sTitle = s.Title.trim().toLowerCase();
+      const sArtist = (s.Artist || '').trim().toLowerCase();
+      const sVersion = (s.Version || '1.0').trim().toLowerCase();
+      return sTitle === normalizedTitle && sArtist === normalizedArtist && sVersion === normalizedVersion;
+    });
+
+    if (duplicateExists) {
+      showToast(`A song with the title "${title.trim()}", artist "${artist.trim()}", and version "${version || '1.0'}" already exists in the catalog!`, 'error');
+      return;
+    }
+
     setLoading(true);
 
     // On-Save Check (The Safety Net)
@@ -612,8 +635,25 @@ export const SongEditModal: React.FC<SongEditModalProps> = ({
       });
       const result = await res.json();
       if (result.status === 'success') {
+        // If the song was from an archived database, delete it from there!
+        if (editingSong && editingSong._sourceNodeUrl && editingSong._sourceNodeUrl !== scriptUrl) {
+          try {
+            await fetch(editingSong._sourceNodeUrl, {
+              method: 'POST',
+              body: JSON.stringify({
+                action: 'deleteSongRecord',
+                songId: String(editingSong.SongID),
+                user: appUser,
+                secret: appSecret,
+              }),
+            });
+            console.log(`Replicated song ${editingSong.SongID} to active database and deleted from archived node: ${editingSong._sourceNodeUrl}`);
+          } catch (delErr) {
+            console.warn('Failed to delete migrated song from archived database:', delErr);
+          }
+        }
         showToast(
-          editingSong ? 'Song updated successfully!' : 'Song created successfully!',
+          editingSong ? 'Song updated successfully and replicated to active database!' : 'Song created successfully!',
           'success'
         );
         onSubmitSuccess();

@@ -16,7 +16,7 @@ interface SetlistSelectorDialogProps {
     }
   ) => Promise<void>;
   onRemoveSongFromSet: (setName: string, songId: string) => Promise<void>;
-  onCreateNewSetlist: (name: string) => Promise<void>;
+  onCreateNewSetlist: (name: string, target?: 'cloud' | 'local') => Promise<void>;
   isAdmin?: boolean;
   currentKey: string;
   currentArrangementName: string;
@@ -47,6 +47,7 @@ export default function SetlistSelectorDialog({
 }: SetlistSelectorDialogProps) {
   const [newSetName, setNewSetName] = useState('');
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [pendingCreateName, setPendingCreateName] = useState<string | null>(null);
 
   // Global cursor loading state integration
   useEffect(() => {
@@ -197,15 +198,20 @@ export default function SetlistSelectorDialog({
 
   const handleCreateFolder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newSetName.trim()) return;
-    setActionLoading('create_folder');
-    try {
-      await onCreateNewSetlist(newSetName.trim());
-      setNewSetName('');
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setActionLoading(null);
+    const trimmed = newSetName.trim();
+    if (!trimmed) return;
+    if (isAdmin) {
+      setPendingCreateName(trimmed);
+    } else {
+      setActionLoading('create_folder');
+      try {
+        await onCreateNewSetlist(trimmed, 'local');
+        setNewSetName('');
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setActionLoading(null);
+      }
     }
   };
 
@@ -587,58 +593,68 @@ export default function SetlistSelectorDialog({
                         </button>
  
                         {/* 3. Reusable arrangements */}
-                        {availablePresets.map((preset) => {
-                          let pKey = currentSong.Key || 'C';
-                          let blockCount = 0;
-                          const isLocalPreset = (preset as any).isLocal;
-                          try {
-                            const parsed = JSON.parse(preset.RoadmapJSON);
-                            if (parsed) {
-                              if (parsed.key) pKey = parsed.key;
-                              if (Array.isArray(parsed.roadmap)) blockCount = parsed.roadmap.length;
-                            }
-                          } catch {}
- 
-                          return (
-                            <button
-                              key={preset.PresetName}
-                              type="button"
-                              onClick={() => {
-                                setArrangementSource(preset.PresetName);
-                                setArrangementName(preset.PresetName);
-                              }}
-                              className={`text-left p-2.5 rounded-xl border text-xs transition-all cursor-pointer flex flex-col ${
-                                arrangementSource === preset.PresetName
-                                  ? isLocalPreset
-                                    ? 'bg-amber-600/20 border-amber-400 text-amber-100 font-semibold shadow-[0_0_12px_rgba(245,158,11,0.15)]'
-                                    : 'bg-indigo-600/20 border-indigo-400 text-white font-semibold shadow-inner'
-                                  : 'bg-white/5 border-transparent text-gray-400 hover:bg-white/10'
-                              }`}
-                            >
-                              <span className="flex items-center justify-between w-full">
-                                <span className="flex items-center gap-1.5">
-                                  <span>{isLocalPreset ? '💻' : '💾'}</span>
-                                  <span>
-                                    {isLocalPreset ? 'Local Arrangement' : 'Saved Arrangement'}: {preset.PresetName}
+                        {(() => {
+                          const targetPresets = isLocalFolder ? localPresets : sharedPresets;
+                          if (targetPresets.length === 0) {
+                            return (
+                              <div className="text-gray-500 italic text-[10px] py-4 text-center bg-black/20 rounded-xl border border-dashed border-white/5">
+                                No {isLocalFolder ? 'local' : 'cloud'} arrangements saved yet for this song
+                              </div>
+                            );
+                          }
+                          return targetPresets.map((preset) => {
+                            let pKey = currentSong.Key || 'C';
+                            let blockCount = 0;
+                            const isLocalPreset = (preset as any).isLocal;
+                            try {
+                              const parsed = JSON.parse(preset.RoadmapJSON);
+                              if (parsed) {
+                                if (parsed.key) pKey = parsed.key;
+                                if (Array.isArray(parsed.roadmap)) blockCount = parsed.roadmap.length;
+                              }
+                            } catch {}
+
+                            return (
+                              <button
+                                key={preset.PresetName}
+                                type="button"
+                                onClick={() => {
+                                  setArrangementSource(preset.PresetName);
+                                  setArrangementName(preset.PresetName);
+                                }}
+                                className={`text-left p-2.5 rounded-xl border text-xs transition-all cursor-pointer flex flex-col ${
+                                  arrangementSource === preset.PresetName
+                                    ? isLocalPreset
+                                      ? 'bg-amber-600/20 border-amber-400 text-amber-100 font-semibold shadow-[0_0_12px_rgba(245,158,11,0.15)]'
+                                      : 'bg-indigo-600/20 border-indigo-400 text-white font-semibold shadow-inner'
+                                    : 'bg-white/5 border-transparent text-gray-400 hover:bg-white/10'
+                                }`}
+                              >
+                                <span className="flex items-center justify-between w-full">
+                                  <span className="flex items-center gap-1.5">
+                                    <span>{isLocalPreset ? '💻' : '💾'}</span>
+                                    <span>
+                                      {isLocalPreset ? 'Local Arrangement' : 'Saved Arrangement'}: {preset.PresetName}
+                                    </span>
+                                  </span>
+                                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold font-mono ${
+                                    isLocalPreset
+                                      ? 'bg-amber-500/20 text-amber-300'
+                                      : 'bg-emerald-500/20 text-emerald-300'
+                                  }`}>
+                                    Key: {pKey} {blockCount > 0 ? `(${blockCount} blocks)` : ''}
                                   </span>
                                 </span>
-                                <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold font-mono ${
-                                  isLocalPreset
-                                    ? 'bg-amber-500/20 text-amber-300'
-                                    : 'bg-emerald-500/20 text-emerald-300'
-                                }`}>
-                                  Key: {pKey} {blockCount > 0 ? `(${blockCount} blocks)` : ''}
+                                <span className="text-[10px] text-gray-400 font-normal mt-1 leading-normal">
+                                  {isLocalPreset 
+                                    ? 'Clones your custom arrangement saved on this device.'
+                                    : 'Clones this saved reusable arrangement snapshot directly.'
+                                  }
                                 </span>
-                              </span>
-                              <span className="text-[10px] text-gray-400 font-normal mt-1 leading-normal">
-                                {isLocalPreset 
-                                  ? 'Clones your custom arrangement saved on this device.'
-                                  : 'Clones this saved reusable arrangement snapshot directly.'
-                                }
-                              </span>
-                            </button>
-                          );
-                        })}
+                              </button>
+                            );
+                          });
+                        })()}
                       </div>
  
                       {/* Display name in setlist */}
@@ -702,6 +718,75 @@ export default function SetlistSelectorDialog({
           </button>
         </div>
       </div>
+
+      {/* Admin storage location choice prompt */}
+      {pendingCreateName && (
+        <div className="absolute inset-0 bg-black/90 backdrop-blur-md rounded-3xl z-[1000] flex flex-col items-center justify-center p-6 animate-fadeIn select-none">
+          <div className="max-w-xs text-center flex flex-col gap-5">
+            <div className="w-12 h-12 rounded-full bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center mx-auto text-xl">
+              ❓
+            </div>
+            <div>
+              <h4 className="text-xs font-black text-white uppercase tracking-wider font-sans">
+                Setlist Storage Destination
+              </h4>
+              <p className="text-[11px] text-gray-300 mt-2 leading-relaxed">
+                You are creating setlist "<span className="text-indigo-400 font-bold">{pendingCreateName}</span>". As an Admin, where would you like to publish this new folder?
+              </p>
+            </div>
+            
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  setActionLoading('create_folder');
+                  const name = pendingCreateName;
+                  setPendingCreateName(null);
+                  try {
+                    await onCreateNewSetlist(name, 'cloud');
+                    setNewSetName('');
+                  } catch (err) {
+                    console.error(err);
+                  } finally {
+                    setActionLoading(null);
+                  }
+                }}
+                className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-2 border border-indigo-500/30 shadow-[0_0_15px_rgba(99,102,241,0.25)]"
+              >
+                <span>☁️</span> Publish to Cloud (Shared)
+              </button>
+              
+              <button
+                type="button"
+                onClick={async () => {
+                  setActionLoading('create_folder');
+                  const name = pendingCreateName;
+                  setPendingCreateName(null);
+                  try {
+                    await onCreateNewSetlist(name, 'local');
+                    setNewSetName('');
+                  } catch (err) {
+                    console.error(err);
+                  } finally {
+                    setActionLoading(null);
+                  }
+                }}
+                className="w-full py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-black uppercase tracking-wider transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-2 border border-amber-500/30 shadow-[0_0_15px_rgba(245,158,11,0.2)]"
+              >
+                <span>💻</span> Save to Local (This Device)
+              </button>
+            </div>
+            
+            <button
+              type="button"
+              onClick={() => setPendingCreateName(null)}
+              className="text-gray-400 hover:text-white text-[10px] uppercase font-bold tracking-widest mt-2 cursor-pointer transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

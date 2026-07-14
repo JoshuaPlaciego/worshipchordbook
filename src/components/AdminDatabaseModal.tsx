@@ -255,50 +255,111 @@ Worship Setup Assistant`;
             {activeTab === 'cluster' ? (
               <div className="space-y-4 animate-fadeIn">
                 {/* Cluster Nodes List */}
-                <div className="space-y-2">
+                <div className="space-y-3">
                   <div className="flex justify-between items-center">
                     <label className="block text-[9px] text-purple-300 font-bold uppercase tracking-wider font-mono">
-                      Active Database Cluster Nodes ({scriptUrls.length})
+                      Federated Cluster Directory ({scriptUrls.length} total)
                     </label>
-                    <span className="text-[8px] text-emerald-400 font-mono font-bold bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
-                      Synced to Cloud
+                    <span className="text-[8px] text-emerald-400 font-mono font-bold bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full animate-pulse">
+                      ● Sync Live
                     </span>
                   </div>
-                  <div className="space-y-2">
-                    {scriptUrls.map((url, idx) => {
-                      const isPrimary = idx === 0;
-                      return (
-                        <div 
-                          key={idx} 
-                          className={`p-2.5 rounded-2xl border flex justify-between items-center gap-2.5 transition-all ${
-                            isPrimary 
-                              ? 'bg-purple-500/10 border-purple-500/30 shadow-[0_4px_15px_rgba(139,92,246,0.1)]' 
-                              : 'bg-white/2 border-white/5'
-                          }`}
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              <span className={`text-[8.5px] font-black px-2 py-0.5 rounded-lg font-mono ${
-                                isPrimary ? 'bg-purple-500 text-white' : 'bg-slate-800 text-slate-400'
-                              }`}>
-                                NODE #{idx + 1} {isPrimary ? 'PRIMARY (ACTIVE WRITE)' : 'REPLICA (READ)'}
-                              </span>
-                            </div>
-                            <p className="text-[9.5px] text-gray-400 truncate mt-1 select-all" title={url}>
-                              {url}
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveNode(idx)}
-                            className="text-red-400 hover:text-red-300 p-1.5 rounded-xl hover:bg-white/5 transition-colors cursor-pointer"
-                            title="Disconnect this node from cluster"
+
+                  {/* Active Primary Node */}
+                  <div className="space-y-1.5">
+                    <div className="text-[8.5px] font-bold text-gray-400 uppercase tracking-wider font-mono">
+                      ⚡ Primary Active Database Node
+                    </div>
+                    {scriptUrls.length > 0 ? (
+                      (() => {
+                        const url = scriptUrls[0];
+                        return (
+                          <div 
+                            className="p-2.5 rounded-2xl border bg-purple-500/10 border-purple-500/30 shadow-[0_4px_15px_rgba(139,92,246,0.15)] flex justify-between items-center gap-2.5 transition-all"
                           >
-                            🗑️
-                          </button>
-                        </div>
-                      );
-                    })}
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[8.5px] font-black px-2 py-0.5 rounded-lg font-mono bg-purple-500 text-white">
+                                  PRIMARY NODE #1
+                                </span>
+                                <span className="text-[7.5px] font-bold text-purple-300 uppercase font-mono">
+                                  ACTIVE WRITE
+                                </span>
+                              </div>
+                              <p className="text-[9.5px] text-purple-200 truncate mt-1 select-all" title={url}>
+                                {url}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveNode(0)}
+                              className="text-red-400 hover:text-red-300 p-1.5 rounded-xl hover:bg-white/5 transition-colors cursor-pointer"
+                              title="Disconnect primary node"
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        );
+                      })()
+                    ) : (
+                      <div className="p-3 bg-red-500/5 border border-red-500/20 rounded-2xl text-center text-[10px] text-red-400 italic font-medium">
+                        No active primary database node. Please configure below.
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Archived Nodes */}
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between items-center">
+                      <div className="text-[8.5px] font-bold text-gray-400 uppercase tracking-wider font-mono">
+                        📦 Archived Database Nodes ({scriptUrls.length > 1 ? scriptUrls.length - 1 : 0})
+                      </div>
+                      {scriptUrls.length > 1 && (
+                        <span className="text-[7.5px] font-bold text-emerald-400 uppercase font-mono bg-emerald-500/10 px-1.5 py-0.2 rounded">
+                          Auto-Consolidation Ready
+                        </span>
+                      )}
+                    </div>
+
+                    {scriptUrls.length > 1 ? (
+                      <div className="space-y-1.5 max-h-36 overflow-y-auto custom-scrollbar pr-0.5">
+                        {scriptUrls.slice(1).map((url, sliceIdx) => {
+                          const idx = sliceIdx + 1;
+                          return (
+                            <div 
+                              key={idx} 
+                              className="p-2 rounded-2xl border bg-slate-950/60 border-purple-500/10 hover:border-purple-500/20 flex justify-between items-center gap-2.5 transition-all"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-[8px] font-bold px-1.5 py-0.3 rounded bg-slate-800 text-slate-400 font-mono">
+                                    ARCHIVE #{idx}
+                                  </span>
+                                  <span className="text-[7px] font-bold text-gray-400 uppercase font-mono">
+                                    READ-ONLY ARCHIVE
+                                  </span>
+                                </div>
+                                <p className="text-[9px] text-gray-500 truncate mt-0.5 select-all" title={url}>
+                                  {url}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveNode(idx)}
+                                className="text-red-400 hover:text-red-300 p-1 rounded-lg hover:bg-white/5 transition-colors cursor-pointer text-[10px]"
+                                title="Disconnect archived node"
+                              >
+                                🗑️
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-slate-950/20 border border-dashed border-purple-500/10 rounded-2xl text-center text-[9px] text-gray-500 italic leading-relaxed">
+                        No archived database nodes connected. When your active database grows, add a new blank database link as Primary to automatically transition this database to the archives list.
+                      </div>
+                    )}
                   </div>
                 </div>
 
